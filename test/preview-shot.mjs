@@ -145,8 +145,16 @@ async function verifyModelmenu2(page) {
 async function armDelete(page, item) {
 	await item.hover();
 	await page.waitForTimeout(50);
-	const del = await item.$(".history-actions .history-action");
-	await del.click();
+	const armed = await item.evaluate((e) => e.classList.contains("confirming"));
+	if (armed) return; // already armed — re-arming is a no-op
+	const del = await item.evaluateHandle((e) =>
+		[...e.querySelectorAll(".history-action")].find((b) => (b.title ?? "").startsWith("Delete")) ?? null,
+	);
+	const delEl = del.asElement();
+	if (!delEl) {
+		throw new Error("armDelete: no delete action found on this history item");
+	}
+	await delEl.click();
 	await page.waitForTimeout(80);
 }
 
