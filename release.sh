@@ -70,6 +70,16 @@ preferred_remote() {
     git remote | head -n 1 || true
 }
 
+prompt_with_default() {
+    local prompt="$1" default_value="$2" answer=""
+    if [ ! -t 0 ] || [ ! -t 1 ]; then
+        printf '%s' "$default_value"
+        return
+    fi
+    read -r -p "$prompt [$default_value]: " answer
+    printf '%s' "${answer:-$default_value}"
+}
+
 confirm() {
     local prompt="$1"
     if [ "$YES" = true ]; then return 0; fi
