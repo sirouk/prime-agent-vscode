@@ -2306,3 +2306,50 @@ body.vscode-light pre.term {
 .history-item.confirming {
 	border-color: var(--pa-accent-dim);
 }
+
+.dropdown-list {
+	overscroll-behavior: contain;
+}
+
+/* ---------- install prompt banner ---------- */
+
+.install-banner { display: none; padding: 8px 10px 2px; }
+.install-banner.visible { display: block; }
+
+.install-card {
+	position: relative;
+	padding: 10px 34px 10px 12px;
+	border: 1px solid var(--pa-warn);
+	border-radius: 9px;
+	background: color-mix(in srgb, transparent 90%, var(--pa-warn) 10%);
+}
+
+.install-title { font-size: 11px; font-weight: 600; margin-bottom: 3px; }
+.install-body { font-size: 10.5px; color: var(--pa-dim); line-height: 1.4; margin-bottom: 8px; }
+
+.install-actions { display: flex; gap: 6px; }
+
+.install-cta {
+	font-size: 10.5px;
+	padding: 3px 10px;
+	border-radius: 7px;
+	background: var(--pa-accent);
+	color: #0c0c0c;
+	border: none;
+}
+
+.install-cta:hover { filter: brightness(1.08); }
+
+.install-dismiss {
+	position: absolute;
+	top: 7px;
+	right: 7px;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--pa-dim);
+}
+.install-dismiss:hover { color: var(--pa-text); background: var(--pa-raised); }

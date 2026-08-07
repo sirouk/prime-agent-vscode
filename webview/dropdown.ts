@@ -80,6 +80,8 @@ export class Dropdown {
 		}
 		this.root.appendChild(this.list);
 		this.refilter();
+		// Keep wheel gestures within the menu — no scroll-chaining into the transcript behind it.
+		this.root.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
 
 		this.anchor.appendChild(this.root);
 		this.open = true;

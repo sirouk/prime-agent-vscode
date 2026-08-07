@@ -259,6 +259,16 @@ check("flyout switches to override state", flyout.querySelector(".threshold-titl
 flyout.closest(".context-meter")?.classList.remove("visible");
 document.body.click();
 
+// --- install prompt banner ---
+check("install banner hidden initially", !document.querySelector(".install-banner.visible"));
+hostMessage({ type: "installPrompt", url: "https://github.com/PrimeIntellect-ai/prime-agent/blob/main/packages/coding-agent/docs/quickstart.md", reason: "test reason" });
+const banner = document.querySelector(".install-banner.visible");
+check("install banner appears on prompt", !!banner, document.querySelector(".install-card")?.textContent?.slice(0, 60) ?? "");
+check("banner links the quickstart", banner?.querySelector(".install-cta") !== null);
+posted.length = 0;
+banner.querySelector(".install-dismiss").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("dismiss posts and hides", !document.querySelector(".install-banner.visible") && posted.some((m) => m.type === "dismissInstallPrompt"));
+
 // --- session title with pencil rename (header) ---
 hostMessage({ type: "status", status: { ...baseStatus, sessionName: "vscode-extension" } });
 const titleWrap = document.querySelector(".session-title-wrap");

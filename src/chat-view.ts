@@ -198,6 +198,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 		case "copyConversation":
 			await controller.copyConversation();
 			return;
+		case "dismissInstallPrompt":
+			await controller.dismissInstallPrompt();
+			return;
 		case "draftChanged":
 			controller.persistDraft(message.text);
 			return;

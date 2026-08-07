@@ -306,7 +306,36 @@ let sessionParent: SessionChild | null = null;
 let sessionViewedId: string | null = null;
 let sessionSiblings: SessionChild[] = [];
 
-app.append(topbar, menu, notices, observeBanner, chatView, historyView.root, subagentsStrip, composer.root, statusStrip);
+// Install prompt banner: one persistent, dismissible card when prime-agent can't run.
+const installBanner = el("div", "install-banner");
+let installPromptShown = false;
+function renderInstallBanner(url: string, reason: string): void {
+	if (installPromptShown) return;
+	installPromptShown = true;
+	installBanner.textContent = "";
+	const card = el("div", "install-card");
+	card.appendChild(el("div", "install-title", "Prime Agent CLI not detected"));
+	card.appendChild(el("div", "install-body", `We couldn't reach prime-agent — ${reason}. Install it (takes a minute), then click retry in the sidebar.`));
+	const actions = el("div", "install-actions");
+	const guide = document.createElement("button");
+	guide.className = "install-cta";
+	guide.textContent = "View the install guide";
+	guide.addEventListener("click", () => post({ type: "openExternal", url }));
+	const dismiss = document.createElement("button");
+	dismiss.className = "install-dismiss";
+	dismiss.title = "Dismiss";
+	dismiss.appendChild(icon("close", 12));
+	dismiss.addEventListener("click", () => {
+		installBanner.classList.remove("visible");
+		post({ type: "dismissInstallPrompt" });
+	});
+	actions.append(guide);
+	card.append(actions);
+	card.appendChild(dismiss);
+	installBanner.appendChild(card);
+	installBanner.classList.add("visible");
+}
+app.append(topbar, menu, notices, installBanner, observeBanner, chatView, historyView.root, subagentsStrip, composer.root, statusStrip);
 historyView.root.style.display = "none";
 
 function showView(view: "chat" | "history"): void {
@@ -508,6 +537,9 @@ function dispatchHostMessage(message: HostToWebview): void {
 			break;
 		case "notice":
 			addNotice(message.level, message.text);
+			break;
+		case "installPrompt":
+			renderInstallBanner(message.url, message.reason);
 			break;
 		case "uiState":
 			if (message.statusText && currentStatus) {

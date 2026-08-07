@@ -108,6 +108,7 @@ export class SessionController implements vscode.Disposable {
 		this.debugLog.append("ensureStarted");
 		if (this.client?.running) return;
 		if (this.startingPromise) return this.startingPromise;
+		this.armInstallWatchdog();
 		this.startingPromise = this.start()
 			.catch((err) => {
 				this.output.appendLine(`[prime-agent] failed to start: ${String(err)}`);
@@ -117,6 +118,38 @@ export class SessionController implements vscode.Disposable {
 				this.startingPromise = null;
 			});
 		return this.startingPromise;
+	}
+
+	// ---- install prompt: one smart banner when prime-agent can't be detected ----
+
+	private installPromptDismissed(): boolean {
+		return this.context.workspaceState.get<boolean>("pa-install-prompt-dismissed", false);
+	}
+
+	async dismissInstallPrompt(): Promise<void> {
+		await this.context.workspaceState.update("pa-install-prompt-dismissed", true);
+	}
+
+	private maybeShowInstallPrompt(reason: string): void {
+		if (this.installPromptDismissed()) return;
+		this.broadcast({
+			type: "installPrompt",
+			url: "https://github.com/PrimeIntellect-ai/prime-agent/blob/main/packages/coding-agent/docs/quickstart.md",
+			reason,
+		});
+	}
+
+	private installWatchdog: NodeJS.Timeout | null = null;
+
+	/** If the agent still isn't reachable ~25s after the first attempt, recommend installing it (once). */
+	private armInstallWatchdog(): void {
+		if (this.installWatchdog) clearTimeout(this.installWatchdog);
+		this.installWatchdog = setTimeout(() => {
+			this.installWatchdog = null;
+			if (!this.client?.running) {
+				this.maybeShowInstallPrompt(`prime-agent did not become reachable after 25s (command: ${vscode.workspace.getConfiguration("primeAgent").get<string>("command", "prime-agent")})`);
+			}
+		}, 25_000);
 	}
 
 	private async start(): Promise<void> {
