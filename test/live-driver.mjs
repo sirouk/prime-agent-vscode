@@ -268,6 +268,46 @@ const server = http.createServer(async (req, res) => {
 			}
 			return send(200, { frames });
 		}
+		if (req.method === "GET" && url.pathname === "/shot") {
+			if (!frame) return send(200, { error: "no frame" });
+			const params2 = new URLSearchParams(url.search);
+			const path2 = params2.get("path") || params2.get("p") || "test/live-shot.png";
+			try {
+				const selector = params2.get("sel");
+				if (selector) {
+					// Clip from the element's webview-frame box, mapped via the webview's absolute position in the page.
+					const shotWork = await frame.evaluate((sel) => {
+						const el2 = document.querySelector(sel);
+						if (!el2) return null;
+						const r = el2.getBoundingClientRect();
+						return { x: r.x, y: r.y, width: r.width, height: r.height };
+					}, selector);
+					if (!shotWork) return send(200, { evalError: `selector not found: ${selector}` });
+					let box = { x: 0, y: 0 };
+					try {
+						const handle = typeof frame.frameElement === "function" ? await frame.frameElement() : null;
+						const box2 = handle && typeof handle.boundingBox === "function" ? await handle.boundingBox() : null;
+						if (box2) box = { x: box2.x, y: box2.y };
+					} catch {}
+					await page.screenshot({
+						path: path2,
+						animations: "disabled",
+						timeout: 12000,
+						clip: {
+							x: box.x + shotWork.x,
+							y: box.y + shotWork.y,
+							width: Math.max(20, shotWork.width),
+							height: Math.max(20, shotWork.height),
+						},
+					});
+				} else {
+					await page.screenshot({ path: path2, animations: "disabled", timeout: 12000 });
+				}
+				return send(200, { shot: path2 });
+			} catch (error) {
+				return send(200, { evalError: String(error) });
+			}
+		}
 		if (req.method === "GET" && url.pathname === "/eval") {
 			const expr = url.searchParams.get("expr") || "null";
 			if (!frame) return send(200, { value: null, error: "no frame" });

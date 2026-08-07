@@ -210,6 +210,43 @@ posted.length = 0;
 document.querySelector(".subagents-header").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("header click in parent mode posts backToParent", posted.some((m) => m.type === "backToParent"));
 
+// --- boot splash: present on cold start, gone after first live status ---
+check("boot splash visible on cold start", !!document.querySelector(".boot-splash"));
+hostMessage({ type: "status", status: { ...baseStatus, connected: true, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
+check("boot splash dismissed once connected", [...document.querySelectorAll(".boot-splash")].length === 0 || [...document.querySelectorAll(".boot-splash")].every((s) => s.className.includes("gone")));
+
+// --- send button muted until content ---
+const sendBtn = document.querySelector(".composer-dock .send-btn:not(.stop)");
+check("send muted while empty", sendBtn.className.includes("muted"));
+textarea.value = "something";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+check("send armed with input", !document.querySelector(".composer-dock .send-btn:not(.stop)").className.includes("muted"));
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("send muted again after send", document.querySelector(".composer-dock .send-btn:not(.stop)").className.includes("muted"));
+
+// --- history: stateful refresh + search filter ---
+posted.length = 0;
+document.querySelector(".history-search").value = "proj";
+document.querySelector(".history-search").dispatchEvent(new window.Event("input", { bubbles: true }));
+const visibleItems = document.querySelectorAll(".history-item");
+check("history search filters", visibleItems.length === 1 && visibleItems[0].textContent.includes("proj"));
+document.querySelector(".history-search").value = "";
+document.querySelector(".history-search").dispatchEvent(new window.Event("input", { bubbles: true }));
+check("search cleared restores both groups", document.querySelectorAll(".history-item").length === 2);
+
+// --- context meter: gear + flyout state wording ---
+const meter = document.querySelector(".context-meter");
+check("meter has gear button", !!meter.querySelector(".context-gear"));
+meter.querySelector(".context-gear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const flyout = document.querySelector(".threshold-flyout");
+check("threshold flyout opens", !!flyout && flyout.className.includes("visible"));
+check("flyout shows default state", flyout.querySelector(".threshold-title").textContent.includes("Agent auto-compact"), flyout.querySelector(".threshold-title").textContent);
+hostMessage({ type: "compactThreshold", percent: 55 });
+check("flyout switches to override state", flyout.querySelector(".threshold-title").textContent.includes("Force session auto-compact"), flyout.querySelector(".threshold-title").textContent);
+flyout.closest(".context-meter")?.classList.remove("visible");
+document.body.click();
+
 // --- paste image on a text-only model shows a composer hint ---
 // Current model is chutes/kimi with no "image" input modality (vision gate off).
 posted.length = 0;

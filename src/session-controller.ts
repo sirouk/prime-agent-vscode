@@ -155,6 +155,7 @@ export class SessionController implements vscode.Disposable {
 			this.compacting = false;
 			this.retrying = false;
 			this.changedFiles.clear();
+			this.clearThreadDiffs();
 			if (!this.intentionalStop) {
 				this.broadcast({ type: "notice", level: "warning", text: `Agent process exited (code ${code ?? "?"}). Use Restart to start it again.` });
 			}
@@ -225,6 +226,7 @@ export class SessionController implements vscode.Disposable {
 				break;
 		}
 		this.trackChangedFilesDone(event);
+		this.trackThreadDiffs(event);
 		this.broadcast({ type: "event", event });
 		// Hot path: reuse cached stats; expensive stats refresh only on transitions.
 		if (
@@ -438,6 +440,7 @@ export class SessionController implements vscode.Disposable {
 		const response = await this.client.request({ type: "new_session" });
 		if (response.success) {
 			this.changedFiles.clear();
+			this.clearThreadDiffs();
 			this.cachedMessages = [];
 			this.broadcast({ type: "sessionChildren", children: [] });
 			await this.refreshSnapshot();
@@ -759,6 +762,8 @@ export class SessionController implements vscode.Disposable {
 		const response = await this.client.request({ type: "switch_session", sessionPath }, 60_000);
 		if (response.success) {
 			this.changedFiles.clear();
+			this.clearThreadDiffs();
+			this.broadcast({ type: "sessionChildren", children: [] });
 			await this.refreshSnapshot();
 			void this.scheduleChildrenRefresh();
 			return;
@@ -825,6 +830,8 @@ export class SessionController implements vscode.Disposable {
 	 * The daemon brokers it; both clients see the same stream, both can prompt.
 	 */
 	private async attachViaDaemon(activeSessionId: string, sessionPath: string): Promise<boolean> {
+		// Clear the subagent strip immediately — a different session owns nothing from the last view.
+		this.broadcast({ type: "sessionChildren", children: [] });
 		try {
 			const sidecar = await this.ensureSidecar();
 			const result = await sidecar.attach(activeSessionId);
@@ -842,6 +849,7 @@ export class SessionController implements vscode.Disposable {
 			this.rentedState = (snapshot?.state ?? null) as RpcSessionState | null;
 			void this.refreshChildren();
 			this.changedFiles.clear();
+			this.clearThreadDiffs();
 			this.broadcast({
 				type: "snapshot",
 				messages: this.cachedMessages,
@@ -1049,6 +1057,7 @@ private async clearObservation(): Promise<void> {
 			this.output.appendLine(`[prime-agent] snapshot failed: ${String(err)}`);
 		}
 		this.restoreDraft();
+		this.broadcastThreadDiffs();
 		this.pushStatus();
 	}
 
@@ -1304,6 +1313,174 @@ private async clearObservation(): Promise<void> {
 	private trackChangedFilesDone(_event: AgentEvent): void {
 		// Reserved for future per-tool tracking; watcher coverage is sufficient for now.
 	}
+
+	// ------------------------------------------------------------------
+	// Per-thread diff panel: cumulative edit/write/bash tool-call tracking.
+	// State lives host-side so a reloaded webview rebuilds from the push that
+	// follows every snapshot.
+	// ------------------------------------------------------------------
+
+	private threadDiffFiles = new Map<string, ThreadDiffAccum>();
+	/** Staged tool_execution_start payloads keyed by toolCallId until the end event. */
+	private threadDiffPendings = new Map<string, ThreadDiffPending>();
+	private threadDiffsTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/**
+	 * Stage tool-call changes at execution start and commit them at execution
+	 * end (dropped when the tool errors). Called from onAgentEvent alongside
+	 * trackChangedFilesDone.
+	 */
+	private trackThreadDiffs(event: AgentEvent): void {
+		if (!event || typeof event.type !== "string") return;
+		if (event.type === "agent_start") {
+			// Pendings left over from an aborted run never got an end event: drop.
+			this.threadDiffPendings.clear();
+			return;
+		}
+		if (event.type === "agent_end") {
+			// End events missing (abort edge): commit best effort, then reset.
+			for (const pending of this.threadDiffPendings.values()) this.commitThreadDiff(pending);
+			this.threadDiffPendings.clear();
+			return;
+		}
+		if (event.type === "tool_execution_start") {
+			if (typeof event.toolCallId !== "string" || !event.toolCallId) return;
+			const pending = this.parseThreadDiffToolCall(event.toolName, event.args);
+			if (!pending) return;
+			if (this.threadDiffPendings.size >= THREAD_DIFF_MAX_PENDING) this.threadDiffPendings.clear();
+			this.threadDiffPendings.set(event.toolCallId, pending);
+			return;
+		}
+		if (event.type === "tool_execution_end") {
+			if (typeof event.toolCallId !== "string") return;
+			const pending = this.threadDiffPendings.get(event.toolCallId);
+			this.threadDiffPendings.delete(event.toolCallId);
+			if (!pending || event.isError) return;
+			this.commitThreadDiff(pending);
+		}
+	}
+
+	/** Normalize one edit/write/bash tool call into staged pending state. */
+	private parseThreadDiffToolCall(toolName: unknown, args: Record<string, unknown> | undefined): ThreadDiffPending | null {
+		const name = typeof toolName === "string" ? toolName.toLowerCase() : "";
+		if (!args || typeof args !== "object") return null;
+		if (name === "edit") {
+			const display = normalizeToolPath(args.path, this.workspaceRoot);
+			if (!display || !isThreadDiffPathWorthy(display)) return null;
+			const edits = Array.isArray(args.edits)
+				? args.edits
+				: typeof args.oldText === "string" || typeof args.newText === "string"
+					? [args]
+					: [];
+			let removed: string[] = [];
+			let added: string[] = [];
+			for (const rawEdit of edits) {
+				if (!rawEdit || typeof rawEdit !== "object") continue;
+				const edit = rawEdit as { oldText?: unknown; newText?: unknown };
+				if (typeof edit.oldText === "string") removed = removed.concat(splitCleanLines(edit.oldText));
+				if (typeof edit.newText === "string") added = added.concat(splitCleanLines(edit.newText));
+			}
+			if (removed.length === 0 && added.length === 0) return null;
+			return { path: display, source: "edit", hunks: [capHunkSides(removed, added, THREAD_DIFF_SIDE_CAP)] };
+		}
+		if (name === "write") {
+			const display = normalizeToolPath(args.path, this.workspaceRoot);
+			if (!display || !isThreadDiffPathWorthy(display)) return null;
+			if (typeof args.content !== "string") return null;
+			return { path: display, source: "write", hunks: [capHunkSides([], splitCleanLines(args.content), THREAD_DIFF_WRITE_CAP)] };
+		}
+		if (name === "bash") {
+			const command = typeof args.command === "string" ? args.command.trim() : "";
+			if (!command) return null;
+			return { path: "", source: "shell", hunks: [], command };
+		}
+		return null;
+	}
+
+	/** Merge a staged tool call into the cumulative per-thread state. */
+	private commitThreadDiff(pending: ThreadDiffPending): void {
+		if (pending.source === "shell") {
+			const command = pending.command ?? "";
+			if (!command) return;
+			const displayCommand =
+				command.length > THREAD_DIFF_SHELL_CMD_DISPLAY ? `${command.slice(0, THREAD_DIFF_SHELL_CMD_DISPLAY)}…` : command;
+			for (const display of extractShellReferencedPaths(command, this.workspaceRoot)) {
+				const accum = this.ensureThreadDiffFile(display);
+				if (!accum) continue;
+				if (!accum.shellHints.includes(displayCommand)) {
+					if (accum.shellHints.length >= THREAD_DIFF_MAX_SHELL_HINTS) accum.shellHints.shift();
+					accum.shellHints.push(displayCommand);
+				}
+				// Bash never overrides the content source of a file with hunks.
+				if (accum.hunks.length === 0) accum.source = "shell";
+			}
+			this.queueThreadDiffsBroadcast();
+			return;
+		}
+		const accum = this.ensureThreadDiffFile(pending.path);
+		if (!accum) return;
+		accum.source = pending.source;
+		for (const hunk of pending.hunks) {
+			if (accum.hunks.length >= THREAD_DIFF_MAX_HUNKS_PER_FILE) accum.hunks.shift();
+			accum.hunks.push(hunk);
+		}
+		this.queueThreadDiffsBroadcast();
+	}
+
+	private ensureThreadDiffFile(path: string): ThreadDiffAccum | null {
+		const existing = this.threadDiffFiles.get(path);
+		if (existing) return existing;
+		if (this.threadDiffFiles.size >= THREAD_DIFF_MAX_FILES) return null;
+		const accum: ThreadDiffAccum = { source: "shell", hunks: [], shellHints: [] };
+		this.threadDiffFiles.set(path, accum);
+		return accum;
+	}
+
+	/**
+	 * Push the cumulative per-thread diff state to all attached webviews.
+	 * Called after snapshots so a reloaded panel rebuilds from host state.
+	 */
+	broadcastThreadDiffs(): void {
+		this.postThreadDiffs();
+	}
+
+	/** Reset per-thread diff state (new session / switch / attach / agent exit). */
+	private clearThreadDiffs(): void {
+		if (this.threadDiffsTimer) {
+			clearTimeout(this.threadDiffsTimer);
+			this.threadDiffsTimer = null;
+		}
+		const had = this.threadDiffFiles.size > 0;
+		this.threadDiffFiles.clear();
+		this.threadDiffPendings.clear();
+		if (had) this.postThreadDiffs();
+	}
+
+	private queueThreadDiffsBroadcast(): void {
+		if (this.threadDiffsTimer) return;
+		this.threadDiffsTimer = setTimeout(() => {
+			this.threadDiffsTimer = null;
+			this.postThreadDiffs();
+		}, 200);
+	}
+
+	private postThreadDiffs(): void {
+		const files: ThreadDiffFile[] = [];
+		for (const [path, accum] of this.threadDiffFiles) {
+			files.push({
+				path,
+				viaSource: accum.source,
+				hunks: accum.hunks.map((hunk) => ({
+					removed: [...hunk.removed],
+					added: [...hunk.added],
+					...(hunk.note ? { note: hunk.note } : {}),
+				})),
+				...(accum.shellHints.length > 0 ? { shellHints: [...accum.shellHints] } : {}),
+			});
+		}
+		const message: HostToWebview = { type: "threadDiffs", files };
+		for (const sink of this.sinks) sink.post(message);
+	}
 }
 
 function formatNumber(value: number): string {
@@ -1457,4 +1634,116 @@ function buildMarkdownExport(
 		lines.push("");
 	}
 	return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Appended imports (kept out of the header import block so this feature's
+// edits stay strictly append-only).
+// ---------------------------------------------------------------------------
+
+import { existsSync, statSync } from "node:fs";
+import type { ThreadDiffFile, ThreadDiffHunk, ThreadDiffSource, ThreadDiffsMessage } from "./protocol.js";
+
+// ---------------------------------------------------------------------------
+// Per-thread diff accumulation helpers (module scope; host-only state lives
+// on SessionController above).
+// ---------------------------------------------------------------------------
+
+const THREAD_DIFF_MAX_FILES = 200;
+const THREAD_DIFF_MAX_HUNKS_PER_FILE = 60;
+const THREAD_DIFF_SIDE_CAP = 400;
+const THREAD_DIFF_WRITE_CAP = 240;
+const THREAD_DIFF_MAX_SHELL_HINTS = 5;
+const THREAD_DIFF_MAX_SHELL_PATHS = 8;
+const THREAD_DIFF_SHELL_CMD_DISPLAY = 160;
+const THREAD_DIFF_MAX_PENDING = 200;
+
+/** Per-file accumulated state (append-ordered, chronologically). */
+interface ThreadDiffAccum {
+	source: ThreadDiffSource;
+	hunks: ThreadDiffHunk[];
+	shellHints: string[];
+}
+
+/** Staged data from tool_execution_start, committed on a non-error end event. */
+interface ThreadDiffPending {
+	path: string;
+	source: ThreadDiffSource;
+	hunks: ThreadDiffHunk[];
+	command?: string;
+}
+
+function splitCleanLines(text: string): string[] {
+	const lines = text.split("\n");
+	if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+	return lines;
+}
+
+/** Workspace-relative display form when the path resolves inside the root. */
+function normalizeToolPath(rawPath: unknown, workspaceRoot: string): string | null {
+	if (typeof rawPath !== "string") return null;
+	let display = rawPath.trim();
+	if (display.startsWith("./")) display = display.slice(2);
+	if (!display) return null;
+	if (path.isAbsolute(display)) {
+		const rel = path.relative(workspaceRoot, display);
+		if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+			display = rel.split(path.sep).join("/");
+		}
+	}
+	return display;
+}
+
+/** Watcher parity: never surface vendored or git-internal paths on the panel. */
+function isThreadDiffPathWorthy(display: string): boolean {
+	return !display.includes("node_modules/") && !display.includes("/.git/") && !display.startsWith(".git/");
+}
+
+/** Truncate a hunk side and produce the gutter note when truncated. */
+function capHunkSides(removed: string[], added: string[], sideCap: number): ThreadDiffHunk {
+	const notes: string[] = [];
+	let keptRemoved = removed;
+	let keptAdded = added;
+	if (keptRemoved.length > sideCap) {
+		notes.push(`… (${keptRemoved.length - sideCap} more removed lines)`);
+		keptRemoved = keptRemoved.slice(0, sideCap);
+	}
+	if (keptAdded.length > sideCap) {
+		const note = `… (+${keptAdded.length - sideCap} more lines)`;
+		notes.push(note);
+		keptAdded = keptAdded.slice(0, sideCap);
+	}
+	return { removed: keptRemoved, added: keptAdded, ...(notes.length > 0 ? { note: notes.join(" ") } : {}) };
+}
+
+/**
+ * Existing-file heuristic for bash tool calls: a shell command carries no
+ * content, so a path is surfaced only when a command token plainly references
+ * an existing file inside (or outside, shown absolute) the workspace.
+ */
+function extractShellReferencedPaths(command: string, workspaceRoot: string): string[] {
+	const found: string[] = [];
+	const seen = new Set<string>();
+	for (const rawToken of command.split(/\s+/)) {
+		if (found.length >= THREAD_DIFF_MAX_SHELL_PATHS) break;
+		let token = rawToken.trim().replace(/^['"“”‘’`]+|['"“”‘’`]+$/g, "");
+		if (!token || token.length > 300 || token.startsWith("-")) continue;
+		const eqIndex = token.indexOf("=");
+		if (eqIndex > 0) token = token.slice(eqIndex + 1);
+		token = token.replace(/[;,|&<>()]+$/g, "");
+		if (!token || token.includes("://") || !/[./\\]/.test(token)) continue;
+		const absolute = path.isAbsolute(token) ? token : path.resolve(workspaceRoot, token);
+		if (seen.has(absolute)) continue;
+		let isFile = false;
+		try {
+			isFile = existsSync(absolute) && statSync(absolute).isFile();
+		} catch {
+			isFile = false;
+		}
+		if (!isFile) continue;
+		seen.add(absolute);
+		const display = normalizeToolPath(absolute, workspaceRoot) ?? absolute;
+		if (isThreadDiffPathWorthy(display)) found.push(display);
+	}
+	return found;
 }

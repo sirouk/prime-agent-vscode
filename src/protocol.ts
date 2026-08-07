@@ -294,6 +294,7 @@ export type HostToWebview =
 		}
 	| { type: "favorites"; favorites: ModelRef[] }
 	| { type: "sessionChildren"; children: SessionChild[] }
+	| ThreadDiffsMessage
 	| { type: "draft"; text: string }
 	| { type: "compactThreshold"; percent: number | null }
 	| { type: "event"; event: AgentEvent }

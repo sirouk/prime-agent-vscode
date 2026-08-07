@@ -24,24 +24,54 @@ export class HistoryView {
 		backBtn.appendChild(icon("back", 15));
 		backBtn.addEventListener("click", () => this.deps.onBack());
 		header.append(backBtn, el("span", "history-title", "Sessions in this workspace"));
+		// Search bar: client-side filter over the fetched list.
+		this.searchEl = document.createElement("input");
+		this.searchEl.className = "history-search";
+		this.searchEl.placeholder = "Search sessions…";
+		this.searchEl.setAttribute("spellcheck", "false");
+		this.searchEl.addEventListener("input", () => {
+			this.query = this.searchEl.value;
+			this.render(this.lastSessions ?? [], this.currentId);
+		});
+		this.headerEl = header;
 		this.listEl = el("div", "history-list");
-		this.root.append(header, this.listEl);
+		this.root.append(header, this.searchEl, this.listEl);
 	}
 
+	private searchEl: HTMLInputElement;
+	private headerEl: HTMLElement;
+	private lastSessions: RecentSession[] | null = null;
+	private query = "";
+	private fetching = false;
+
+	/** Keep the last render on screen while a fresh list arrives; mark subtly. */
 	showLoading(): void {
-		this.listEl.textContent = "";
-		this.listEl.appendChild(el("div", "history-empty", "Loading…"));
+		this.fetching = true;
+		this.root.classList.add("refreshing");
+		if (!this.lastSessions || this.lastSessions.length === 0) {
+			this.listEl.textContent = "";
+			this.listEl.appendChild(el("div", "history-empty", "Loading…"));
+		}
 	}
 
 	render(sessions: RecentSession[], currentId?: string): void {
+		const needle = this.query.trim().toLowerCase();
+		const filtered = needle
+			? sessions.filter((s) =>
+					[s.name, s.firstPrompt, s.cwd].some((v) => (v ?? "").toLowerCase().includes(needle)),
+				)
+			: sessions;
+		if (!needle) this.lastSessions = sessions;
+		this.currentId = currentId;
+		this.fetching = false;
+		this.root.classList.remove("refreshing");
 		this.listEl.textContent = "";
-		if (sessions.length === 0) {
-			this.listEl.appendChild(el("div", "history-empty", "No previous sessions found."));
+		if (filtered.length === 0) {
+			this.listEl.appendChild(el("div", "history-empty", needle ? `No sessions match "${needle}".` : "No previous sessions found."));
 			return;
 		}
-		this.currentId = currentId;
-		const inWorkspace = sessions.filter((s) => s.inWorkspace);
-		const others = sessions.filter((s) => !s.inWorkspace);
+		const inWorkspace = filtered.filter((s) => s.inWorkspace);
+		const others = filtered.filter((s) => !s.inWorkspace);
 		if (inWorkspace.length > 0) {
 			this.listEl.appendChild(el("div", "history-group", "This workspace"));
 			for (const session of inWorkspace) this.listEl.appendChild(this.buildItem(session, false));

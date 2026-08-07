@@ -202,9 +202,15 @@ function renderSubagentsStrip(): void {
 			const row = el("button", "subagent-row") as HTMLButtonElement;
 			row.title = `${child.runtimeKind === "subagent" ? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : (child.runtimeKind ?? "session")}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
 			const dot = el("span", `subagent-dot${child.isStreaming ? " active" : ""}`);
+			dot.title = child.isStreaming ? "active" : "idle";
 			const name = el("span", "subagent-name", child.name ?? child.id);
 			const badge = child.isStreaming ? el("span", "subagent-badge", "active") : "";
-			const suffix = el("span", "subagent-go", browsingChild || true ? "inspect ›" : "browse ›");
+			const suffix = el("span", "subagent-go", "view ›");
+			const viewing = currentStatus?.sessionId === child.activeSessionId;
+			if (viewing) {
+				row.classList.add("viewing");
+				row.title = "Currently viewing — this transcript shows this subagent";
+			}
 			row.append(dot, name, badge, suffix);
 			row.addEventListener("click", (event) => {
 				event.stopPropagation();
@@ -247,7 +253,24 @@ historyBtn.addEventListener("click", () => {
 let currentStatus: StatusSnapshot | null = null;
 let observing = false;
 
+// Boot splash: until the FIRST live connection, hide the composer and show the
+// breathing Prime Agent mark. Disconnections after that only touch the status strip.
+let everConnected = false;
+const bootSplash = el("div", "boot-splash");
+bootSplash.appendChild(el("div", "boot-splash-mark")).appendChild(butterfly(44));
+bootSplash.appendChild(el("div", "boot-splash-name", "Prime Agent"));
+bootSplash.appendChild(el("div", "boot-splash-sub", "connecting…"));
+app.appendChild(bootSplash);
+
 function applyStatus(status: StatusSnapshot): void {
+	if (!everConnected && status.connected) {
+		everConnected = true;
+		bootSplash.classList.add("gone");
+		setTimeout(() => bootSplash.remove(), 700);
+	}
+	if (currentStatus?.sessionId !== status.sessionId) {
+		renderSubagentsStrip();
+	}
 	currentStatus = status;
 	connDot.className = `conn-dot${status.connected ? (status.streaming ? " busy" : " live") : ""}`;
 	liveLabel.textContent = status.compacting
@@ -319,7 +342,7 @@ window.addEventListener("message", (messageEvent) => {
 		const t = d?.type;
 		let entry = t ?? "?";
 		if (t === "promptRejected" && typeof d?.error === "string") entry = `promptRejected:${d.error.slice(0, 80)}`;
-		else if (t === "notice" && typeof (d as { text?: string }).text === "string") entry = `notice:${((d as { text?: string }).text).slice(0, 80)}`;
+		else if (t === "notice" && typeof (d as { text?: string }).text === "string") entry = `notice:${((d as { text: string }).text).slice(0, 80)}`;
 		if (rxRing.push(entry) > 30) rxRing.shift();
 	} catch { /* ignore */ }
 	try {
@@ -448,3 +471,26 @@ if (typeof PRIME_AGENT_BUILD_REV === "string") {
 
 transcript.showWelcome();
 post({ type: "ready" });
+
+// ---------------------------------------------------------------------------
+// Per-thread diff panel (appended wiring only)
+// ---------------------------------------------------------------------------
+
+import { ThreadDiffsPanel } from "./thread-diffs.js";
+
+const threadDiffsPanel = new ThreadDiffsPanel({
+	onOpenFile: (path) => post({ type: "openFile", path }),
+});
+// Sibling of the subagents strip, floating directly above the composer.
+subagentsStrip.after(threadDiffsPanel.root);
+
+// Handled outside dispatchHostMessage so this wiring stays append-only; the
+// panel is driven purely by the host's cumulative `threadDiffs` pushes.
+window.addEventListener("message", (messageEvent) => {
+	try {
+		const data = messageEvent.data as { type?: unknown; files?: unknown } | undefined;
+		if (data && data.type === "threadDiffs") {
+			threadDiffsPanel.setFiles(data.files);
+		}
+	} catch { /* panel must never break sibling handlers */ }
+});

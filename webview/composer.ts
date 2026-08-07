@@ -32,15 +32,17 @@ export class Composer {
 	private contextWrap: HTMLElement;
 	private contextFill: HTMLElement;
 	private contextLabel: HTMLElement;
+	private contextGear: HTMLButtonElement;
 	private modelBtn: HTMLButtonElement;
 	private attachMenu: Dropdown | null = null;
 	private autocompleteEl: HTMLElement;
+	private textWrap: HTMLElement;
+	private mirror: HTMLElement;
 	private hintEl: HTMLElement | null = null;
 	private hintTimer: number | undefined;
 
 	private images: ImageAttachment[] = [];
 	private selections: SelectionAttachment[] = [];
-	private mentions: string[] = [];
 	private commands: RpcSlashCommand[] = [];
 	private streaming = false;
 	private behavior: "steer" | "followUp" = "steer";
@@ -92,17 +94,19 @@ export class Composer {
 		this.behaviorBtn.addEventListener("click", () => this.toggleBehavior());
 
 		this.contextWrap = el("div", "context-meter");
-		this.contextWrap.title = "Context window usage — click to set an auto-compact threshold for this session";
+		this.contextWrap.title = "Context window usage — hover for the gear to set an auto-compact threshold for this session";
 		this.contextFill = el("div", "context-fill");
 		this.contextLabel = el("span", "context-label", "");
-		this.contextWrap.append(this.contextFill, this.contextLabel);
-		this.contextWrap.addEventListener("click", (event) => {
+		this.contextGear = iconButton("gear", "Auto-compact threshold for this session", 10);
+		this.contextGear.classList.add("context-gear");
+		this.contextGear.addEventListener("click", (event) => {
 			event.stopPropagation();
 			this.toggleThresholdFlyout();
 		});
+		this.contextWrap.append(this.contextFill, this.contextLabel, this.contextGear);
 
 		this.sendBtn = document.createElement("button");
-		this.sendBtn.className = "send-btn";
+		this.sendBtn.className = "send-btn muted";
 		this.sendBtn.title = "Send (Enter)";
 		this.sendBtn.appendChild(icon("send", 15));
 		this.sendBtn.addEventListener("click", () => this.send());
@@ -115,7 +119,11 @@ export class Composer {
 		this.stopBtn.addEventListener("click", () => this.deps.onStop());
 
 		rail.append(attachBtn, this.modelBtn, this.behaviorBtn, el("span", "spacer"), this.contextWrap, this.stopBtn, this.sendBtn);
-		card.append(this.textarea, rail);
+		// Mentions render inline-styled via a mirrored layer behind a transparent textarea.
+		this.textWrap = el("div", "composer-text-wrap");
+		this.mirror = el("div", "composer-mirror");
+		this.textWrap.append(this.mirror, this.textarea);
+		card.append(this.textWrap, rail);
 		this.root.append(this.chipsEl, card);
 
 		this.autocompleteEl = el("div", "autocomplete");
@@ -277,7 +285,7 @@ export class Composer {
 		if (this.thresholdFlyout) return this.thresholdFlyout;
 		const panel = el("div", "threshold-flyout");
 		panel.innerHTML = "";
-		const title = el("div", "threshold-title", "Auto-compact for this session");
+		const title = el("div", "threshold-title", "");
 		title.title = "When the context window reaches this fill, Prime Agent compacts it automatically. Range: 20%–80%.";
 		const row = el("div", "threshold-row");
 		const slider = document.createElement("input");
@@ -307,11 +315,19 @@ export class Composer {
 	private renderThresholdFlyout(): void {
 		const panel = this.thresholdFlyout;
 		if (!panel) return;
+		const titleEl = panel.querySelector(".threshold-title");
 		const slider = panel.querySelector(".threshold-slider") as HTMLInputElement | null;
 		const valueEl = panel.querySelector(".threshold-value");
-		if (slider && this.compactThreshold != null) slider.value = String(this.compactThreshold);
-		if (valueEl) valueEl.textContent = this.compactThreshold != null ? `${this.compactThreshold}%` : "off";
+		if (this.compactThreshold != null) {
+			if (titleEl) titleEl.textContent = `Force session auto-compact ≥ ${this.compactThreshold}%`;
+			if (slider) slider.value = String(this.compactThreshold);
+			if (valueEl) valueEl.textContent = `${this.compactThreshold}%`;
+		} else {
+			if (titleEl) titleEl.textContent = "Agent auto-compact on (default)";
+			if (valueEl) valueEl.textContent = "off";
+		}
 		const offBtn = panel.querySelector(".threshold-off");
+		if (offBtn instanceof HTMLElement) offBtn.textContent = "use default";
 		offBtn?.classList.toggle("active", this.compactThreshold === null);
 	}
 
@@ -351,8 +367,13 @@ export class Composer {
 	}
 
 	insertMention(path: string): void {
-		if (!this.mentions.includes(path)) this.mentions.push(path);
-		this.renderChips();
+		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
+		const before = this.textarea.value.slice(0, caret);
+		const after = this.textarea.value.slice(caret);
+		const sep = before && !before.endsWith("\n") && !before.endsWith(" ") ? " " : "";
+		this.textarea.value = `${before}${sep}@${path} ${after}`;
+		const pos = before.length + sep.length + path.length + 2;
+		this.textarea.selectionStart = this.textarea.selectionEnd = pos;
 		this.autoGrow();
 		this.focus();
 	}
@@ -384,19 +405,16 @@ export class Composer {
 
 	send(): void {
 		const text = this.textarea.value.trim();
-		if (!text && this.images.length === 0 && this.selections.length === 0 && this.mentions.length === 0) return;
+		if (!text && this.images.length === 0 && this.selections.length === 0) return;
 		if (this.images.length > 0 && !this.vision) {
 			this.showHint("Dropped images: current model is text-only. Switch to a vision model or remove the chips.");
 			this.images = [];
 			this.renderChips();
 		}
-		const mentionTokens = this.mentions.map((m) => `@${m}`).join(" ");
-		const payload = mentionTokens ? `${mentionTokens} ${text}`.trim() : text;
-		this.deps.onSend(payload, this.images, this.selections);
+		this.deps.onSend(text, this.images, this.selections);
 		this.textarea.value = "";
 		this.images = [];
 		this.selections = [];
-		this.mentions = [];
 		this.renderChips();
 		this.autoGrow();
 		this.closeAutocomplete();
@@ -568,30 +586,48 @@ export class Composer {
 		}
 	}
 
+	/** Mirror the textarea with @path tokens wrapped in styled spans (HTML-escaped). */
+	private syncMirror(): void {
+		if (!this.mirror) return;
+		const text = this.textarea.value;
+		const mentionRe = /(^|[\s(`"'])@((?:[\w-]+\/)+[\w./-]*\w|[\w-]+\.[\w]{1,8})(?=$|[\s),.;:'"`]|$)/g;
+		const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+		let html = "";
+		let last = 0;
+		let match: RegExpExecArray | null;
+		while ((match = mentionRe.exec(text)) !== null) {
+			const start = match.index + match[1].length;
+			const path = match[2];
+			if (start > last) html += esc(text.slice(last, start));
+			html += `<span class="mm" title="${esc(path)}">@${esc(path)}</span>`;
+			last = start + path.length + 1;
+		}
+		if (last < text.length) html += esc(text.slice(last));
+		// A trailing newline collapses without this spacer — keep rows visible.
+		if (text.endsWith("\n") || text.length === 0) html += " ";
+		this.mirror.innerHTML = html;
+		// static offset anchor (render size parity): textarea computes height = mirror height
+		this.mirror.scrollTop = this.textarea.scrollTop;
+	}
+
 	private autoGrow(): void {
+		this.syncMirror();
 		this.textarea.style.height = "auto";
 		this.textarea.style.height = `${Math.min(this.textarea.scrollHeight, 200)}px`;
+		this.updateSendState();
+	}
+
+	private updateSendState(): void {
+		const hasContent =
+			this.textarea.value.trim().length > 0 ||
+			this.images.length > 0 ||
+			this.selections.length > 0;
+		this.sendBtn.classList.toggle("muted", !hasContent);
 	}
 
 	private renderChips(): void {
+		this.updateSendState();
 		this.chipsEl.textContent = "";
-		for (const mention of this.mentions) {
-			const chip = el("div", "compose-chip mention");
-			chip.title = mention;
-			chip.appendChild(icon("file", 12));
-			const part = mention.includes("/") ? mention.slice(mention.lastIndexOf("/") + 1) : mention;
-			chip.appendChild(el("span", "chip-label", `@${part}`));
-			const remove = el("button", "chip-remove");
-			remove.appendChild(icon("close", 11));
-			remove.addEventListener("click", (event) => {
-				event.stopPropagation();
-				this.mentions = this.mentions.filter((m) => m !== mention);
-				this.renderChips();
-			});
-			chip.appendChild(remove);
-			chip.addEventListener("click", () => this.deps.onOpenFile(mention));
-			this.chipsEl.appendChild(chip);
-		}
 		for (const sel of this.selections) {
 			const chip = el("div", "compose-chip");
 			chip.title = `${sel.path} lines ${sel.startLine}-${sel.endLine}`;
@@ -749,15 +785,13 @@ export class Composer {
 			this.textarea.value = item.insert;
 			this.textarea.selectionStart = this.textarea.selectionEnd = item.insert.length;
 		} else {
+			// Inline mention: the @token lives IN the text (styled via the mirror layer).
 			const before = this.textarea.value.slice(0, this.acMentionStart);
 			const after = this.textarea.value.slice(caret);
 			const path = item.insert;
-			if (!this.mentions.includes(path)) this.mentions.push(path);
-			this.renderChips();
 			const tail = after.replace(/^\s+/, "");
-			const glue = tail && before && !before.endsWith(" ") ? " " : "";
-			this.textarea.value = `${before}${glue}${tail}`;
-			const pos = before.length + glue.length;
+			this.textarea.value = `${before}@${path}${tail ? " " : ""}${tail}`;
+			const pos = before.length + path.length + 2;
 			this.textarea.selectionStart = this.textarea.selectionEnd = pos;
 		}
 		this.closeAutocomplete();

@@ -1,0 +1,189 @@
+/* Prime Agent chat UI — floating panels above the composer.
+   Thread diff panel: sibling of the subagents strip, same visual family.
+   Loaded via `@import "panels.css";` from main.css (import line owned elsewhere). */
+
+/* ---------- thread diff panel (floats above the composer) ---------- */
+
+.td-panel {
+	display: none;
+	flex-direction: column;
+	font-size: 10.5px;
+	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
+	border-bottom: 1px solid var(--pa-border-faint, var(--pa-border));
+	background: color-mix(in srgb, transparent 60%, var(--pa-raised, var(--pa-surface)) 40%);
+	max-height: 280px;
+	overflow-y: auto;
+}
+
+.td-panel.visible {
+	display: flex;
+}
+
+.td-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	font-size: 10px;
+	color: var(--pa-dim);
+	width: 100%;
+	text-align: left;
+}
+
+.td-header:hover {
+	color: var(--pa-accent);
+}
+
+.td-caret {
+	font-size: 8px;
+}
+
+.td-counts {
+	margin-left: auto;
+	display: inline-flex;
+	gap: 6px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 9.5px;
+}
+
+.td-counts .add {
+	color: color-mix(in srgb, currentColor 30%, var(--pa-accent) 70%);
+}
+
+.td-counts .del {
+	color: color-mix(in srgb, currentColor 30%, var(--pa-error) 70%);
+}
+
+.td-list {
+	display: flex;
+	flex-direction: column;
+	padding: 0 4px 4px;
+}
+
+.td-file {
+	display: flex;
+	flex-direction: column;
+}
+
+.td-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 3px 8px;
+	border-radius: 6px;
+	font-size: 10.5px;
+	text-align: left;
+}
+
+.td-row:hover {
+	background: var(--pa-raised, var(--pa-surface));
+}
+
+.td-row-caret {
+	font-size: 8px;
+	color: var(--pa-faint, var(--pa-dim));
+	flex-shrink: 0;
+}
+
+.td-via {
+	font-size: 8.5px;
+	border: 1px solid var(--pa-border);
+	border-radius: 7px;
+	padding: 0 5px;
+	color: var(--pa-dim);
+	flex-shrink: 0;
+}
+
+.td-via.edit,
+.td-via.write {
+	color: var(--pa-accent);
+	border-color: var(--pa-accent-dim);
+}
+
+.td-via.shell {
+	color: var(--pa-warn);
+	border-color: color-mix(in srgb, currentColor 70%, var(--pa-warn) 30%);
+}
+
+.td-path {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10.5px;
+}
+
+.td-open {
+	font-size: 9.5px;
+	color: var(--pa-faint, var(--pa-dim));
+	flex-shrink: 0;
+}
+
+.td-row:hover .td-open,
+.td-open:hover {
+	color: var(--pa-accent);
+}
+
+.td-detail {
+	margin: 2px 6px 7px;
+	border: 1px solid var(--pa-border);
+	border-radius: 6px;
+	overflow-x: auto;
+	overflow-y: auto;
+	max-height: 240px;
+	background: color-mix(in srgb, transparent 50%, var(--pa-surface) 50%);
+}
+
+/* Hunk lines reuse the transcript's .diff-line colors, but scroll sideways
+   instead of wrapping so alignment stays readable. */
+.td-detail .diff-line,
+.td-detail .diff-text {
+	white-space: pre;
+	word-break: normal;
+}
+
+.td-detail .diff-text {
+	min-height: 1em;
+}
+
+.td-gap {
+	font-size: 9px;
+	line-height: 1.1;
+	color: var(--pa-dim);
+	text-align: center;
+	user-select: none;
+	border-top: 1px dashed var(--pa-border-faint, var(--pa-border));
+}
+
+.td-note {
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 9.5px;
+	color: var(--pa-dim);
+	padding: 1px 8px;
+}
+
+.td-shell {
+	font-size: 10px;
+	color: var(--pa-dim);
+	padding: 3px 8px;
+	line-height: 1.45;
+}
+
+.td-shell + .td-shell {
+	border-top: 1px dashed var(--pa-border-faint, var(--pa-border));
+}
+
+.td-shell-cmd {
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10px;
+	color: var(--pa-warn);
+	white-space: pre-wrap;
+	word-break: break-all;
+}
+
+.td-empty {
+	font-size: 10px;
+	color: var(--pa-dim);
+	padding: 4px 8px;
+}

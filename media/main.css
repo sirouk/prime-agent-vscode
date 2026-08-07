@@ -1,3 +1,4 @@
+@import "panels.css";
 /* Prime Agent VS Code chat UI.
    Brand language: deep-neutral surfaces, a single Prime Intellect green accent,
    compact 13px rhythm, rounded cards, hairline borders. */
@@ -935,12 +936,44 @@ details.thinking .thinking-body {
 	box-shadow: 0 0 0 1px color-mix(in srgb, transparent 55%, var(--pa-accent) 45%);
 }
 
+.composer-text-wrap {
+	position: relative;
+	width: 100%;
+}
+
+.composer-mirror {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	white-space: pre-wrap;
+	word-wrap: break-word;
+	font-family: inherit;
+	font-size: 12.5px;
+	line-height: 1.5;
+	padding: 2px 2px 0;
+	color: var(--pa-text, var(--vscode-input-foreground));
+	pointer-events: none;
+	z-index: 1;
+}
+
+.composer-mirror .mm {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+	border-radius: 4px;
+	padding: 0 2px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.93em;
+}
+
 .composer-card textarea {
+	position: relative;
+	z-index: 2;
 	width: 100%;
 	resize: none;
 	border: none;
 	background: none;
-	color: var(--pa-text, var(--vscode-input-foreground));
+	color: transparent;
+	caret-color: var(--pa-text, var(--vscode-input-foreground));
 	font-family: inherit;
 	font-size: 12.5px;
 	padding: 2px 2px 0;
@@ -1613,16 +1646,20 @@ body.vscode-light pre.term {
 	align-items: center;
 	justify-content: flex-end;
 	gap: 6px;
-	margin-top: 2px;
+	margin-top: 3px;
 	padding-right: 2px;
 	font-size: 9.5px;
 	color: var(--pa-faint);
+}
+
+.user-footer .uf-icon {
 	opacity: 0;
 	transition: opacity 0.12s ease;
 }
 
-.row-user:hover .user-footer,
-.user-footer:focus-within {
+.row-user:hover .user-footer .uf-icon,
+.user-footer:focus-within .uf-icon,
+.user-footer:hover .uf-icon {
 	opacity: 1;
 }
 
@@ -1669,8 +1706,11 @@ body.vscode-light pre.term {
 	top: 50%;
 	transform: translateY(-50%);
 	display: inline-flex;
+	align-items: center;
+	justify-content: center;
 	width: 16px;
 	height: 16px;
+	padding: 0;
 	border-radius: 4px;
 	color: var(--pa-faint);
 	opacity: 0;
@@ -1795,4 +1835,283 @@ body.vscode-light pre.term {
 
 .tool:hover .tool-copy-all {
 	opacity: 1;
+}
+
+/* ---------- subagents strip (floats above the composer) ---------- */
+
+.subagents-strip {
+	display: none;
+	flex-direction: column;
+	font-size: 10.5px;
+	border-top: 1px solid var(--pa-border-faint);
+	border-bottom: 1px solid var(--pa-border-faint);
+	background: color-mix(in srgb, transparent 60%, var(--pa-raised) 40%);
+	max-height: 180px;
+	overflow-y: auto;
+}
+
+.subagents-strip.visible {
+	display: flex;
+}
+
+.subagents-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	font-size: 10px;
+	color: var(--pa-dim);
+	width: 100%;
+	text-align: left;
+}
+
+.subagents-header:hover {
+	color: var(--pa-accent);
+}
+
+.subagents-caret {
+	font-size: 8px;
+}
+
+.subagents-back {
+	color: var(--pa-accent);
+	font-weight: 600;
+}
+
+.subagents-sep {
+	flex: 0 0 auto;
+	border-left: 1px solid var(--pa-border);
+	height: 10px;
+}
+
+.subagents-list {
+	display: flex;
+	flex-direction: column;
+	padding: 0 4px 4px;
+}
+
+.subagent-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 3px 8px;
+	border-radius: 6px;
+	font-size: 10.5px;
+	text-align: left;
+}
+
+.subagent-row:hover {
+	background: var(--pa-raised);
+}
+
+.subagent-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--pa-faint);
+	flex-shrink: 0;
+}
+
+.subagent-dot.active {
+	background: var(--pa-accent);
+	box-shadow: 0 0 4px var(--pa-accent-glow);
+}
+
+.subagent-name {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.subagent-badge {
+	font-size: 8.5px;
+	color: var(--pa-accent);
+	border: 1px solid var(--pa-accent-dim);
+	border-radius: 7px;
+	padding: 0 5px;
+}
+
+.subagent-go {
+	font-size: 9px;
+	color: var(--pa-faint);
+}
+
+.subagent-row:hover .subagent-go {
+	color: var(--pa-accent);
+}
+
+/* ---------- tool pills + distinct shell/iPython cards ---------- */
+
+.tool-pill {
+	display: inline-flex;
+}
+
+.tool-pill.done,
+.tool-pill.error {
+	display: none;
+}
+
+/* shell call: terminal chrome — dark strip, green prompt, mono, slightly sunken */
+.tool[data-tool-name="bash"] .tool-body .tool-section:first-of-type pre.term {
+	background: var(--pa-shell-bg, #0b0e0b);
+	border: 1px solid var(--pa-border);
+	border-radius: 8px;
+	padding: 7px 9px;
+	font-size: 10.5px;
+	line-height: 1.5;
+}
+
+.tool[data-tool-name="bash"] .tool-section-label {
+	color: var(--pa-accent);
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 9.5px;
+}
+
+.tool[data-tool-name="bash"] .term-prompt {
+	color: var(--pa-accent);
+	font-weight: 700;
+}
+
+/* ipython call: kernel vibe — subtle green left rule */
+.tool[data-tool-name="ipython"] .tool-section:first-of-type pre {
+	border-left: 2px solid var(--pa-accent-dim);
+	border-radius: 0 6px 6px 0;
+}
+
+/* ---------- tiny context gear ---------- */
+
+.context-gear {
+	position: absolute;
+	top: 4px;
+	right: -6px;
+	transform: none;
+	width: 14px;
+	height: 14px;
+	border-radius: 4px;
+	color: var(--pa-faint);
+	opacity: 0;
+	transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.context-meter:hover .context-gear,
+.context-gear:focus-visible,
+.context-meter:has(.threshold-flyout.visible) .context-gear {
+	opacity: 1;
+}
+
+.context-gear:hover {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}
+
+/* ---------- subagent rows: subtle indent + viewing highlight + pulse ---------- */
+
+.subagents-list {
+	margin-left: 10px;
+	border-left: 1px solid var(--pa-border-faint, color-mix(in srgb, transparent 60%, var(--pa-border) 40%));
+	padding-left: 6px;
+}
+
+.subagent-row.viewing {
+	background: var(--pa-accent-dim);
+}
+
+.subagent-row.viewing .subagent-name {
+	color: var(--pa-accent);
+	font-weight: 600;
+}
+
+.subagent-dot.active {
+	animation: subagent-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes subagent-pulse {
+	0%, 100% { opacity: 1; box-shadow: 0 0 3px var(--pa-accent-dim); }
+	50% { opacity: 0.55; box-shadow: 0 0 0 transparent; }
+}
+
+/* ---------- muted send until there is content ---------- */
+
+.send-btn.muted {
+	background: transparent;
+	color: var(--pa-dim);
+	border-color: transparent;
+	opacity: 0.8;
+}
+
+.send-btn.muted:hover {
+	background: var(--pa-raised);
+	color: var(--pa-text);
+	border-color: transparent;
+}
+
+/* ---------- boot splash ---------- */
+
+.boot-splash {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	background: var(--pa-surface, rgba(15, 15, 15, 0.92));
+	z-index: 120;
+	transition: opacity 0.55s ease;
+}
+
+.boot-splash.gone {
+	opacity: 0;
+	pointer-events: none;
+}
+
+.boot-splash-mark svg {
+	opacity: 0.9;
+	animation: boot-breathe 1.8s ease-in-out infinite;
+}
+
+.boot-splash-name {
+	font-size: 15px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	animation: boot-breathe 1.8s ease-in-out infinite;
+}
+
+.boot-splash-sub {
+	font-size: 11px;
+	color: var(--pa-dim);
+}
+
+@keyframes boot-breathe {
+	0%, 100% { opacity: 0.35; }
+	50% { opacity: 1; }
+}
+
+/* ---------- history search + stateful refresh ---------- */
+
+.history-search {
+	margin: 0 10px 6px;
+	padding: 4px 8px;
+	font-size: 11px;
+	background: var(--vscode-input-background, var(--pa-surface-2));
+	border: 1px solid var(--pa-border);
+	border-radius: 7px;
+	color: var(--pa-text);
+	outline: none;
+}
+
+.history-search::placeholder {
+	color: var(--pa-faint);
+	opacity: 0.75;
+	font-size: 10.5px;
+}
+
+.history-search:focus {
+	border-color: var(--pa-accent-dim);
+}
+
+.history-view.refreshing .history-list {
+	opacity: 0.55;
+	transition: opacity 0.15s ease;
 }
