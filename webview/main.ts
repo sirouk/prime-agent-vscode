@@ -315,8 +315,12 @@ const rxRing: string[] = [];
 
 window.addEventListener("message", (messageEvent) => {
 	try {
-		const t = (messageEvent.data as { type?: string })?.type;
-		if (typeof t === "string" && rxRing.push(t) > 30) rxRing.shift();
+		const d = messageEvent.data as { type?: string; error?: string; status?: { streaming?: boolean } } | undefined;
+		const t = d?.type;
+		let entry = t ?? "?";
+		if (t === "promptRejected" && typeof d?.error === "string") entry = `promptRejected:${d.error.slice(0, 80)}`;
+		else if (t === "notice" && typeof (d as { text?: string }).text === "string") entry = `notice:${((d as { text?: string }).text).slice(0, 80)}`;
+		if (rxRing.push(entry) > 30) rxRing.shift();
 	} catch { /* ignore */ }
 	try {
 		dispatchHostMessage(messageEvent.data as HostToWebview);

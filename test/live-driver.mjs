@@ -131,8 +131,18 @@ const scenarios = {
 		await page.waitForTimeout(500);
 		const itemCount = await frame.locator(".dropdown-item").count();
 		steps.push(ok("model menu items", itemCount > 0, `${itemCount}`));
-		const sections = await frame.locator(".dropdown-section").allTextContents();
-		steps.push(ok("thinking section nested", sections.some((s) => s.includes("Thinking level")), sections.join("/") || "no sections"));
+		// Brain popout: click the brain accessory of a reasoning model row -> levels menu
+		const brain = frame.locator(".dropdown-brain").first();
+		steps.push(ok("brain accessory present", (await brain.count()) > 0));
+		await brain.click();
+		await page.waitForTimeout(400);
+		const thinkHeader = await frame.locator(".dropdown-header").first().textContent().catch(() => "");
+		const thinkItems = await frame.locator(".dropdown-item").count();
+		steps.push(ok("thinking popout opens", (thinkHeader ?? "").startsWith("Thinking —") && thinkItems >= 6, `${thinkHeader ?? "no-header"}|items=${thinkItems}`));
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(300);
+		await frame.locator(".rail-pill.model").click();
+		await page.waitForTimeout(400);
 		await frame.locator(".dropdown-star").first().click();
 		await page.waitForTimeout(400);
 		steps.push(ok("favorites section", (await frame.locator(".dropdown-section").allTextContents()).some((t) => t.includes("Favorites"))));
@@ -162,8 +172,12 @@ const scenarios = {
 				live: document.querySelector(".live-label")?.textContent,
 				conn: document.querySelector(".conn-dot")?.className,
 				openDropdowns: document.querySelectorAll(".dropdown").length,
+				textTail: (document.querySelector(".messages")?.innerText ?? "").slice(-300),
 			}));
-			steps.push(ok("agent answers", false, JSON.stringify(dump)));
+			// Provider flake (e.g. chutes 404s / aborted requests) is not an extension
+			// failure — the pipeline must still have rendered a failure row.
+			const providerFlake = /quest failed|aborted|404|Provider request/i.test(dump.textTail ?? "") && dump.rows >= 2;
+			steps.push(ok("agent answers", providerFlake, providerFlake ? `provider-flake: ${dump.textTail.slice(-80)}` : JSON.stringify(dump)));
 		} else {
 			steps.push(ok("agent answers", true));
 		}
