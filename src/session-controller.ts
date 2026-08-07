@@ -818,7 +818,40 @@ export class SessionController implements vscode.Disposable {
 
 	async listHistory(): Promise<void> {
 		const sessions = await listRecentSessions(this.workspaceRoot, 25);
+		// Enrich with live running state when the daemon sidecar is reachable.
+		try {
+			if (this.sidecar === null || this.sidecar.connected) {
+				const sidecar = await this.ensureSidecar();
+				const live = await sidecar.list(true);
+				const runningByActive = new Map<string, boolean>();
+				const runningById = new Map<string, boolean>();
+				for (const l of live) {
+					const l2 = l as SessionSummaryRef & { isStreaming?: boolean; activity?: string };
+					const running = Boolean(l2.isStreaming) || l2.activity === "working";
+					if (l.activeSessionId) runningByActive.set(l.activeSessionId, running);
+					if (l.sessionId) runningById.set(l.sessionId, running);
+					if (l.id) runningById.set(l.id, running);
+				}
+				for (const s of sessions) {
+					s.running = runningById.get(s.id) ?? runningByActive.get(s.id) ?? false;
+				}
+			}
+		} catch {
+			// daemon unavailable — files alone still work
+		}
 		this.broadcast({ type: "history", sessions });
+	}
+
+	/** Stop a live session from the history view (daemon abort on its active id). */
+	async stopSession(_sessionPath: string, activeSessionId: string): Promise<void> {
+		try {
+			const sidecar = await this.ensureSidecar();
+			await sidecar.abort(activeSessionId);
+			this.broadcast({ type: "notice", level: "info", text: "Stop requested for that session." });
+						void this.listHistory();
+		} catch (err) {
+			this.broadcast({ type: "notice", level: "error", text: `Could not stop the session: ${err instanceof Error ? err.message : String(err)}` });
+		}
 	}
 
 	async pickModelQuickPick(): Promise<void> {

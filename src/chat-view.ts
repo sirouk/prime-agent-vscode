@@ -192,6 +192,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 		case "renameHistorySession":
 			await controller.renameHistorySession(message.path, message.sessionId, message.name);
 			return;
+		case "stopSession":
+			await controller.stopSession(message.path, message.sessionId);
+			return;
 		case "backToParent":
 			await controller.backToParent();
 			return;

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- History rows show a subtle pulsing dot when a session is actively running, ordered hover actions: stop → rename → delete
+
+
 ## [Unreleased]
 
 - Session names always surface from the end of the session file (renames anywhere show up immediately)

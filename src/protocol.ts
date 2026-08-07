@@ -247,6 +247,7 @@ export type WebviewToHost =
 	| { type: "dismissInstallPrompt" }
 	| { type: "renameSession"; name: string }
 	| { type: "renameHistorySession"; path: string; sessionId: string; name: string }
+	| { type: "stopSession"; path: string; sessionId: string }
 	| { type: "draftChanged"; text: string }
 	| { type: "setCompactThreshold"; percent: number | null }
 	| { type: "openExternal"; url: string };
@@ -291,6 +292,8 @@ export interface RecentSession {
 	timestamp: string;
 	/** Filesystem mtime in ms — the true "last activity" signal (renames/forks move it). */
 	modifiedMs?: number;
+	/** True when the daemon reports this session is actively streaming rn. */
+	running?: boolean;
 	name?: string;
 	firstPrompt?: string;
 	inWorkspace: boolean;

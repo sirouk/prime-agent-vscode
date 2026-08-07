@@ -206,6 +206,9 @@ const historyView = new HistoryView({
 	onRename: (path, sessionId, name) => {
 		post({ type: "renameHistorySession", path, sessionId, name });
 	},
+	onStop: (path, sessionId) => {
+		post({ type: "stopSession", path, sessionId });
+	},
 	onBack: () => showView("chat"),
 });
 

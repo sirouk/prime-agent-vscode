@@ -2361,3 +2361,24 @@ body.vscode-light pre.term {
 	color: var(--pa-dim);
 }
 .install-dismiss:hover { color: var(--pa-text); background: var(--pa-raised); }
+
+/* ---------- running mark for live-history rows ---------- */
+
+.running-mark {
+	display: inline-flex;
+	align-items: center;
+	margin-left: 4px;
+}
+
+.running-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--pa-accent);
+	animation: running-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes running-pulse {
+	0%, 100% { opacity: 0.35; transform: scale(0.85); }
+	50% { opacity: 1; transform: scale(1); }
+}

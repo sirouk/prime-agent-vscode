@@ -291,6 +291,31 @@ posted.length = 0;
 banner.querySelector(".install-dismiss").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("dismiss posts and hides", !document.querySelector(".install-banner.visible") && posted.some((m) => m.type === "dismissInstallPrompt"));
 
+// --- history: running indicator + stop/rename/delete ordering ---
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "run-1", path: "/tmp/run.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "live worker", inWorkspace: true, running: true },
+		{ id: "idle-1", path: "/tmp/idle.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "quiet archive", inWorkspace: true },
+	],
+});
+const runRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("live worker"));
+check("running row shows the animated mark", !!runRow.querySelector(".running-dot"));
+const idleRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("quiet archive"));
+check("idle row has no running mark", !idleRow.querySelector(".running-dot"));
+const actTitles = [...runRow.querySelectorAll(".history-action")].map((b) => b.title);
+check("actions ordered stop -> rename -> delete", actTitles[0].startsWith("Stop") && actTitles.some((t) => t.startsWith("Rename")) && actTitles.some((t) => t.startsWith("Delete")), actTitles.join("|"));
+posted.length = 0;
+[...runRow.querySelectorAll(".history-action")].find((b) => b.title.startsWith("Stop")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("stop posts stopSession", posted.some((m) => m.type === "stopSession" && m.sessionId === "run-1"));
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "hist-a", path: "/tmp/a.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "local chat", inWorkspace: true },
+		{ id: "hist-b", path: "/tmp/b.jsonl", cwd: "/other/proj", timestamp: new Date().toISOString(), firstPrompt: "work on proj", inWorkspace: false },
+	],
+});
+
 // --- session title with pencil rename (header) ---
 hostMessage({ type: "status", status: { ...baseStatus, sessionName: "vscode-extension" } });
 const titleWrap = document.querySelector(".session-title-wrap");

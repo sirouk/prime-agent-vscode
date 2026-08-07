@@ -9,6 +9,7 @@ export interface HistoryDeps {
 	onResume: (path: string, sessionId: string) => void;
 	onDelete: (path: string, sessionId: string) => void;
 	onRename: (path: string, sessionId: string, name: string) => void;
+	onStop: (path: string, sessionId: string) => void;
 	onBack: () => void;
 }
 
@@ -133,8 +134,26 @@ export class HistoryView {
 				relativeTime(session.modifiedMs != null ? new Date(session.modifiedMs).toISOString() : session.timestamp),
 			),
 		);
+		// Running session: animated status dot next to its name.
+		if (session.running && !isCurrent) {
+			const run = el("span", "running-mark") as HTMLElement;
+			run.title = "Running right now";
+			run.appendChild(el("span", "running-dot"));
+			top.appendChild(run);
+		}
 		const actions = el("div", "history-actions");
 		if (!isCurrent) {
+			if (session.running) {
+				const stop = document.createElement("button");
+				stop.className = "history-action";
+				stop.title = "Stop this session (aborts the live run)";
+				stop.appendChild(icon("stop", 10));
+				stop.addEventListener("click", (event) => {
+					event.stopPropagation();
+					this.deps.onStop(session.path, session.id);
+				});
+				actions.appendChild(stop);
+			}
 			const rename = document.createElement("button");
 			rename.className = "history-action";
 			rename.title = "Rename session";
