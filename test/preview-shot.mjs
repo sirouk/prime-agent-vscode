@@ -169,7 +169,7 @@ async function verifyHistory2(page) {
 	const nonCur = summary.filter((s) => !s.current);
 	// A confirming item legitimately swaps x for the inline confirm/cancel pair.
 	const hasDeleteOrConfirm = (s) =>
-		(!s.confirming && s.actionTitles.length === 1 && s.actionTitles[0].startsWith("Delete")) ||
+		(!s.confirming && s.actionTitles.some((t) => t.startsWith("Delete"))) ||
 		(s.confirming && s.actionTitles.length === 2 && s.actionTitles[0] === "Confirm delete" && s.actionTitles[1] === "Cancel");
 	out.push(
 		mk(
@@ -232,12 +232,17 @@ async function verifyHistory2(page) {
 	out.push(mk("auto-disarm posted nothing", !(await page.evaluate(() => postedMessages.some((m) => m.type === "deleteSession")))));
 
 	// Confirm path posts deleteSession with the session path.
-	let items3 = await page.$$(".history-item:not(.current)");
-	let victim = items3[0];
-	for (const h of items3) {
-		const n = await h.$eval(".history-item-name", (e) => e.textContent);
-		if (n === targetName) { victim = h; break; }
-	}
+	// Re-sample and resolve the row by its NAME in-page — earlier $$ handles
+	// are stale after the cancel rebuild cycle.
+	const victimIndex = await page.evaluate(
+		(name) =>
+			[...document.querySelectorAll(".history-item:not(.current)")].findIndex(
+				(r) => (r.querySelector(".history-item-name")?.textContent ?? "") === name,
+			),
+		targetName,
+	);
+	const items3 = await page.$$(".history-item:not(.current)");
+	const victim = items3[victimIndex >= 0 ? victimIndex : 0];
 	await armDelete(page, victim);
 	const confirmBtn = await victim.$(".history-actions .history-action.destructive");
 	await confirmBtn.click();

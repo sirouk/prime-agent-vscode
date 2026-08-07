@@ -463,6 +463,9 @@ check("chip click posts openFile", !!openFileMsg && openFileMsg.path === "src/a.
 // --- history delete: inline confirm posts deleteSession ---
 const historyBtnAgain = [...document.querySelectorAll(".icon-btn")].find((b) => b.title === "Sessions in this workspace");
 historyBtnAgain.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+// Search must be cleared BEFORE the fixture: the needle blocks lastSessions updates.
+document.querySelector(".history-search").value = "";
+document.querySelector(".history-search").dispatchEvent(new window.Event("input", { bubbles: true }));
 hostMessage({
 	type: "history",
 	sessions: [
@@ -470,8 +473,6 @@ hostMessage({
 		{ id: "sess-b", path: "/tmp/b.jsonl", cwd: "/other/proj", timestamp: new Date().toISOString(), firstPrompt: "work on proj", inWorkspace: false },
 	],
 });
-document.querySelector(".history-search").value = "";
-document.querySelector(".history-search").dispatchEvent(new window.Event("input", { bubbles: true }));
 const delItem = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("local chat"));
 posted.length = 0;
 [...delItem.querySelectorAll(".history-action")].find((b) => (b.title ?? "").startsWith("Delete")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
