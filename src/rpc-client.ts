@@ -19,6 +19,8 @@ export interface RpcClientOptions {
 	cwd?: string;
 	/** Extra environment variables */
 	env?: Record<string, string>;
+	/** Optional wire trace hook invoked for every parsed inbound record (types only). */
+	onWire?: (summary: string) => void;
 }
 
 interface PendingRequest {
@@ -130,6 +132,9 @@ export class RpcClient extends EventEmitter {
 			this.emit("protocolError", line);
 			return;
 		}
+		this.options.onWire?.(
+			`<- ${String(parsed.type)}${parsed.type === "response" ? `/${String(parsed.command)} success=${String(parsed.success)}` : ""}`,
+		);
 
 		if (parsed.type === "response") {
 			const id = parsed.id as string | undefined;
@@ -184,6 +189,7 @@ export class RpcClient extends EventEmitter {
 
 	private writeLine(line: string): void {
 		try {
+			this.options.onWire?.(`-> ${line.slice(0, 140)}`);
 			this.process?.stdin?.write(`${line}\n`);
 		} catch (err) {
 			this.emit("protocolError", err);

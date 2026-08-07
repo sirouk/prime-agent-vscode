@@ -1,0 +1,3 @@
+(node:2938) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+LIVE DRIVER READY on http://127.0.0.1:7321 model=chutes/zai-org/GLM-4.7:off profile=/var/folders/v2/2ppjynxs689dkprm2gnhf1dh0000gn/T/pa-live-profile-0cQB8S hostLog=/var/folders/v2/2ppjynxs689dkprm2gnhf1dh0000gn/T/pa-live-host-1786044870642.log

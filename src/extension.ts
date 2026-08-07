@@ -2,6 +2,7 @@
  * Prime Agent VS Code extension entry point.
  */
 
+import * as fs from "node:fs";
 import * as vscode from "vscode";
 import { ChatPanel, ChatViewProvider } from "./chat-view.js";
 import { GitHeadContentProvider, SessionController } from "./session-controller.js";
@@ -9,6 +10,14 @@ import { GitHeadContentProvider, SessionController } from "./session-controller.
 let controller: SessionController | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
+	const marker = process.env.PRIME_AGENT_VSCODE_LOG;
+	if (marker) {
+		try {
+			fs.appendFileSync(marker, `activate ${Date.now()}\n`);
+		} catch {
+			// ignore
+		}
+	}
 	const output = vscode.window.createOutputChannel("Prime Agent");
 	controller = new SessionController(context, output);
 	context.subscriptions.push(controller, output);

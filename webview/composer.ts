@@ -159,6 +159,13 @@ export class Composer {
 		this.thinkingBtn.textContent = level === "off" ? "thinking off" : `thinking ${level}`;
 	}
 
+	setObserving(observing: boolean): void {
+		this.textarea.disabled = observing;
+		this.sendBtn.disabled = observing;
+		this.sendBtn.style.opacity = observing ? "0.4" : "";
+		this.textarea.placeholder = observing ? "Watching a live session — read-only" : "Message Prime Agent…";
+	}
+
 	setSteerDefault(behavior: "steer" | "followUp"): void {
 		this.steerDefault = behavior;
 		if (!this.streaming) this.behavior = behavior;

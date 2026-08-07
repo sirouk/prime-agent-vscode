@@ -1448,3 +1448,35 @@ body.vscode-light pre.term {
 	letter-spacing: 0.07em;
 	color: var(--pa-dim);
 }
+
+/* ---------- retry row ---------- */
+
+.retry-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	align-self: stretch;
+	border: 1px solid color-mix(in srgb, transparent 60%, var(--pa-warn) 40%);
+	background: color-mix(in srgb, transparent 88%, var(--pa-warn) 12%);
+	border-radius: 8px;
+	padding: 6px 10px;
+	font-size: 11px;
+	color: var(--pa-text);
+}
+
+.retry-row .retry-icon {
+	color: var(--pa-warn);
+}
+
+.retry-row.fatal {
+	border-color: color-mix(in srgb, transparent 55%, var(--pa-error) 45%);
+	background: color-mix(in srgb, transparent 86%, var(--pa-error) 14%);
+}
+
+.retry-row.fatal .retry-icon {
+	color: var(--pa-error);
+}
+
+.usage-line.error {
+	color: var(--pa-error);
+}

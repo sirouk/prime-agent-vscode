@@ -208,7 +208,8 @@ export type WebviewToHost =
 	| { type: "requestHistory" }
 	| { type: "setModel"; provider: string; modelId: string }
 	| { type: "setThinkingLevel"; level: string }
-	| { type: "switchSession"; path: string }
+	| { type: "switchSession"; path: string; sessionId?: string }
+	| { type: "stopObserving" }
 	| { type: "searchFiles"; query: string; requestId: number }
 	| { type: "openFile"; path: string; startLine?: number; endLine?: number }
 	| { type: "openDiff"; path: string }
@@ -240,6 +241,8 @@ export interface StatusSnapshot {
 	contextPercent?: number | null;
 	modelProvider?: string;
 	modelId?: string;
+	/** Session id currently being observed read-only, or null when attached normally */
+	observingId?: string | null;
 }
 
 export interface ModelRef {
@@ -248,6 +251,8 @@ export interface ModelRef {
 }
 
 export interface RecentSession {
+	/** Session id (jsonl filename stem); used for observe/resume */
+	id: string;
 	path: string;
 	cwd: string;
 	timestamp: string;
@@ -280,5 +285,8 @@ export type HostToWebview =
 	| { type: "insertSelection"; selection: SelectionAttachment }
 	| { type: "insertMention"; path: string }
 	| { type: "changedFiles"; files: string[] }
+	| { type: "observedSession"; sessionId: string; messages: AgentMessage[] }
+	| { type: "observedEvent"; sessionId: string; event: AgentEvent }
+	| { type: "observedClosed"; sessionId: string }
 	| { type: "editorText"; text: string }
 	| { type: "focusComposer" };

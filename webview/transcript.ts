@@ -4,6 +4,16 @@
 
 import { butterfly, el, icon } from "./dom.js";
 import { copyToClipboard, renderMarkdown } from "./markdown.js";
+
+function buildContent(
+	text: string,
+	images: Array<{ data: string; mimeType: string }>,
+): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
+	const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+	if (text) content.push({ type: "text", text });
+	for (const img of images) content.push({ type: "image", data: img.data, mimeType: img.mimeType });
+	return content;
+}
 import type {
 	AgentEvent,
 	AgentMessage,
@@ -34,6 +44,9 @@ interface ToolBlock {
 export class Transcript {
 	private toolBlocks = new Map<string, ToolBlock>();
 	private streamingBubble: HTMLElement | null = null;
+	private optimisticText: string | null = null;
+	private optimisticAt = 0;
+	private retryRow: HTMLElement | null = null;
 	private workingRow: HTMLElement | null = null;
 	private workingStartedAt = 0;
 	private workingTimer: number | undefined;
@@ -187,11 +200,13 @@ export class Transcript {
 				this.systemNote("Compacting context…");
 				break;
 			case "auto_retry_start":
-				this.systemNote(`Retrying (${event.attempt}/${event.maxAttempts})${event.errorMessage ? `: ${event.errorMessage}` : ""}`);
+				this.showRetryRow(event.attempt, event.maxAttempts, event.errorMessage);
 				break;
 			case "auto_retry_end":
-				if (!event.success) {
-					this.systemNote(`Retry failed${event.finalError ? `: ${event.finalError}` : ""}`, true);
+				if (event.success) {
+					this.clearRetryRow();
+				} else {
+					this.failRetryRow(event.finalError);
 					this.stopWorking();
 				}
 				break;
@@ -206,6 +221,37 @@ export class Transcript {
 
 	isStreaming(): boolean {
 		return this.streaming;
+	}
+
+	private showRetryRow(attempt: number, maxAttempts: number, errorMessage?: string): void {
+		this.clearRetryRow();
+		const row = el("div", "retry-row");
+		row.appendChild(el("span", "retry-icon", "⚠"));
+		const label = el(
+			"span",
+			"retry-text",
+			`Provider request failed — auto-retry ${attempt}/${maxAttempts}${errorMessage ? ` · ${errorMessage.slice(0, 90)}` : ""}`,
+		);
+		row.appendChild(label);
+		this.scroller.appendChild(row);
+		this.retryRow = row;
+		this.hasContent = true;
+	}
+
+	private clearRetryRow(): void {
+		this.retryRow?.remove();
+		this.retryRow = null;
+	}
+
+	private failRetryRow(finalError?: string): void {
+		if (!this.retryRow) {
+			this.systemNote(`Provider request failed${finalError ? `: ${finalError.slice(0, 120)}` : ""}`, true);
+			return;
+		}
+		this.retryRow.classList.add("fatal");
+		const label = this.retryRow.querySelector(".retry-text");
+		if (label) label.textContent = `Provider request failed — giving up${finalError ? ` · ${finalError.slice(0, 120)}` : ""}`;
+		this.retryRow = null; // leave the fatal row in the transcript
 	}
 
 	// ---------------------------------------------------------------
@@ -240,9 +286,27 @@ export class Transcript {
 	// Message rendering
 	// ---------------------------------------------------------------
 
+	/** Render the user's message immediately on send; deduped when the real
+	 * message_start event for it arrives shortly after. */
+	showOptimisticUserMessage(text: string, images: Array<{ data: string; mimeType: string }>): void {
+		if (!text && images.length === 0) return;
+		this.dismissWelcome();
+		const content = images.length > 0 ? buildContent(text, images) : text;
+		this.scroller.appendChild(this.buildUserRow({ role: "user", content } as UserMessage));
+		this.hasContent = true;
+		this.optimisticText = text;
+		this.optimisticAt = Date.now();
+		this.scrollToBottom();
+	}
+
 	private renderMessage(message: AgentMessage, isPartial: boolean): void {
 		const role = message.role;
 		if (role === "user") {
+			const text = this.userMessageText(message as UserMessage);
+			if (this.optimisticText !== null && text === this.optimisticText && Date.now() - this.optimisticAt < 20_000) {
+				this.optimisticText = null;
+				return; // already rendered optimistically
+			}
 			this.scroller.appendChild(this.buildUserRow(message as UserMessage));
 		} else if (role === "assistant") {
 			this.scroller.appendChild(this.buildAssistantRow(message as AssistantMessage, isPartial));
@@ -336,7 +400,11 @@ export class Transcript {
 		}
 		if (!isPartial) {
 			const meta = this.usageLine(message as AssistantMessage);
-			if (meta) body.appendChild(meta);
+			if (meta) {
+				body.appendChild(meta);
+			} else if (body.childElementCount === 0) {
+				body.appendChild(el("div", "usage-line", "(no response)"));
+			}
 		}
 	}
 
@@ -356,11 +424,14 @@ export class Transcript {
 		if (usage?.totalTokens != null) parts.push(`${formatNumber(usage.totalTokens)} tokens`);
 		if (usage?.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
 		const stop = message.stopReason;
-		if (stop && stop !== "stop" && stop !== "toolUse") {
-			parts.push(`stopped: ${stop}${message.errorMessage ? ` — ${message.errorMessage}` : ""}`);
+		const isError = stop === "error" || (message.errorMessage != null && message.errorMessage !== "");
+		if (isError) {
+			parts.push(message.errorMessage ? `request failed — ${message.errorMessage}` : "request failed");
+		} else if (stop && stop !== "stop" && stop !== "toolUse") {
+			parts.push(`stopped: ${stop}`);
 		}
 		if (parts.length === 0) return null;
-		const line = el("div", "usage-line", parts.join(" · "));
+		const line = el("div", `usage-line${isError ? " error" : ""}`, parts.join(" · "));
 		if (message.model) line.title = message.model;
 		return line;
 	}

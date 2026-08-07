@@ -6,7 +6,7 @@ import { el, icon } from "./dom.js";
 import type { RecentSession } from "../src/protocol.js";
 
 export interface HistoryDeps {
-	onResume: (path: string) => void;
+	onResume: (path: string, sessionId: string) => void;
 	onBack: () => void;
 }
 
@@ -32,12 +32,13 @@ export class HistoryView {
 		this.listEl.appendChild(el("div", "history-empty", "Loading…"));
 	}
 
-	render(sessions: RecentSession[]): void {
+	render(sessions: RecentSession[], currentId?: string): void {
 		this.listEl.textContent = "";
 		if (sessions.length === 0) {
 			this.listEl.appendChild(el("div", "history-empty", "No previous sessions found."));
 			return;
 		}
+		this.currentId = currentId;
 		const inWorkspace = sessions.filter((s) => s.inWorkspace);
 		const others = sessions.filter((s) => !s.inWorkspace);
 		if (inWorkspace.length > 0) {
@@ -50,16 +51,23 @@ export class HistoryView {
 		}
 	}
 
+	private currentId?: string;
+
 	private buildItem(session: RecentSession, showFolder: boolean): HTMLButtonElement {
 		const item = el("button", "history-item") as HTMLButtonElement;
 		item.title = session.cwd;
+		const isCurrent = session.id === this.currentId;
+		if (isCurrent) item.classList.add("current");
 		const top = el("div", "history-item-top");
-		top.appendChild(el("span", "history-item-name", session.name || session.firstPrompt || "(untitled session)"));
+		const name = session.name || session.firstPrompt || "(untitled session)";
+		top.appendChild(el("span", "history-item-name", isCurrent ? `${name} (current)` : name));
 		top.appendChild(el("span", "history-item-time", relativeTime(session.timestamp)));
 		item.appendChild(top);
 		const sub = session.name && session.firstPrompt ? session.firstPrompt.slice(0, 110) : showFolder ? session.cwd : undefined;
 		if (sub) item.appendChild(el("div", "history-item-sub", sub));
-		item.addEventListener("click", () => this.deps.onResume(session.path));
+		if (!isCurrent) {
+			item.addEventListener("click", () => this.deps.onResume(session.path, session.id));
+		}
 		return item;
 	}
 }

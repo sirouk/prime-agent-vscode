@@ -4,17 +4,32 @@
  */
 
 import * as vscode from "vscode";
+
+declare const PRIME_AGENT_BUILD_REV: string | undefined;
+const WEBVIEW_REV = typeof PRIME_AGENT_BUILD_REV === "string" ? PRIME_AGENT_BUILD_REV : "dev";
 import type { HostToWebview, WebviewToHost } from "./protocol.js";
 import type { SessionController } from "./session-controller.js";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = "primeAgent.chat";
 	private view: vscode.WebviewView | null = null;
+	private sinkAttached = false;
+	private readonly dynamicSink: { post: (message: HostToWebview) => void };
 
 	constructor(
 		private readonly extensionUri: vscode.Uri,
 		private readonly controller: SessionController,
-	) {}
+	) {
+		// VS Code silently replaces the inner webview object when the panel is
+		// re-shown/reloaded; posting through a stale webview object disappears
+		// into the void while returning true. Always post through the CURRENT one.
+		this.dynamicSink = {
+			post: (message: HostToWebview) => {
+				const webview = this.view?.webview;
+				if (webview) void webview.postMessage(message);
+			},
+		};
+	}
 
 	resolveWebviewView(view: vscode.WebviewView): void {
 		this.view = view;
@@ -23,8 +38,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 			localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
 		};
 		view.webview.html = buildHtml(view.webview, this.extensionUri);
-		wireWebview(view.webview, this.controller);
+		if (!this.sinkAttached) {
+			this.sinkAttached = true;
+			void this.controller.attach(this.dynamicSink);
+		}
+		view.webview.onDidReceiveMessage(
+			(message: WebviewToHost) => {
+				void handleMessage(message, this.controller);
+			},
+			undefined,
+			this.viewDisposables,
+		);
 	}
+
+	private viewDisposables: vscode.Disposable[] = [];
 
 	reveal(): void {
 		this.view?.show?.(true);
@@ -69,7 +96,14 @@ export class ChatPanel {
 
 function wireWebview(webview: vscode.Webview, controller: SessionController): void {
 	const sink = {
-		post: (message: HostToWebview) => void webview.postMessage(message),
+		post: (message: HostToWebview) => {
+			const done = webview.postMessage(message);
+			if (typeof (done as Promise<boolean>).then === "function") {
+				void (done as Promise<boolean>).then((ok) => {
+					if (!ok) controller.debugPostFailure(message);
+				});
+			}
+		},
 	};
 	const attachment = controller.attach(sink);
 	// WebviewViews do not fire onDidDispose reliably in all hosts; the sink Set just
@@ -77,6 +111,14 @@ function wireWebview(webview: vscode.Webview, controller: SessionController): vo
 	// webview resolves false).
 	webview.onDidReceiveMessage(
 		(message: WebviewToHost) => {
+			const marker = process.env.PRIME_AGENT_VSCODE_LOG;
+			if (marker) {
+				try {
+					require("node:fs").appendFileSync(marker, `recv ${(message as { type?: string }).type}\n`);
+				} catch {
+					// ignore
+				}
+			}
 			void handleMessage(message, controller);
 		},
 		undefined,
@@ -95,7 +137,11 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			controller.sendFavorites();
 			return;
 		case "prompt":
-			await controller.prompt(message.payload);
+			try {
+				await controller.prompt(message.payload);
+			} catch (err) {
+				controller.showErrorNotice(`Prompt failed: ${err instanceof Error ? err.message : String(err)}`);
+			}
 			return;
 		case "abort":
 			await controller.abort();
@@ -132,7 +178,10 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			await controller.setThinkingLevel(message.level);
 			return;
 		case "switchSession":
-			await controller.switchSession(message.path);
+			await controller.switchSession(message.path, message.sessionId);
+			return;
+		case "stopObserving":
+			await controller.stopObserving();
 			return;
 		case "searchFiles":
 			await controller.searchFiles(message.query, message.requestId);
@@ -181,12 +230,12 @@ function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 	<meta charset="UTF-8" />
 	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	<link href="${styleUri}" rel="stylesheet" />
+	<link href="${styleUri}?v=${WEBVIEW_REV}" rel="stylesheet" />
 	<title>Prime Agent</title>
 </head>
 <body>
 	<div id="app"></div>
-	<script nonce="${nonce}" src="${scriptUri}"></script>
+	<script nonce="${nonce}" src="${scriptUri}?v=${WEBVIEW_REV}"></script>
 </body>
 </html>`;
 }

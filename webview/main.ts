@@ -75,6 +75,21 @@ document.addEventListener("click", (event) => {
 
 const notices = el("div", "notices");
 
+const observeBanner = el("div", "observe-banner");
+observeBanner.style.display = "none";
+{
+	const mark = butterfly(14);
+	mark.classList.add("working-mark");
+	observeBanner.appendChild(mark);
+	observeBanner.appendChild(el("span", "observe-text", "Live in another client — read-only"));
+	const stopObservingBtn = document.createElement("button");
+	stopObservingBtn.className = "observe-stop";
+	stopObservingBtn.textContent = "Back to my session";
+	stopObservingBtn.title = "Stop watching and return to your chat session";
+	stopObservingBtn.addEventListener("click", () => post({ type: "stopObserving" }));
+	observeBanner.appendChild(stopObservingBtn);
+}
+
 const chatView = el("div", "chat-view");
 const scroller = el("div", "messages");
 const changedFilesBar = el("div", "changed-files");
@@ -82,6 +97,8 @@ chatView.append(scroller, changedFilesBar);
 
 const composerDeps = {
 	onSend: (text: string, images: import("../src/protocol.js").ImageAttachment[], selections: import("../src/protocol.js").SelectionAttachment[]) => {
+		console.info("[prime-agent] composer send:", text.slice(0, 60));
+		transcript.showOptimisticUserMessage(text, images);
 		post({
 			type: "prompt",
 			payload: { text, images, selections, streamingBehavior: composer.streamingBehavior },
@@ -113,9 +130,9 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 });
 
 const historyView = new HistoryView({
-	onResume: (path) => {
+	onResume: (path, sessionId) => {
 		showView("chat");
-		post({ type: "switchSession", path });
+		post({ type: "switchSession", path, sessionId });
 	},
 	onBack: () => showView("chat"),
 });
@@ -131,7 +148,7 @@ const sessionIdLabel = el("span", "session-id", "");
 const statsLabel = el("span", "stats-label", "");
 statusStrip.append(connDot, liveLabel, sessionIdLabel, el("span", "spacer"), statsLabel);
 
-app.append(topbar, menu, notices, chatView, historyView.root, composer.root, statusStrip);
+app.append(topbar, menu, notices, observeBanner, chatView, historyView.root, composer.root, statusStrip);
 historyView.root.style.display = "none";
 
 function showView(view: "chat" | "history"): void {
@@ -155,6 +172,7 @@ historyBtn.addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 
 let currentStatus: StatusSnapshot | null = null;
+let observing = false;
 
 function applyStatus(status: StatusSnapshot): void {
 	currentStatus = status;
@@ -190,6 +208,13 @@ function applyStatus(status: StatusSnapshot): void {
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
 	if (status.statusText) liveLabel.textContent = status.statusText;
+	setObserving(!!status.observingId);
+}
+
+function setObserving(value: boolean): void {
+	observing = value;
+	observeBanner.style.display = value ? "" : "none";
+	composer.setObserving(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +237,20 @@ function addNotice(level: "info" | "warning" | "error", text: string): void {
 // ---------------------------------------------------------------------------
 
 window.addEventListener("message", (messageEvent) => {
-	const message = messageEvent.data as HostToWebview;
+	try {
+		dispatchHostMessage(messageEvent.data as HostToWebview);
+	} catch (err) {
+		// Surface handler errors as a hidden beacon so e2e tooling and end users can report them.
+		console.error("[prime-agent] host message handler error:", err);
+		const beacon = document.createElement("div");
+		beacon.className = "pa-handler-error";
+		beacon.style.display = "none";
+		beacon.textContent = `${(messageEvent.data as { type?: string })?.type ?? "?"}: ${String((err as Error)?.stack ?? err).slice(0, 500)}`;
+		document.body.appendChild(beacon);
+	}
+});
+
+function dispatchHostMessage(message: HostToWebview): void {
 	switch (message.type) {
 		case "snapshot":
 			transcript.renderSnapshot(message.messages ?? []);
@@ -242,10 +280,22 @@ window.addEventListener("message", (messageEvent) => {
 			composer.setCommands(message.commands);
 			break;
 		case "history":
-			historyView.render(message.sessions);
+			historyView.render(message.sessions, currentStatus?.sessionId);
 			break;
 		case "showHistory":
 			showView("history");
+			break;
+		case "observedSession":
+			setObserving(true);
+			transcript.renderSnapshot(message.messages);
+			showView("chat");
+			break;
+		case "observedEvent":
+			transcript.handleEvent(message.event);
+			break;
+		case "observedClosed":
+			setObserving(false);
+			addNotice("info", "Stopped watching the live session.");
 			break;
 		case "notice":
 			addNotice(message.level, message.text);
@@ -281,7 +331,7 @@ window.addEventListener("message", (messageEvent) => {
 			addNotice("error", `Prompt rejected: ${message.error}`);
 			break;
 	}
-});
+}
 
 function formatNumber(value: number): string {
 	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -292,6 +342,11 @@ function formatNumber(value: number): string {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+
+declare const PRIME_AGENT_BUILD_REV: string | undefined;
+if (typeof PRIME_AGENT_BUILD_REV === "string") {
+	document.body.dataset.paBuild = PRIME_AGENT_BUILD_REV;
+}
 
 transcript.showWelcome();
 post({ type: "ready" });

@@ -123,6 +123,7 @@ export async function listRecentSessions(workspaceRoot: string, limit = 40): Pro
 		if (!header.cwd) continue;
 		const inWorkspace = normalizePath(header.cwd) === normalizedRoot;
 		results.push({
+			id: path.basename(file, ".jsonl"),
 			path: file,
 			cwd: header.cwd,
 			timestamp: header.timestamp ?? new Date().toISOString(),

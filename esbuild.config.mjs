@@ -10,6 +10,12 @@ const shared = {
 	minify: production,
 };
 
+import { execSync } from "node:child_process";
+
+const buildRev =
+	process.env.BUILD_REV ??
+	`${execSync("git rev-parse --short HEAD 2>/dev/null || date +%s").toString().trim()}-${Math.floor(Date.now() / 1000)}`;
+
 const extensionConfig = {
 	...shared,
 	entryPoints: ["src/extension.ts"],
@@ -19,6 +25,7 @@ const extensionConfig = {
 	target: "node18",
 	outfile: "dist/extension.js",
 	external: ["vscode"],
+	define: { PRIME_AGENT_BUILD_REV: JSON.stringify(buildRev) },
 };
 
 const webviewConfig = {
@@ -29,6 +36,7 @@ const webviewConfig = {
 	platform: "browser",
 	target: "es2022",
 	outfile: "media/main.js",
+	define: { PRIME_AGENT_BUILD_REV: JSON.stringify(buildRev) },
 };
 
 const controllerConfig = {

@@ -21,6 +21,7 @@ import type {
 	RpcSlashCommand,
 	StatusSnapshot,
 } from "./protocol.js";
+import { DebugFileLog } from "./debug-log.js";
 import { listRecentSessions } from "./recent-sessions.js";
 import { RpcClient } from "./rpc-client.js";
 
@@ -42,8 +43,10 @@ export class SessionController implements vscode.Disposable {
 	private streaming = false;
 	private compacting = false;
 	private retrying = false;
+	private debugLog = new DebugFileLog();
 	private startingPromise: Promise<void> | null = null;
 	private intentionalStop = false;
+	private observingId: string | null = null;
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -66,9 +69,18 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	private broadcast(message: HostToWebview): void {
+		if (this.sinks.size === 0) this.debugLog.append(`broadcast ${message.type} with no sinks`);
 		for (const sink of this.sinks) {
 			sink.post(message);
 		}
+	}
+
+	debugPostFailure(message: HostToWebview): void {
+		this.debugLog.append(`postMessage returned FALSE for type=${message.type}`);
+	}
+
+	showErrorNotice(text: string): void {
+		this.broadcast({ type: "notice", level: "error", text });
 	}
 
 	broadcastInsertSelection(selection: { path: string; startLine: number; endLine: number; text: string; languageId: string }): void {
@@ -84,6 +96,7 @@ export class SessionController implements vscode.Disposable {
 	// ------------------------------------------------------------------
 
 	async ensureStarted(): Promise<void> {
+		this.debugLog.append("ensureStarted");
 		if (this.client?.running) return;
 		if (this.startingPromise) return this.startingPromise;
 		this.startingPromise = this.start()
@@ -110,7 +123,7 @@ export class SessionController implements vscode.Disposable {
 		if (envArgs) args.push(...envArgs.split(/\s+/));
 
 		this.output.appendLine(`[prime-agent] starting: ${command} --mode rpc ${args.join(" ")}`);
-		const client = new RpcClient({ command, args, cwd: this.workspaceRoot });
+		const client = new RpcClient({ command, args, cwd: this.workspaceRoot, onWire: (s) => this.debugLog.append(s) });
 		this.client = client;
 		this.intentionalStop = false;
 
@@ -223,8 +236,18 @@ export class SessionController implements vscode.Disposable {
 		const type = raw.type as string;
 		if (type === "extension_error") {
 			this.broadcast({ type: "notice", level: "error", text: `Extension error: ${JSON.stringify(raw.error ?? raw)}` });
-		} else if (type === "observed_session_event" || type === "observed_session_closed") {
-			// Not used by the chat UI.
+		} else if (type === "observed_session_event") {
+			const sessionId = raw.activeSessionId as string;
+			if (sessionId === this.observingId) {
+				this.broadcast({ type: "observedEvent", sessionId, event: raw.event as AgentEvent });
+			}
+		} else if (type === "observed_session_closed") {
+			const sessionId = raw.activeSessionId as string;
+			if (sessionId === this.observingId) {
+				this.observingId = null;
+				this.broadcast({ type: "observedClosed", sessionId });
+				this.pushStatus();
+			}
 		}
 	}
 
@@ -309,6 +332,8 @@ export class SessionController implements vscode.Disposable {
 	async prompt(payload: PromptPayload): Promise<void> {
 		await this.ensureStarted();
 		if (!this.client) throw new Error("agent unavailable");
+		this.output.appendLine(`[prime-agent] prompt: streaming=${this.streaming} behavior=${payload.streamingBehavior} text="${payload.text.slice(0, 60)}"`);
+		this.debugLog.append(`prompt entered: streaming=${this.streaming} behavior=${payload.streamingBehavior} text="${payload.text.slice(0, 60)}"`);
 
 		const text = this.composeMessageText(payload);
 		const images = payload.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType }));
@@ -326,11 +351,19 @@ export class SessionController implements vscode.Disposable {
 			kind = "prompt";
 		}
 
-		const response = await this.client.request(command);
-		if (response.success) {
-			this.broadcast({ type: "promptAccepted", kind });
-		} else {
-			this.broadcast({ type: "promptRejected", error: response.error ?? "prompt rejected" });
+		try {
+			const response = await this.client.request(command);
+			this.debugLog.append(`prompt response: success=${response.success} error=${response.error ?? ""}`);
+			this.output.appendLine(`[prime-agent] prompt response: success=${response.success}${response.error ? ` error="${response.error}"` : ""}`);
+			if (response.success) {
+				this.broadcast({ type: "promptAccepted", kind });
+			} else {
+				this.broadcast({ type: "promptRejected", error: response.error ?? "prompt rejected" });
+			}
+		} catch (err) {
+			this.debugLog.append(`prompt failed: ${err instanceof Error ? err.message : String(err)}`);
+			this.output.appendLine(`[prime-agent] prompt request failed: ${err instanceof Error ? err.message : String(err)}`);
+			this.broadcast({ type: "notice", level: "error", text: `Prompt failed: ${err instanceof Error ? err.message : String(err)}` });
 		}
 	}
 
@@ -359,6 +392,7 @@ export class SessionController implements vscode.Disposable {
 	async newSession(): Promise<void> {
 		await this.ensureStarted();
 		if (!this.client) return;
+		await this.clearObservation();
 		const response = await this.client.request({ type: "new_session" });
 		if (response.success) {
 			this.changedFiles.clear();
@@ -504,16 +538,64 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
-	async switchSession(sessionPath: string): Promise<void> {
+	async switchSession(sessionPath: string, sessionId?: string): Promise<void> {
 		await this.ensureStarted();
 		if (!this.client) return;
+		await this.clearObservation();
 		const response = await this.client.request({ type: "switch_session", sessionPath }, 60_000);
 		if (response.success) {
 			this.changedFiles.clear();
 			await this.refreshSnapshot();
-		} else {
-			this.broadcast({ type: "notice", level: "error", text: `Could not resume session: ${response.error ?? "unknown error"}` });
+			return;
 		}
+		const error = response.error ?? "unknown error";
+		if (/already active/i.test(error)) {
+			const id = sessionId ?? path.basename(sessionPath, ".jsonl");
+			const observed = await this.startObserving(id);
+			if (observed) return;
+			this.broadcast({
+				type: "notice",
+				level: "warning",
+				text:
+					"That session is live in another client (likely a terminal). Close it there first, " +
+					"then resume from here.",
+			});
+			return;
+		}
+		this.broadcast({ type: "notice", level: "error", text: `Could not resume session: ${error}` });
+	}
+
+	/** Attach to a resident session read-only through the daemon observe channel. */
+	private async startObserving(sessionId: string): Promise<boolean> {
+		if (!this.client) return false;
+		const response = await this.client.request({ type: "observe", activeSessionId: sessionId }, 30_000);
+		if (!response.success) return false;
+		this.observingId = sessionId;
+		const messages = (response.data as { messages?: AgentMessage[] })?.messages ?? [];
+		this.broadcast({ type: "observedSession", sessionId, messages });
+		this.pushStatus();
+		return true;
+	}
+
+	private async clearObservation(): Promise<void> {
+		if (!this.observingId || !this.client) {
+			this.observingId = null;
+			return;
+		}
+		const id = this.observingId;
+		this.observingId = null;
+		try {
+			await this.client.request({ type: "unobserve", activeSessionId: id }, 10_000);
+		} catch {
+			// best effort
+		}
+		this.broadcast({ type: "observedClosed", sessionId: id });
+	}
+
+	async stopObserving(): Promise<void> {
+		await this.clearObservation();
+		await this.refreshSnapshot();
+		this.pushStatus();
 	}
 
 	// ------------------------------------------------------------------
@@ -617,6 +699,7 @@ export class SessionController implements vscode.Disposable {
 			statusText: this.extensionStatusText,
 			modelProvider: model?.provider,
 			modelId: model?.id,
+			observingId: this.observingId,
 			...this.lastUsage,
 		};
 	}
