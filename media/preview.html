@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<style>body { margin: 0; background: #0f0f0f; font-family: -apple-system, "SF Pro Text", sans-serif; font-size: 13px; color: #f5f7f8; } body { --vscode-sideBar-background: #0f0f0f; --vscode-foreground: #f5f7f8; --vscode-descriptionForeground: #8a8a8a; --vscode-font-family: -apple-system, "SF Pro Text", sans-serif; --vscode-font-size: 13px; --vscode-editor-font-family: "SF Mono", Menlo, monospace; }</style>
+	<link rel="stylesheet" href="main.css" />
+	<style>
+		body { height: 100vh; overflow: hidden; }
+		body { class: "vscode-dark"; }
+	</style>
+</head>
+<body class="vscode-dark">
+	<div id="app"></div>
+	<script>
+		const postedMessages = [];
+		window.acquireVsCodeApi = () => ({
+			postMessage: (m) => postedMessages.push(m),
+			getState: () => undefined,
+			setState: () => {},
+		});
+	</script>
+	<script src="main.js"></script>
+	<script>
+		const host = (data) => window.dispatchEvent(new MessageEvent("message", { data }));
+		const baseStatus = {
+			connected: true, streaming: false, compacting: false, retrying: false, restoring: false,
+			modelLabel: "chutes/moonshotai/Kimi-K3-TEE", thinkingLevel: "max",
+			sessionName: "vscode-extension", sessionId: "019fd749-3f2a",
+			statsText: "", usageTotal: 183400, costUsd: 0.0612,
+			contextTokens: 142400, contextWindow: 262144, contextPercent: 54,
+		};
+		const mode = new URLSearchParams(location.search).get("mode") || "chat";
+
+		if (mode === "welcome") {
+			host({ type: "status", status: baseStatus });
+		} else {
+			host({
+				type: "snapshot",
+				messages: [
+					{ role: "user", content: "Add a VS Code extension that talks to the RPC mode. Use @packages/coding-agent/docs/rpc.md for the protocol. Reply concisely." },
+					{
+						role: "assistant", model: "Kimi-K3-TEE", stopReason: "toolUse",
+						content: [
+							{ type: "thinking", thinking: "Let me look at the RPC docs first, then check how the daemon frames JSONL responses..." },
+							{ type: "text", text: "I'll study the RPC protocol and build the extension around it.\n\nThe protocol is newline-delimited JSON over stdio:\n\n- **commands** on stdin, `id`-correlated\n- **events** streamed on stdout\n\nLet me verify the framing edge cases first." },
+							{ type: "toolCall", id: "tc1", name: "ipython", arguments: { code: "import json\n\nwith open('packages/coding-agent/src/modes/rpc/rpc-types.ts') as f:\n    src = f.read()\nprint(len(src.splitlines()), 'lines')" } },
+						],
+						usage: { totalTokens: 10230, cost: { total: 0.004 } },
+					},
+					{ role: "toolResult", toolCallId: "tc1", toolName: "ipython", content: [{ type: "text", text: "372 lines" }] },
+					{
+						role: "assistant", model: "Kimi-K3-TEE", stopReason: "toolUse",
+						content: [
+							{ type: "text", text: "Framing splits on `\\n` only — the client must **not** use `readline`. Now the client:" },
+							{ type: "toolCall", id: "tc2", name: "edit", arguments: { path: "src/rpc-client.ts" } },
+						],
+						usage: { totalTokens: 12900, cost: { total: 0.006 } },
+					},
+					{ role: "toolResult", toolCallId: "tc2", toolName: "edit", content: [{ type: "text", text: "File created: src/rpc-client.ts (221 lines)" }] },
+				],
+				state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" },
+				status: { ...baseStatus, streaming: true },
+			});
+			// Simulate an in-flight run: partial assistant text + a running tool
+			host({ type: "event", event: { type: "agent_start" } });
+			host({ type: "event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
+			host({ type: "event", event: { type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "Running the smoke test with a real subprocess round-trip. Watch the " }] }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "…" } } });
+			host({ type: "event", event: { type: "tool_execution_start", toolCallId: "tc3", toolName: "bash", args: { command: "node test/smoke.mjs" } } });
+			host({ type: "event", event: { type: "tool_execution_update", toolCallId: "tc3", toolName: "bash", args: {}, partialResult: { output: "PASS  process starts\nPASS  get_state succeeds\n" } } });
+			host({ type: "changedFiles", files: ["src/rpc-client.ts", "webview/main.ts", "media/main.css"] });
+			host({ type: "status", status: { ...baseStatus, streaming: true } });
+		}
+	</script>
+</body>
+</html>

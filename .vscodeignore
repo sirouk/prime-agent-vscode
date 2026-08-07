@@ -10,3 +10,4 @@ tsconfig.json
 *.vsix
 *.map
 media/*.map
+media/preview.html

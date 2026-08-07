@@ -63,7 +63,7 @@ export class Composer {
 		imgBtn.addEventListener("click", () => this.deps.onPickImage());
 
 		this.modelBtn = document.createElement("button");
-		this.modelBtn.className = "rail-pill";
+		this.modelBtn.className = "rail-pill model";
 		this.modelBtn.title = "Select model";
 		this.thinkingBtn = document.createElement("button");
 		this.thinkingBtn.className = "rail-pill subtle";
@@ -73,6 +73,7 @@ export class Composer {
 
 		this.behaviorBtn = document.createElement("button");
 		this.behaviorBtn.className = "rail-pill subtle behavior";
+		this.behaviorBtn.style.display = "none";
 		this.behaviorBtn.title = "How a message is delivered while the agent is working";
 		this.behaviorBtn.addEventListener("click", () => this.toggleBehavior());
 

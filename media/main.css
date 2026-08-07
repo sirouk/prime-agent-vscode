@@ -975,10 +975,16 @@ details.thinking .thinking-body {
 	border: 1px solid var(--pa-border);
 	color: var(--pa-text);
 	background: var(--pa-surface-2);
-	max-width: 190px;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.rail-pill.model {
+	flex-shrink: 1;
+	max-width: 190px;
+	min-width: 0;
 }
 
 .rail-pill:hover {
@@ -989,10 +995,6 @@ details.thinking .thinking-body {
 .rail-pill.subtle {
 	color: var(--pa-dim);
 	background: none;
-}
-
-.rail-pill.behavior {
-	display: none;
 }
 
 .context-meter {

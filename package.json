@@ -177,6 +177,7 @@
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.24.2",
     "happy-dom": "^20.11.1",
+    "playwright": "^1.62.1",
     "typescript": "^5.9.2"
   }
 }
