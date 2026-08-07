@@ -418,6 +418,111 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
+	/**
+	 * Fork the session from the (N-th) user message — mirrors /fork: resolves
+	 * the entryId via get_fork_messages order alignment with user rows.
+	 */
+	async forkFromUser(ordinal: number): Promise<void> {
+		await this.ensureStarted();
+		if (!this.client) return;
+		if (this.streaming) {
+			this.broadcast({ type: "notice", level: "error", text: "Wait for the current run to finish before forking." });
+			return;
+		}
+		const list = await this.client.request({ type: "get_fork_messages" }, 30_000);
+		if (!list.success) {
+			this.broadcast({ type: "notice", level: "error", text: `Fork failed: ${list.error ?? "unknown error"}` });
+			return;
+		}
+		const messages = (list.data as { messages?: Array<{ entryId: string; text: string }> })?.messages ?? [];
+		const target = messages[ordinal];
+		if (!target) {
+			this.broadcast({ type: "notice", level: "error", text: `No forkable message at position ${ordinal + 1} (${messages.length} available).` });
+			return;
+		}
+		const response = await this.client.request({ type: "fork", entryId: target.entryId }, 60_000);
+		if (response.success) {
+			this.broadcast({ type: "notice", level: "info", text: "Forked the session from that message." });
+			await this.refreshSnapshot();
+			void this.listHistory();
+		} else {
+			this.broadcast({ type: "notice", level: "error", text: `Fork failed: ${response.error ?? "unknown error"}` });
+		}
+	}
+
+	/** Copy the whole conversation as Markdown (same summarization as file export). */
+	async copyConversation(): Promise<void> {
+		try {
+			await this.ensureStarted();
+		} catch {
+			return;
+		}
+		if (!this.client) return;
+		const messagesRes = await this.client.request({ type: "get_messages" }, 60_000);
+		if (!messagesRes.success) return;
+		const messages = (messagesRes.data as { messages?: Array<Record<string, unknown>> })?.messages ?? [];
+		const md = buildMarkdownExport(messages, true, this.state as unknown as { model?: { provider?: string; id?: string } | null; sessionName?: string } | null);
+		await vscode.env.clipboard.writeText(md);
+		this.broadcast({ type: "notice", level: "info", text: "Conversation copied as Markdown." });
+	}
+
+	// ---- sticky composer drafts (per session, survive view reloads) ----
+
+	private draftKey(): string {
+		const id = this.state?.sessionId ?? this.state?.sessionFile ?? "none";
+		return `pa-draft:${id}`;
+	}
+
+	persistDraft(text: string): void {
+		void this.context.globalState.update(this.draftKey(), text && text.trim() ? text : undefined);
+	}
+
+	private restoreDraft(): void {
+		const text = this.context.globalState.get<string>(this.draftKey());
+		this.broadcast({ type: "draft", text: text ?? "" });
+	}
+
+	// ---- auto-compact threshold (per session, client-side trigger) ----
+
+	private thresholdKey(): string {
+		const id = this.state?.sessionId ?? this.state?.sessionFile ?? "none";
+		return `pa-ct:${id}`;
+	}
+
+	compactThreshold(): number | null {
+		return this.context.globalState.get<number | null>(this.thresholdKey(), null);
+	}
+
+	setCompactThreshold(percent: number | null): void {
+		if (percent !== null && (percent < 20 || percent > 80)) return;
+		void this.context.globalState.update(this.thresholdKey(), percent ?? undefined);
+		this.broadcast({ type: "compactThreshold", percent });
+		this.pushStatus();
+	}
+
+	private autoCompactSent = false;
+
+	private maybeTriggerAutoCompact(percent: number | null): void {
+		const threshold = this.compactThreshold();
+		if (percent == null || threshold == null) {
+			this.autoCompactSent = false;
+			return;
+		}
+		if (percent < Math.max(20, threshold - 15)) {
+			this.autoCompactSent = false;
+			return;
+		}
+		if (percent >= threshold && !this.autoCompactSent && this.streaming && !this.compacting) {
+			this.autoCompactSent = true;
+			this.broadcast({
+				type: "notice",
+				level: "info",
+				text: `Context hit ${percent}% ≥ ${threshold}% — auto-compacting for this session.`,
+			});
+			void this.compact();
+		}
+	}
+
 	async exportChat(): Promise<void> {
 		const picked = await vscode.window.showQuickPick(
 			[
@@ -685,6 +790,7 @@ export class SessionController implements vscode.Disposable {
 		} catch (err) {
 			this.output.appendLine(`[prime-agent] snapshot failed: ${String(err)}`);
 		}
+		this.restoreDraft();
 		this.pushStatus();
 	}
 
@@ -729,6 +835,7 @@ export class SessionController implements vscode.Disposable {
 			if (data.tokens?.total != null) parts.push(`${formatNumber(data.tokens.total)} tokens`);
 			if (data.cost != null && data.cost > 0) parts.push(`$${data.cost.toFixed(4)}`);
 			if (data.contextUsage && data.contextUsage.percent != null) parts.push(`${data.contextUsage.percent}% of context`);
+			this.maybeTriggerAutoCompact(data.contextUsage?.percent ?? null);
 			return parts.join(" · ");
 		} catch {
 			return "";
@@ -756,6 +863,7 @@ export class SessionController implements vscode.Disposable {
 			modelProvider: model?.provider,
 			modelId: model?.id,
 			observingId: this.observingId,
+			compactThresholdPercent: this.compactThreshold(),
 			...this.lastUsage,
 		};
 	}

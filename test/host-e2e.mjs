@@ -38,8 +38,10 @@ async function waitFor(predicate, timeoutMs, label) {
 const received = [];
 const sink = { post: (message) => received.push(message) };
 const outputLines = [];
+const _mem = new Map();
+const _state = { get: (k, d) => (_mem.has(k) ? _mem.get(k) : d), update: (k, v) => { if (v === undefined) _mem.delete(k); else _mem.set(k, v); return Promise.resolve(); } };
 const controller = new SessionController(
-	{ subscriptions: [], extensionUri: { fsPath: process.cwd() } },
+	{ subscriptions: [], extensionUri: { fsPath: process.cwd() }, globalState: _state, workspaceState: _state },
 	{ append: (c) => outputLines.push(c), appendLine: (l) => outputLines.push(l) },
 );
 controller.attach(sink);

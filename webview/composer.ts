@@ -18,6 +18,8 @@ export interface ComposerDeps {
 	onSetThinking: (level: string) => void;
 	onToggleFavorite: (provider: string, modelId: string) => void;
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => void;
+	onDraftChanged: (text: string) => void;
+	onSetCompactThreshold: (percent: number | null) => void;
 }
 
 export class Composer {
@@ -38,6 +40,7 @@ export class Composer {
 
 	private images: ImageAttachment[] = [];
 	private selections: SelectionAttachment[] = [];
+	private mentions: string[] = [];
 	private commands: RpcSlashCommand[] = [];
 	private streaming = false;
 	private behavior: "steer" | "followUp" = "steer";
@@ -89,9 +92,14 @@ export class Composer {
 		this.behaviorBtn.addEventListener("click", () => this.toggleBehavior());
 
 		this.contextWrap = el("div", "context-meter");
+		this.contextWrap.title = "Context window usage — click to set an auto-compact threshold for this session";
 		this.contextFill = el("div", "context-fill");
 		this.contextLabel = el("span", "context-label", "");
 		this.contextWrap.append(this.contextFill, this.contextLabel);
+		this.contextWrap.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.toggleThresholdFlyout();
+		});
 
 		this.sendBtn = document.createElement("button");
 		this.sendBtn.className = "send-btn";
@@ -114,9 +122,12 @@ export class Composer {
 		card.appendChild(this.autocompleteEl);
 
 		this.textarea.addEventListener("keydown", (event) => this.onKeyDown(event));
+		let draftDebounce: number | undefined;
 		this.textarea.addEventListener("input", () => {
 			this.autoGrow();
 			this.updateAutocomplete();
+			window.clearTimeout(draftDebounce);
+			draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
 		});
 		this.textarea.addEventListener("paste", (event) => this.onPaste(event));
 		this.textarea.addEventListener("drop", (event) => this.onDrop(event));
@@ -174,7 +185,9 @@ export class Composer {
 	private updateReasoningState(): void {
 		const model = this.currentModelInfo();
 		this.reasoning = model?.reasoning ?? true;
-		this.vision = (model?.input ?? []).includes("image");
+		// Only block when the model is KNOWN to be text-only; undeclared input
+		// fields mean "allow" so we don't silently eat pastes.
+		this.vision = model?.input ? model.input.includes("image") : true;
 		this.modelBtn.title = `Choose model · thinking level inside${this.vision ? " (accepts images)" : " (text-only, image attach off)"}`;
 	}
 
@@ -246,7 +259,79 @@ export class Composer {
 		this.contextFill.className = `context-fill${percent > 85 ? " hot" : percent > 65 ? " warm" : ""}`;
 		const compact = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(0)}k` : String(n));
 		this.contextLabel.textContent = tokens != null ? `${compact(tokens)}/${compact(window)}` : `${percent}%`;
-		this.contextWrap.title = `Context window: ${percent}% used`;
+		this.contextWrap.title = `Context window: ${percent}% used${this.compactThreshold != null ? ` · auto-compact at ${this.compactThreshold}%` : ""} — click to set the threshold`;
+	}
+
+	// ---- auto-compact threshold flyout ----
+
+	private compactThreshold: number | null = null;
+	private thresholdFlyout: HTMLElement | null = null;
+
+	setCompactThreshold(percent: number | null): void {
+		this.compactThreshold = percent;
+		this.renderThresholdFlyout();
+	}
+
+	/** The flyout is built lazily; state renders into it. */
+	private ensureThresholdFlyout(): HTMLElement {
+		if (this.thresholdFlyout) return this.thresholdFlyout;
+		const panel = el("div", "threshold-flyout");
+		panel.innerHTML = "";
+		const title = el("div", "threshold-title", "Auto-compact for this session");
+		title.title = "When the context window reaches this fill, Prime Agent compacts it automatically. Range: 20%–80%.";
+		const row = el("div", "threshold-row");
+		const slider = document.createElement("input");
+		slider.type = "range";
+		slider.min = "20";
+		slider.max = "80";
+		slider.step = "5";
+		slider.className = "threshold-slider";
+		const valueEl = el("span", "threshold-value", "");
+		const offBtn = el("button", "threshold-off", "Off") as HTMLButtonElement;
+		slider.addEventListener("input", () => {
+			valueEl.textContent = `${slider.value}%`;
+		});
+		slider.addEventListener("change", () => {
+			this.deps.onSetCompactThreshold(Number(slider.value));
+		});
+		offBtn.addEventListener("click", () => {
+			this.deps.onSetCompactThreshold(null);
+		});
+		row.append(slider, valueEl, offBtn);
+		panel.append(title, row);
+		this.contextWrap.appendChild(panel);
+		this.thresholdFlyout = panel;
+		return panel;
+	}
+
+	private renderThresholdFlyout(): void {
+		const panel = this.thresholdFlyout;
+		if (!panel) return;
+		const slider = panel.querySelector(".threshold-slider") as HTMLInputElement | null;
+		const valueEl = panel.querySelector(".threshold-value");
+		if (slider && this.compactThreshold != null) slider.value = String(this.compactThreshold);
+		if (valueEl) valueEl.textContent = this.compactThreshold != null ? `${this.compactThreshold}%` : "off";
+		const offBtn = panel.querySelector(".threshold-off");
+		offBtn?.classList.toggle("active", this.compactThreshold === null);
+	}
+
+	private toggleThresholdFlyout(): void {
+		const panel = this.ensureThresholdFlyout();
+		if (panel.classList.contains("visible")) {
+			panel.classList.remove("visible");
+			return;
+		}
+		this.renderThresholdFlyout();
+		panel.classList.add("visible");
+		setTimeout(() => {
+			const closeOnce = (event: MouseEvent) => {
+				if (this.thresholdFlyout && !this.thresholdFlyout.contains(event.target as Node) && !this.contextWrap.contains(event.target as Node)) {
+					this.thresholdFlyout.classList.remove("visible");
+					document.removeEventListener("mousedown", closeOnce, true);
+				}
+			};
+			document.addEventListener("mousedown", closeOnce, true);
+		}, 0);
 	}
 
 	addSelection(selection: SelectionAttachment): void {
@@ -256,20 +341,24 @@ export class Composer {
 	}
 
 	addImages(images: ImageAttachment[]): void {
+		if (images.length === 0) return;
+		if (!this.vision) {
+			this.showHint("Current model is text-only — switch to a vision model to attach images.");
+			return;
+		}
 		this.images.push(...images);
 		this.renderChips();
 	}
 
 	insertMention(path: string): void {
-		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
-		const before = this.textarea.value.slice(0, caret);
-		const after = this.textarea.value.slice(caret);
-		const sep = before && !before.endsWith("\n") && !before.endsWith(" ") ? " " : "";
-		this.textarea.value = `${before}${sep}@${path} ${after}`;
-		const pos = before.length + sep.length + path.length + 2;
-		this.textarea.selectionStart = this.textarea.selectionEnd = pos;
+		if (!this.mentions.includes(path)) this.mentions.push(path);
+		this.renderChips();
 		this.autoGrow();
 		this.focus();
+	}
+
+	textIsEmpty(): boolean {
+		return this.textarea.value.trim() === "";
 	}
 
 	setText(text: string): void {
@@ -295,19 +384,23 @@ export class Composer {
 
 	send(): void {
 		const text = this.textarea.value.trim();
-		if (!text && this.images.length === 0 && this.selections.length === 0) return;
+		if (!text && this.images.length === 0 && this.selections.length === 0 && this.mentions.length === 0) return;
 		if (this.images.length > 0 && !this.vision) {
 			this.showHint("Dropped images: current model is text-only. Switch to a vision model or remove the chips.");
 			this.images = [];
 			this.renderChips();
 		}
-		this.deps.onSend(text, this.images, this.selections);
+		const mentionTokens = this.mentions.map((m) => `@${m}`).join(" ");
+		const payload = mentionTokens ? `${mentionTokens} ${text}`.trim() : text;
+		this.deps.onSend(payload, this.images, this.selections);
 		this.textarea.value = "";
 		this.images = [];
 		this.selections = [];
+		this.mentions = [];
 		this.renderChips();
 		this.autoGrow();
 		this.closeAutocomplete();
+		this.deps.onDraftChanged("");
 	}
 
 	get streamingBehavior(): "steer" | "followUp" {
@@ -344,6 +437,46 @@ export class Composer {
 
 	private isFavorite(model: RpcModel): boolean {
 		return this.favorites.some((f) => f.provider === model.provider && f.modelId === model.id);
+	}
+
+	/** Brain popout: per-row thinking-level picker for reasoning models. */
+	private brainAccessory(model: RpcModel): HTMLButtonElement {
+		const isCurrent = model.provider === this.currentModel.provider && model.id === this.currentModel.modelId;
+		const btn = document.createElement("button");
+		btn.className = "dropdown-brain";
+		btn.title = isCurrent ? `Thinking level: ${this.currentThinking} (click to change)` : "Thinking levels";
+		btn.setAttribute("aria-label", "Thinking levels");
+		btn.appendChild(icon("brain", 14));
+		btn.addEventListener("mousedown", (event) => event.preventDefault());
+		btn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.openThinkingFor(model, isCurrent);
+		});
+		return btn;
+	}
+
+	private openThinkingFor(model: RpcModel, isCurrentModel: boolean): void {
+		const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
+		const items: DropdownItem[] = levels.map((level) => ({
+			label: level,
+			sub: level === "xhigh" ? "max depth (codex-max only)" : undefined,
+			current: isCurrentModel && level === this.currentThinking,
+			onSelect: () => {
+				if (!isCurrentModel) this.deps.onSetModel(model.provider, model.id);
+				this.deps.onSetThinking(level);
+			},
+		}));
+		this.modelMenu?.hide();
+		this.thinkingMenu?.hide();
+		if (!isCurrentModel) {
+			items.unshift({
+				label: "Select this model too",
+				sub: "Thinking levels apply to the active model",
+				onSelect: () => this.deps.onSetModel(model.provider, model.id),
+			});
+		}
+		this.thinkingMenu = new Dropdown(this.modelBtn, { header: `Thinking — ${this.modelLabelFor(model)}` });
+		this.thinkingMenu.show(items);
 	}
 
 	private starAccessory(model: RpcModel): (row: HTMLElement) => void {
@@ -387,26 +520,16 @@ export class Composer {
 			right: rightFor(model),
 			section,
 			current: model.provider === this.currentModel.provider && model.id === this.currentModel.modelId,
-			accessory: this.starAccessory(model),
+			accessory: (row) => {
+				if (model.reasoning) row.appendChild(this.brainAccessory(model));
+				this.starAccessory(model)(row);
+			},
 			onSelect: () => this.deps.onSetModel(model.provider, model.id),
 		});
 		const items: DropdownItem[] = [
 			...favorites.map((m) => makeItem(m, "Favorites")),
 			...rest.map((m) => makeItem(m, favorites.length > 0 ? "All models" : "Models")),
 		];
-		// Nested thinking levels for the current reasoning model (Codex-style).
-		if (this.reasoning) {
-			const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
-			for (const level of levels) {
-				items.push({
-					label: level,
-					sub: level === "xhigh" ? "codex-max only" : undefined,
-					section: "Thinking level",
-					current: level === this.currentThinking,
-					onSelect: () => this.deps.onSetThinking(level),
-				});
-			}
-		}
 		this.attachMenu?.hide();
 		this.modelMenu = new Dropdown(this.modelBtn, { placeholder: "Search models…", maxHeight: 340 });
 		this.modelMenu.show(items);
@@ -452,6 +575,23 @@ export class Composer {
 
 	private renderChips(): void {
 		this.chipsEl.textContent = "";
+		for (const mention of this.mentions) {
+			const chip = el("div", "compose-chip mention");
+			chip.title = mention;
+			chip.appendChild(icon("file", 12));
+			const part = mention.includes("/") ? mention.slice(mention.lastIndexOf("/") + 1) : mention;
+			chip.appendChild(el("span", "chip-label", `@${part}`));
+			const remove = el("button", "chip-remove");
+			remove.appendChild(icon("close", 11));
+			remove.addEventListener("click", (event) => {
+				event.stopPropagation();
+				this.mentions = this.mentions.filter((m) => m !== mention);
+				this.renderChips();
+			});
+			chip.appendChild(remove);
+			chip.addEventListener("click", () => this.deps.onOpenFile(mention));
+			this.chipsEl.appendChild(chip);
+		}
 		for (const sel of this.selections) {
 			const chip = el("div", "compose-chip");
 			chip.title = `${sel.path} lines ${sel.startLine}-${sel.endLine}`;
@@ -541,7 +681,8 @@ export class Composer {
 		const before = this.textarea.value.slice(0, caret);
 		const match = before.match(/(^|[\s])@([\w./-]*)$/);
 		if (!match) return null;
-		return { start: caret - match[2].length, query: match[2] };
+		// start must include the "@" itself or accepting inserts a second one.
+		return { start: caret - match[2].length - 1, query: match[2] };
 	}
 
 	private updateAutocomplete(): void {
@@ -610,8 +751,13 @@ export class Composer {
 		} else {
 			const before = this.textarea.value.slice(0, this.acMentionStart);
 			const after = this.textarea.value.slice(caret);
-			this.textarea.value = `${before}@${item.insert} ${after}`;
-			const pos = before.length + item.insert.length + 2;
+			const path = item.insert;
+			if (!this.mentions.includes(path)) this.mentions.push(path);
+			this.renderChips();
+			const tail = after.replace(/^\s+/, "");
+			const glue = tail && before && !before.endsWith(" ") ? " " : "";
+			this.textarea.value = `${before}${glue}${tail}`;
+			const pos = before.length + glue.length;
 			this.textarea.selectionStart = this.textarea.selectionEnd = pos;
 		}
 		this.closeAutocomplete();

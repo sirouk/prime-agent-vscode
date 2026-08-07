@@ -180,6 +180,18 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 		case "exportChat":
 			await controller.exportChat();
 			return;
+		case "forkFromUser":
+			await controller.forkFromUser(message.ordinal);
+			return;
+		case "copyConversation":
+			await controller.copyConversation();
+			return;
+		case "draftChanged":
+			controller.persistDraft(message.text);
+			return;
+		case "setCompactThreshold":
+			controller.setCompactThreshold(message.percent);
+			return;
 		case "restart":
 			await controller.restart();
 			await controller.refreshSnapshot();

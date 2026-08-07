@@ -79,7 +79,7 @@ hostMessage({
 const scroller = document.querySelector(".messages");
 check("welcome removed after snapshot", !document.querySelector(".welcome"));
 check("user bubble rendered", !!scroller.querySelector(".bubble-user"));
-check("assistant avatar rendered", !!scroller.querySelector(".avatar svg"));
+check("assistant row has no avatar (full width)", !scroller.querySelector(".avatar svg") && !!scroller.querySelector(".row-assistant .row-body"));
 check("markdown list rendered", scroller.querySelectorAll(".md li").length === 2);
 check("code block with header rendered", scroller.querySelectorAll(".codeblock").length === 1);
 check("thinking block rendered", !!scroller.querySelector("details.thinking"));
@@ -89,7 +89,7 @@ check("edit path row rendered", !!scroller.querySelector(".tool-path"));
 check("bash term prompt rendered", [...scroller.querySelectorAll(".term-prompt")].some((p) => p.textContent === "$ "));
 check("tool pill shows done", [...scroller.querySelectorAll(".tool-pill")].some((p) => p.textContent === "done"));
 check("usage line rendered", scroller.querySelectorAll(".usage-line").length >= 1);
-check("hover copy actions exist", scroller.querySelectorAll(".row-actions").length >= 2);
+check("user footer with copy + fork", !!scroller.querySelector(".row-user .user-footer .uf-icon") && scroller.querySelectorAll(".row-user .user-footer .uf-icon").length === 2);
 check("session title shown", document.querySelector(".session-title").textContent === "demo");
 check("live badge", document.querySelector(".live-label").textContent === "live");
 check("context meter labeled", document.querySelector(".context-label").textContent.includes("262k"));
@@ -98,9 +98,9 @@ check("context meter labeled", document.querySelector(".context-label").textCont
 hostMessage({
 	type: "models",
 	models: [
-		{ provider: "chutes", id: "kimi", contextWindow: 262144, reasoning: true },
-		{ provider: "chutes", id: "glm", contextWindow: 131072, reasoning: false },
-		{ provider: "openai", id: "gpt-5", contextWindow: 400000, reasoning: true },
+		{ provider: "chutes", id: "kimi", contextWindow: 262144, reasoning: true, input: ["text", "image"] },
+		{ provider: "chutes", id: "glm", contextWindow: 131072, reasoning: false, input: ["text"] },
+		{ provider: "openai", id: "gpt-5", contextWindow: 400000, reasoning: true, input: ["text", "image"] },
 	],
 });
 hostMessage({ type: "favorites", favorites: [{ provider: "chutes", modelId: "kimi" }] });
@@ -110,7 +110,7 @@ const dropdown = document.querySelector(".dropdown");
 check("model menu opens", !!dropdown);
 check("model menu has search", !!dropdown.querySelector(".dropdown-search"));
 check("favorites section present", [...document.querySelectorAll(".dropdown-section")].some((s) => s.textContent === "Favorites"));
-check("model + nested thinking items present", document.querySelectorAll(".dropdown-item").length === 3 + 6,
+check("model menu items only (no thinking section)", document.querySelectorAll(".dropdown-item").length === 3,
 	`${document.querySelectorAll(".dropdown-item").length} items`);
 posted.length = 0;
 // toggle favorite on the gpt-5 row
@@ -122,25 +122,36 @@ const glmRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.te
 glmRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("select posts setModel", posted.some((m) => m.type === "setModel" && m.modelId === "glm"));
 check("menu closed after select", !document.querySelector(".dropdown"));
-// non-reasoning model: model menu must not offer the Thinking section
+// non-reasoning model rows: brain accessory absent
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm", thinkingLevel: "off" } });
 modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check(
-	"no Thinking section for non-reasoning model",
-	![...document.querySelectorAll(".dropdown-section")].some((s) => s.textContent === "Thinking level"),
-);
+const glmRowNoBrain = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("glm"));
+check("no brain popout on non-reasoning model", glmRowNoBrain && !glmRowNoBrain.querySelector(".dropdown-brain"));
 document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-// reasoning model: nested Thinking section with current level marked
+// reasoning model: brain accessory opens the levels menu ("max" normalized)
 hostMessage({ type: "status", status: { ...baseStatus } });
 hostMessage({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" }, status: baseStatus });
 modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-const tDrop = document.querySelector(".dropdown");
-check("thinking section nested in model menu", [...tDrop.querySelectorAll(".dropdown-section")].some((s) => s.textContent === "Thinking level"));
-posted.length = 0;
-[...tDrop.querySelectorAll(".dropdown-item")].find((r) => r.textContent.startsWith("high")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("select posts setThinkingLevel", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"));
+const kimiRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("kimi"));
+const brain = kimiRow.querySelector(".dropdown-brain");
+check("brain accessory on reasoning model", !!brain);
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+if (brain) {
+	modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	const kimiRow2 = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("kimi"));
+	kimiRow2.querySelector(".dropdown-brain").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	const tDrop = document.querySelector(".dropdown");
+	check("brain opens thinking levels menu", !!tDrop && (tDrop.querySelector(".dropdown-header")?.textContent ?? "").startsWith("Thinking —"));
+	const levels = [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].map((r) => r.textContent.trim());
+	check("all six levels listed", levels.some((l) => l.startsWith("xhigh")) && levels.some((l) => l.startsWith("off")));
+	check("current level marked (max normalized)", [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].some((r) => r.className.includes("current") && r.textContent.startsWith("xhigh")));
+	posted.length = 0;
+	[...tDrop.querySelectorAll(".dropdown-item")].find((r) => r.textContent.startsWith("high")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	check("select posts setThinkingLevel", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"));
+}
 
 // --- unified attach menu (vision-gated image item on a text model) ---
+hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 const attachBtn = [...document.querySelectorAll(".composer-rail .icon-btn")].find((b) => b.title.startsWith("Attach"));
 attachBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const attachMenu = document.querySelector(".dropdown");
@@ -190,9 +201,17 @@ check(
 );
 check("paste did not post a prompt", !posted.some((m) => m.type === "prompt"));
 
-// --- send() with an attached image chip strips images and warns on a text-only model ---
+// --- imagePicked on a text-only model is refused with a hint; on vision it attaches ---
+posted.length = 0;
 hostMessage({ type: "imagePicked", images: [{ data: "aGk=", mimeType: "image/png", name: "pic.png" }] });
-check("image chip rendered", document.querySelectorAll(".composer-chips .compose-chip.image").length === 1);
+check("image pick refused on text-only model", document.querySelectorAll(".composer-chips .compose-chip.image").length === 0);
+check("refusal hint visible", pasteHint.classList.contains("visible") && pasteHint.textContent.includes("text-only"), pasteHint.textContent);
+// switch back to a vision model: the chip now attaches
+hostMessage({ type: "status", status: { ...baseStatus } });
+hostMessage({ type: "imagePicked", images: [{ data: "aGk=", mimeType: "image/png", name: "pic.png" }] });
+check("image chip rendered on vision model", document.querySelectorAll(".composer-chips .compose-chip.image").length === 1);
+// then switching to a text-only model strips + warns on send
+hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 posted.length = 0;
 textarea.value = "with image";
 textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
@@ -203,6 +222,7 @@ check("send guard hint visible", pasteHint.classList.contains("visible") && past
 	pasteHint.textContent);
 check("chips cleared after guarded send", document.querySelectorAll(".composer-chips .compose-chip").length === 0);
 check("optimistic bubble has no image strip", !document.querySelector(".bubble-images"));
+hostMessage({ type: "status", status: { ...baseStatus } });
 
 // --- @-mention chips in user bubbles ---
 hostMessage({

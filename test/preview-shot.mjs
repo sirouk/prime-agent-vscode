@@ -78,7 +78,13 @@ async function verifyModelmenu2(page) {
 		});
 	});
 	const sections = rows.filter((r) => r.kind === "section").map((r) => r.name);
-	out.push(mk("sections in order: Favorites, All models, Thinking level", JSON.stringify(sections) === JSON.stringify(["Favorites", "All models", "Thinking level"]), JSON.stringify(sections)));
+	out.push(
+		mk(
+			"sections in order: Favorites, All models (thinking moved to brain popout)",
+			JSON.stringify(sections) === JSON.stringify(["Favorites", "All models"]),
+			JSON.stringify(sections),
+		),
+	);
 
 	const items = rows.filter((r) => r.kind === "item");
 	const favs = items.filter((r) => r.section === "Favorites");
@@ -92,25 +98,56 @@ async function verifyModelmenu2(page) {
 	const all = items.filter((r) => r.section === "All models");
 	out.push(mk("All models section: 3 remaining models", all.length === 3, JSON.stringify(all.map((a) => a.label))));
 
-	const thinking = items.filter((r) => r.section === "Thinking level");
+	// Brain accessory: reasoning models only, popout with six levels.
+	const brains = await page.evaluate(() =>
+		[...document.querySelectorAll(".dropdown-item")].map((r) => ({
+			label: r.querySelector(".dropdown-text")?.textContent ?? "",
+			brain: !!r.querySelector(".dropdown-brain"),
+		})),
+	);
+	const brainlessText = brains.filter((b) => !b.brain).map((b) => b.label);
+	// Fixture: Kimi/claude/gpt-5.2/GLM are reasoning=true, DeepSeek is not.
 	out.push(
 		mk(
-			"Thinking level section has six levels off/minimal/low/medium/high/xhigh",
-			JSON.stringify(thinking.map((t) => t.label)) === JSON.stringify(["off", "minimal", "low", "medium", "high", "xhigh"]),
-			JSON.stringify(thinking.map((t) => `${t.label}${t.sub ? ` (${t.sub})` : ""}${t.current ? " [current]" : ""}`)),
+			"brain accessory on all four reasoning models, absent on DeepSeek",
+			brains.filter((b) => b.brain).length === 4 && brainlessText.length === 1 && brainlessText[0].includes("DeepSeek"),
+			JSON.stringify(brains),
 		),
 	);
-	const currentThinking = thinking.filter((t) => t.current);
-	// Daemon reports "max" for the top level; the UI normalizes it to "xhigh".
+	// Open the brain popout on the current model row.
+	await page.evaluate(() => {
+		const row = [...document.querySelectorAll(".dropdown-item")].find((r) => (r.querySelector(".dropdown-text")?.textContent ?? "").includes("Kimi"));
+		row?.querySelector(".dropdown-brain")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	});
+	const menuInfo = await page.evaluate(() => {
+		const dd = document.querySelector(".dropdown");
+		const header = dd?.querySelector(".dropdown-header")?.textContent ?? "";
+		const levels = [...(dd?.querySelectorAll(".dropdown-item") ?? [])].map((r) => ({
+			label: r.querySelector(".dropdown-text, .dropdown-item, button")?.textContent?.trim() ?? r.textContent.trim(),
+			current: r.classList.contains("current"),
+		}));
+		return { header, levels };
+	});
+	out.push(mk("brain popout header names the model", menuInfo.header.startsWith("Thinking —"), menuInfo.header));
+	const levelNames = menuInfo.levels.map((l) => l.label.split(" ")[0].split("\n")[0]);
+	out.push(mk("six levels including xhigh", levelNames.includes("off") && levelNames.includes("xhigh"), JSON.stringify(menuInfo.levels)));
 	out.push(
 		mk(
-			"current thinking level 'max' normalized and checked in the dropdown",
-			currentThinking.length === 1 && currentThinking[0].label === "xhigh",
-			`status.thinkingLevel="max" -> marked-current items: ${JSON.stringify(currentThinking.map((t) => t.label))}`,
+			"current level marked (max normalized to xhigh)",
+			menuInfo.levels.filter((l) => l.current).length === 1 && menuInfo.levels.some((l) => l.current && l.label.startsWith("xhigh")),
+			JSON.stringify(menuInfo.levels.filter((l) => l.current)),
 		),
 	);
+	// Selecting high posts setThinkingLevel.
+	await page.evaluate(() => {
+		const dd = document.querySelector(".dropdown");
+		const row = [...(dd?.querySelectorAll(".dropdown-item") ?? [])].find((r) => r.textContent.trim().startsWith("high"));
+		row?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	});
+	const thinkPosts = await page.evaluate(() => postedMessages.filter((m) => m.type === "setThinkingLevel").map((m) => m.level));
+	out.push(mk("selecting high posts setThinkingLevel", thinkPosts.includes("high"), JSON.stringify(thinkPosts)));
 
-	const withImg = items.filter((r) => r.section !== "Thinking level" && (r.right ?? "").includes("img")).map((r) => r.label);
+		const withImg = items.filter((r) => r.section !== "Thinking level" && (r.right ?? "").includes("img")).map((r) => r.label);
 	const expectImg = ["chutes/moonshotai/Kimi-K3-TEE", "anthropic/claude-sonnet-4-5", "openai/gpt-5.2-codex"];
 	const textOnlyImgless = items.filter((r) => ["chutes/deepseek-ai/DeepSeek-V3.2", "chutes/zai-org/GLM-4.7"].includes(r.label)).every((r) => !(r.right ?? "").includes("img"));
 	out.push(mk("vision-capable models show 'img' badge, text-only models do not", JSON.stringify(withImg.sort()) === JSON.stringify(expectImg.sort()) && textOnlyImgless, `img badges on ${JSON.stringify(withImg)}`));

@@ -115,9 +115,13 @@ const expectedCommands = [
 	"primeAgent.addActiveFileToChat",
 ];
 
+const _mem = new Map();
+const _state = { get: (k, d) => (_mem.has(k) ? _mem.get(k) : d), update: (k, v) => { if (v === undefined) _mem.delete(k); else _mem.set(k, v); return Promise.resolve(); } };
 const context = {
 	subscriptions: disposables,
 	extensionUri: { fsPath: process.cwd(), scheme: "file" },
+	globalState: _state,
+	workspaceState: _state,
 };
 
 extension.activate(context);

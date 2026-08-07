@@ -223,6 +223,10 @@ export type WebviewToHost =
 	| { type: "pickModel" }
 	| { type: "pickThinkingLevel" }
 	| { type: "toggleFavoriteModel"; provider: string; modelId: string }
+	| { type: "forkFromUser"; ordinal: number }
+	| { type: "copyConversation" }
+	| { type: "draftChanged"; text: string }
+	| { type: "setCompactThreshold"; percent: number | null }
 	| { type: "openExternal"; url: string };
 
 export interface StatusSnapshot {
@@ -238,6 +242,7 @@ export interface StatusSnapshot {
 	sessionId?: string;
 	statsText: string;
 	statusText?: string;
+	compactThresholdPercent?: number | null;
 	usageTotal?: number;
 	costUsd?: number;
 	contextTokens?: number | null;
@@ -274,6 +279,8 @@ export type HostToWebview =
 			steerDefault?: "steer" | "followUp";
 		}
 	| { type: "favorites"; favorites: ModelRef[] }
+	| { type: "draft"; text: string }
+	| { type: "compactThreshold"; percent: number | null }
 	| { type: "event"; event: AgentEvent }
 	| { type: "status"; status: StatusSnapshot }
 	| { type: "models"; models: RpcModel[] }

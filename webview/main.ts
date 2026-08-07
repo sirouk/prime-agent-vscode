@@ -106,6 +106,8 @@ const composerDeps = {
 	},
 	onStop: () => post({ type: "abort" }),
 	onSearchFiles: (query: string, requestId: number) => post({ type: "searchFiles", query, requestId }),
+	onDraftChanged: (text: string) => post({ type: "draftChanged", text }),
+	onSetCompactThreshold: (percent: number | null) => post({ type: "setCompactThreshold", percent }),
 	onPickImage: () => post({ type: "pickImage", requestId: Date.now() }),
 	onAttachSelection: () => post({ type: "attachSelection" }),
 	onAttachActiveFile: () => post({ type: "attachActiveFile" }),
@@ -120,6 +122,7 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 	onOpenLink: (href) => post({ type: "openExternal", url: href }),
 	onOpenFile: (path, startLine, endLine) => post({ type: "openFile", path, startLine, endLine }),
 	onOpenDiff: (path) => post({ type: "openDiff", path }),
+	onForkFromUser: (ordinal) => post({ type: "forkFromUser", ordinal }),
 	onNewSession: () => post({ type: "newSession" }),
 	onShowHistory: () => {
 		showView("history");
@@ -149,7 +152,14 @@ const connDot = el("span", "conn-dot");
 const liveLabel = el("span", "live-label", "connecting");
 const sessionIdLabel = el("span", "session-id", "");
 const statsLabel = el("span", "stats-label", "");
-statusStrip.append(connDot, liveLabel, sessionIdLabel, el("span", "spacer"), statsLabel);
+const convCopy = el("button", "strip-icon") as HTMLButtonElement;
+convCopy.title = "Copy the whole conversation (Markdown with summarized tool calls)";
+convCopy.appendChild(icon("copy", 11));
+convCopy.addEventListener("click", (event) => {
+	event.stopPropagation();
+	post({ type: "copyConversation" });
+});
+statusStrip.append(connDot, liveLabel, sessionIdLabel, el("span", "spacer"), statsLabel, convCopy);
 
 app.append(topbar, menu, notices, observeBanner, chatView, historyView.root, composer.root, statusStrip);
 historyView.root.style.display = "none";
@@ -210,6 +220,7 @@ function applyStatus(status: StatusSnapshot): void {
 	composer.setThinking(status.thinkingLevel);
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
+	if (status.compactThresholdPercent !== undefined) composer.setCompactThreshold(status.compactThresholdPercent);
 	if (status.statusText) liveLabel.textContent = status.statusText;
 	setObserving(!!status.observingId);
 }
@@ -285,6 +296,15 @@ function dispatchHostMessage(message: HostToWebview): void {
 			break;
 		case "favorites":
 			composer.setFavorites(message.favorites);
+			break;
+		case "draft":
+			if (message.text && composer.textIsEmpty()) {
+				composer.setText(message.text);
+				composer.focus();
+			}
+			break;
+		case "compactThreshold":
+			composer.setCompactThreshold(message.percent);
 			break;
 		case "commands":
 			composer.setCommands(message.commands);

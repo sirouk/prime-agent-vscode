@@ -26,6 +26,7 @@ export interface TranscriptDeps {
 	onOpenLink: (href: string) => void;
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => void;
 	onOpenDiff: (path: string) => void;
+	onForkFromUser: (ordinal: number) => void;
 	onNewSession: () => void;
 	onShowHistory: () => void;
 	onFocusComposer: () => void;
@@ -55,12 +56,113 @@ export class Transcript {
 	private welcome: HTMLElement | null = null;
 	private changedFilesBar: HTMLElement;
 
+	private stickToBottom = true;
+	private jumpBtn: HTMLElement | null = null;
+	/** Selections saved on collapse, key = the collapsible element (details / .tool root). */
+	private savedSelections = new WeakMap<HTMLElement, string>();
+
+	/**
+	 * Capture the user's text selection inside a collapsible block before it is
+	 * hidden, so expanding can restore it (and extend it to cover the content
+	 * that was hidden while collapsed).
+	 */
+	private captureSelection(block: HTMLElement): void {
+		const sel = window.getSelection();
+		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+		const range = sel.getRangeAt(0);
+		if (!block.contains(range.commonAncestorContainer)) return;
+		this.savedSelections.set(block, range.toString());
+	}
+
+	private restoreSelection(block: HTMLElement): void {
+		const saved = this.savedSelections.get(block);
+		if (!saved || !saved.trim()) return;
+		this.savedSelections.delete(block);
+		const anchor = saved.slice(0, 60).trimStart();
+		const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+		let startNode: Text | null = null;
+		let startOffset = 0;
+		let endNode: Text | null = null;
+		let endOffset = 0;
+		let acc = "";
+		let node: Text | null;
+		while ((node = walker.nextNode() as Text | null)) {
+			const content = node.data ?? "";
+			if (!startNode) {
+				const at = (acc + content).indexOf(anchor);
+				if (at >= 0) {
+					const local = Math.min(content.length, Math.max(0, at - acc.length));
+					startNode = node;
+					startOffset = local;
+				}
+			}
+			endNode = node;
+			endOffset = content.length;
+			acc += content;
+		}
+		if (!startNode || !endNode) return;
+		const range = document.createRange();
+		range.setStart(startNode, startOffset);
+		range.setEnd(endNode, endOffset);
+		const sel = window.getSelection();
+		sel?.removeAllRanges();
+		sel?.addRange(range);
+		block.scrollIntoView({ block: "nearest" });
+	}
+
+	private wireSelectionPreserve(): void {
+		// <details> thinking blocks
+		this.scroller.addEventListener("toggle", (event) => {
+			const d = event.target as HTMLDetailsElement;
+			if (!(d instanceof HTMLDetailsElement)) return;
+			if (d.open) this.restoreSelection(d);
+			else this.captureSelection(d);
+		}, true);
+		// .tool cards (class-based toggle)
+		this.scroller.addEventListener("click", (event) => {
+			const header = (event.target as HTMLElement).closest(".tool-header");
+			const root = header?.closest(".tool") as HTMLElement | null;
+			if (!header || !root) return;
+			if (root.classList.contains("open")) {
+				this.captureSelection(root);
+			} else {
+				setTimeout(() => this.restoreSelection(root), 0);
+			}
+		}, true);
+	}
+
 	constructor(
 		private readonly scroller: HTMLElement,
 		changedFilesBar: HTMLElement,
 		private readonly deps: TranscriptDeps,
 	) {
 		this.changedFilesBar = changedFilesBar;
+		// Scroll-lock: only auto-follow the stream while the reader is already
+		// at (or very near) the bottom. Scrolling up during a reply must never
+		// be overridden by updates. A "latest" jump pill appears while un-stuck.
+		this.wireSelectionPreserve();
+		this.scroller.addEventListener("scroll", () => {
+			const nearBottom = this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight < 48;
+			this.stickToBottom = nearBottom;
+			this.updateJumpButton();
+		}, { passive: true });
+	}
+
+	private updateJumpButton(): void {
+		if (this.stickToBottom) {
+			this.jumpBtn?.classList.remove("visible");
+			return;
+		}
+		if (!this.jumpBtn) {
+			this.jumpBtn = el("button", "jump-to-latest", "↓ latest");
+			this.jumpBtn.addEventListener("click", () => {
+				this.stickToBottom = true;
+				this.scrollToBottom();
+				this.updateJumpButton();
+			});
+			this.scroller.appendChild(this.jumpBtn);
+		}
+		this.jumpBtn.classList.add("visible");
 	}
 
 	// ---------------------------------------------------------------
@@ -348,9 +450,6 @@ export class Transcript {
 	private buildUserRow(message: UserMessage): HTMLElement {
 		const row = el("div", "row row-user");
 		const plainText = this.userMessageText(message);
-		const actions = el("div", "row-actions");
-		actions.appendChild(this.makeCopyButton(plainText));
-		row.appendChild(actions);
 		const bubble = el("div", "bubble bubble-user");
 		if (typeof message.content === "string") {
 			bubble.appendChild(this.renderUserTextWithMentions(message.content));
@@ -371,15 +470,43 @@ export class Transcript {
 			}
 		}
 		row.appendChild(bubble);
+		if (plainText.trim().length > 0) {
+			row.appendChild(this.buildUserFooter(row, plainText));
+		}
 		return row;
+	}
+
+	/** Footer under a user bubble: estimated token count, copy, and fork-from-here. */
+	private buildUserFooter(row: HTMLElement, text: string): HTMLElement {
+		const footer = el("div", "user-footer");
+		const est = Math.max(1, Math.round(text.length / 4));
+		const estLabel = est >= 1000 ? `~${(est / 1000).toFixed(1)}k tokens (est.)` : `~${est} tokens (est.)`;
+		const tokensEl = el("span", "uf-tokens", estLabel);
+		tokensEl.title = "Estimated from message length (~4 chars/token). Cost is tracked on assistant replies.";
+		footer.appendChild(tokensEl);
+		const copyBtn = el("button", "uf-icon") as HTMLButtonElement;
+		copyBtn.title = "Copy message";
+		copyBtn.appendChild(icon("copy", 11));
+		copyBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			copyToClipboard(text);
+		});
+		const forkBtn = el("button", "uf-icon") as HTMLButtonElement;
+		forkBtn.title = "Fork the session starting from this message";
+		forkBtn.appendChild(icon("fork", 11));
+		forkBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			const users = Array.from(this.scroller.querySelectorAll(".row-user"));
+			const ordinal = users.indexOf(row);
+			if (ordinal >= 0) this.deps.onForkFromUser(ordinal);
+		});
+		footer.append(copyBtn, forkBtn);
+		return footer;
 	}
 
 	private buildAssistantRow(message: AssistantMessage, isPartial: boolean): HTMLElement {
 		const row = el("div", "row row-assistant");
 		this.fillAssistantRow(row, message, isPartial);
-		const actions = el("div", "row-actions");
-		actions.appendChild(this.makeCopyButton(this.assistantAllText(message)));
-		row.appendChild(actions);
 		return row;
 	}
 
@@ -405,13 +532,8 @@ export class Transcript {
 
 	private fillAssistantRow(row: HTMLElement, message: AssistantMessage, isPartial: boolean): void {
 		row.textContent = "";
-		const existingActions = el("div", "row-actions");
-		existingActions.appendChild(this.makeCopyButton(this.assistantAllText(message)));
-		row.appendChild(existingActions);
-		const avatar = el("div", "avatar");
-		avatar.appendChild(butterfly(16));
 		const body = el("div", "row-body");
-		row.append(avatar, body);
+		row.append(body);
 		for (const part of (message as AssistantMessage).content ?? []) {
 			if (part.type === "text") {
 				if (!part.text.trim()) continue;
@@ -439,6 +561,15 @@ export class Transcript {
 		const details = el("details", "thinking") as HTMLDetailsElement;
 		details.open = isPartial;
 		const summary = el("summary", "", "Thought process");
+		const copyBtn = el("button", "thinking-copy") as HTMLButtonElement;
+		copyBtn.title = "Copy thinking";
+		copyBtn.appendChild(icon("copy", 11));
+		copyBtn.addEventListener("click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			copyToClipboard(thinking);
+		});
+		summary.appendChild(copyBtn);
 		const body = el("div", "thinking-body");
 		body.textContent = thinking;
 		details.append(summary, body);
@@ -460,6 +591,14 @@ export class Transcript {
 		if (parts.length === 0) return null;
 		const line = el("div", `usage-line${isError ? " error" : ""}`, parts.join(" · "));
 		if (message.model) line.title = message.model;
+		const copyBtn = el("button", "uf-icon usage-copy") as HTMLButtonElement;
+		copyBtn.title = "Copy the full reply (text + thinking)";
+		copyBtn.appendChild(icon("copy", 11));
+		copyBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			copyToClipboard(this.assistantAllText(message));
+		});
+		line.appendChild(copyBtn);
 		return line;
 	}
 
@@ -502,7 +641,14 @@ export class Transcript {
 		const nameEl = el("span", "tool-name", name);
 		const summary = el("span", "tool-summary", this.toolSummary(name, args));
 		const pill = el("span", "tool-pill", "running");
-		header.append(chevron, statusDot, nameEl, summary, pill);
+		const copyAllBtn = el("button", "uf-icon tool-copy-all") as HTMLButtonElement;
+		copyAllBtn.title = "Copy full tool call and all output (markdown)";
+		copyAllBtn.appendChild(icon("copy", 11));
+		copyAllBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			copyToClipboard(this.buildToolCopy(id));
+		});
+		header.append(chevron, statusDot, nameEl, summary, pill, copyAllBtn);
 		const body = el("div", "tool-body");
 		root.append(header, body);
 		header.addEventListener("click", () => {
@@ -565,6 +711,24 @@ export class Transcript {
 		root.dataset.toolName = name;
 		this.toolBlocks.set(id, block);
 		return block;
+	}
+
+	/** Full tool call + every captured output section, formatted for paste into chat/docs. */
+	private buildToolCopy(id: string): string {
+		const block = this.toolBlocks.get(id);
+		if (!block) return "";
+		const name = (block.root as HTMLElement & { dataset: DOMStringMap }).dataset.toolName ?? "tool";
+		const parts: string[] = [`⚙ ${name}`];
+		const inputPre = block.body.querySelector(".tool-section pre");
+		if (inputPre?.textContent?.trim()) {
+			const lang = name === "ipython" ? "python" : name === "bash" ? "shell" : "";
+			parts.push(`\`\`\`${lang ? lang : ""}\n${inputPre.textContent.trim()}\n\`\`\``);
+		}
+		block.body.querySelectorAll(".tool-result pre").forEach((pre) => {
+			const t = (pre.textContent ?? "").trim();
+			if (t) parts.push(`\`\`\`\n${t}\n\`\`\``);
+		});
+		return parts.join("\n\n");
 	}
 
 	private makeCopyButton(text: string): HTMLButtonElement {
@@ -710,7 +874,15 @@ export class Transcript {
 	// ---------------------------------------------------------------
 
 	scrollToBottom(): void {
+		if (!this.stickToBottom) return;
 		this.scroller.scrollTop = this.scroller.scrollHeight;
+	}
+
+	/** Unconditional snap — own sends or explicit user jumps. */
+	forceScrollToBottom(): void {
+		this.stickToBottom = true;
+		this.scroller.scrollTop = this.scroller.scrollHeight;
+		this.jumpBtn?.classList.remove("visible");
 	}
 }
 

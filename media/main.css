@@ -1573,3 +1573,226 @@ body.vscode-light pre.term {
 .mention-chip:hover {
 	text-decoration: underline;
 }
+
+/* ---------- scroll lock / jump-to-latest ---------- */
+
+.messages { position: relative; }
+
+.jump-to-latest {
+	position: sticky;
+	bottom: 8px;
+	left: 50%;
+	transform: translateX(-50%);
+	display: none;
+	font-size: 10.5px;
+	padding: 2px 10px;
+	border-radius: 10px;
+	background: var(--vscode-widget-background, var(--pa-raised));
+	border: 1px solid var(--vscode-widget-border, var(--pa-border));
+	color: var(--pa-dim);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+	cursor: pointer;
+	z-index: 5;
+}
+
+.jump-to-latest.visible { display: inline-flex; }
+.jump-to-latest:hover { color: var(--pa-accent); border-color: var(--pa-accent-dim); }
+
+/* ---------- composer mention chips ---------- */
+
+.compose-chip.mention {
+	border-color: var(--pa-accent-dim);
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}
+
+/* ---------- user message footer (tokens/copy/fork) ---------- */
+
+.user-footer {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 6px;
+	margin-top: 2px;
+	padding-right: 2px;
+	font-size: 9.5px;
+	color: var(--pa-faint);
+	opacity: 0;
+	transition: opacity 0.12s ease;
+}
+
+.row-user:hover .user-footer,
+.user-footer:focus-within {
+	opacity: 1;
+}
+
+.uf-tokens {
+	font-variant-numeric: tabular-nums;
+}
+
+.uf-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	border-radius: 4px;
+	color: var(--pa-faint);
+	padding: 0;
+}
+
+.uf-icon:hover {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}
+
+.usage-line {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.usage-copy {
+	opacity: 0;
+	transition: opacity 0.12s ease;
+}
+
+.row-assistant:hover .usage-copy {
+	opacity: 1;
+}
+
+/* ---------- thinking copy ---------- */
+
+.thinking-copy {
+	position: absolute;
+	right: 6px;
+	top: 50%;
+	transform: translateY(-50%);
+	display: inline-flex;
+	width: 16px;
+	height: 16px;
+	border-radius: 4px;
+	color: var(--pa-faint);
+	opacity: 0;
+	transition: opacity 0.12s ease;
+}
+
+.thinking summary {
+	position: relative;
+}
+
+.thinking:hover .thinking-copy,
+.thinking-copy:focus-visible {
+	opacity: 1;
+}
+
+.thinking-copy:hover {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}
+
+/* ---------- brain accessory in model dropdown ---------- */
+
+.dropdown-brain {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	border-radius: 4px;
+	color: var(--pa-faint);
+	padding: 0;
+}
+
+.dropdown-brain:hover {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}
+
+/* ---------- composer full-width rows ---------- */
+
+.row {
+	padding-left: 8px;
+	padding-right: 8px;
+}
+
+.row-body {
+	width: 100%;
+	max-width: none;
+}
+
+/* ---------- context meter + threshold flyout ---------- */
+
+.context-meter {
+	cursor: pointer;
+	position: relative;
+}
+
+.threshold-flyout {
+	display: none;
+	position: absolute;
+	right: 0;
+	bottom: calc(100% + 8px);
+	width: 210px;
+	padding: 9px 11px 10px;
+	background: var(--pa-surface-2, var(--vscode-editorWidget-background));
+	border: 1px solid var(--pa-border);
+	border-radius: 9px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+	z-index: 90;
+}
+
+.threshold-flyout.visible {
+	display: block;
+}
+
+.threshold-title {
+	font-size: 10px;
+	font-weight: 600;
+	color: var(--pa-dim);
+	margin-bottom: 7px;
+}
+
+.threshold-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+
+.threshold-slider {
+	flex: 1;
+	accent-color: var(--pa-accent);
+	height: 14px;
+}
+
+.threshold-value {
+	font-size: 10px;
+	width: 28px;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+
+.threshold-off {
+	font-size: 10px;
+	padding: 1px 7px;
+	border-radius: 6px;
+	color: var(--pa-dim);
+	border: 1px solid var(--pa-border);
+}
+
+.threshold-off.active {
+	color: var(--pa-accent);
+	border-color: var(--pa-accent-dim);
+}
+
+/* ---------- tool header copy-all ---------- */
+
+.tool-copy-all {
+	opacity: 0;
+	margin-left: 2px;
+	transition: opacity 0.12s ease;
+}
+
+.tool:hover .tool-copy-all {
+	opacity: 1;
+}
