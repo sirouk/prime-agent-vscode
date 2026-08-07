@@ -99,6 +99,18 @@ All under the `Prime Agent:` prefix, e.g. `Prime Agent: Focus Chat`, `New Sessio
 Header links: the butterfly / title opens the [Prime Agent blog post](https://www.primeintellect.ai/blog/prime-agent#article-top);
 the *⋯* menu links to [app.primeintellect.ai](https://app.primeintellect.ai).
 
+
+### Automating the market release
+
+`.github/workflows/publish.yml` publishes this extension on any GitHub release (and on manual dispatch).
+To enable it once:
+1. Azure DevOps → Personal Access Token with scope `Marketplace > Manage`, all organizations.
+2. GitHub → repo secrets: add `VSCE_PAT` with that value.
+
+Then `gh release create v1.0.4` (or `./release.sh`) publishes to the store automatically.
+
+---
+
 ## Development
 
 TypeScript + esbuild, no framework, no runtime npm dependencies in the shipped bundle.
