@@ -2108,7 +2108,7 @@ body.vscode-light pre.term {
 /* ---------- history search + stateful refresh ---------- */
 
 .history-search {
-	margin: 0 10px 6px;
+	margin: 8px 10px 6px;
 	padding: 4px 8px;
 	font-size: 11px;
 	background: var(--vscode-input-background, var(--pa-surface-2));

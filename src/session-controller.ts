@@ -256,6 +256,7 @@ export class SessionController implements vscode.Disposable {
 			case "session_info_changed":
 			case "thinking_level_changed":
 				void this.refreshStateAndStats();
+				this.scheduleHistoryRefresh();
 				break;
 		}
 		this.trackChangedFilesDone(event);
@@ -645,6 +646,17 @@ export class SessionController implements vscode.Disposable {
 		if (!cw || cw <= 0) return null;
 		const percent = Math.ceil(((cw - 16_384) / cw) * 100);
 		return Math.max(20, Math.min(97, percent));
+	}
+
+	private historyRefreshTimer: NodeJS.Timeout | null = null;
+
+	/** Debounced history refresh after rename-affecting signals (CLI or other clients). */
+	private scheduleHistoryRefresh(): void {
+		if (this.historyRefreshTimer) clearTimeout(this.historyRefreshTimer);
+		this.historyRefreshTimer = setTimeout(() => {
+			this.historyRefreshTimer = null;
+			void this.listHistory();
+		}, 800);
 	}
 
 	private autoCompactSent = false;
@@ -1104,6 +1116,7 @@ export class SessionController implements vscode.Disposable {
 		}
 		if (message.type === "session_status" && msgSessionId === attached.activeSessionId) {
 			void this.refreshAttachedState();
+			this.scheduleHistoryRefresh();
 			return;
 		}
 		if (message.type === "session_replaced" && msgSessionId === attached.activeSessionId) {

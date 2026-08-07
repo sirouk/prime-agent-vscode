@@ -57,11 +57,40 @@ export class HistoryView {
 
 	render(sessions: RecentSession[], currentId?: string): void {
 		const needle = this.query.trim().toLowerCase();
-		const filtered = needle
-			? sessions.filter((s) =>
-					[s.name, s.firstPrompt, s.cwd].some((v) => (v ?? "").toLowerCase().includes(needle)),
-				)
-			: sessions;
+		const haystackFields = (s: RecentSession): string[] =>
+			[s.name, s.firstPrompt, s.cwd]
+				.filter((v): v is string => typeof v === "string" && v.length > 0)
+				.map((v) => v.toLowerCase());
+
+		/** Rank: 3 exact substring · 2 all-tokens match · 1 subsequence fuzzy · 0/no hit. */
+		const rankOf = (s: RecentSession): number => {
+			if (!needle) return 1;
+			const fields = haystackFields(s);
+			const joined = fields.join(" ");
+			if (fields.some((f) => f.includes(needle))) return 3;
+			const tokens = needle.split(/\s+/).filter(Boolean);
+			if (tokens.length > 1 && tokens.every((tok) => joined.includes(tok))) return 2;
+			// subsequence: all chars of needle appear in order somewhere
+			const compressed = joined.replace(/[^a-z0-9./_-]/g, "");
+			let pos = 0;
+			const compactNeedle = needle.replace(/[^a-z0-9./_-]/g, "");
+			for (const ch of compressed) {
+				if (pos < compactNeedle.length && ch === compactNeedle[pos]) pos += 1;
+				else if (pos >= compactNeedle.length) break;
+			}
+			return pos >= Math.min(compactNeedle.length, 3) && pos === compactNeedle.length && compactNeedle.length > 0 ? 1 : 0;
+		};
+
+		const withRanks = sessions
+			.map((s) => ({ s, rank: rankOf(s) }))
+			.filter(({ rank }) => needle === "" || rank > 0);
+		withRanks.sort((a, b) => {
+			if (b.rank !== a.rank) return b.rank - a.rank;
+			const activityOf = (x: RecentSession): number =>
+				x.modifiedMs ?? (Number.isFinite(Date.parse(x.timestamp)) ? Date.parse(x.timestamp) : 0);
+			return activityOf(b.s) - activityOf(a.s);
+		});
+		const filtered = withRanks.map(({ s }) => s);
 		if (!needle) this.lastSessions = sessions;
 		this.currentId = currentId;
 		this.fetching = false;

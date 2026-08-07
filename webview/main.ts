@@ -417,7 +417,9 @@ function applyStatus(status: StatusSnapshot): void {
 	composer.setThinking(status.thinkingLevel, status.availableThinkingLevels ?? null);
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
-	if (status.compactThresholdPercent !== undefined) composer.setCompactThreshold(status.compactThresholdPercent ?? null, status.compactDefaultPercent ?? null);
+	if (status.compactThresholdPercent !== undefined || status.compactDefaultPercent !== undefined) {
+		composer.setCompactThreshold(status.compactThresholdPercent ?? null, status.compactDefaultPercent ?? null);
+	}
 	if (status.statusText) liveLabel.textContent = status.statusText;
 	setObserving(!!status.observingId);
 }

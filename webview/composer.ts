@@ -36,6 +36,7 @@ export class Composer {
 	private modelLabelEl: HTMLElement;
 	private brainBtn: HTMLButtonElement;
 	private availableThinkingLevels: string[] | null = null;
+	private currentDisplayedLabel: string | null = null;
 	private attachMenu: Dropdown | null = null;
 	private autocompleteEl: HTMLElement;
 	private textWrap: HTMLElement;
@@ -188,8 +189,9 @@ export class Composer {
 			this.modelLabelEl.textContent === label;
 		if (unchanged) return;
 		this.currentModel = { provider, modelId };
-		this.modelLabelEl.textContent = label;
-		this.modelBtn.title = `Choose model (now ${label})`;
+		this.currentDisplayedLabel = label;
+		this.modelLabelEl.textContent = this.truncateModelLabel(label);
+		this.modelBtn.title = `${label} — click to choose a model (full name on hover)`;
 		this.updateReasoningState();
 	}
 
@@ -225,7 +227,8 @@ export class Composer {
 		// Only block when the model is KNOWN to be text-only; undeclared input
 		// fields mean "allow" so we don't silently eat pastes.
 		this.vision = model?.input ? model.input.includes("image") : true;
-		this.modelBtn.title = `Choose model${this.vision ? " (accepts images)" : " (text-only, image attach off)"}`;
+		const visionNote = this.vision ? " (accepts images)" : " (text-only, image attach off)";
+		this.modelBtn.title = `${this.currentDisplayedLabel ?? this.modelBtn.title} — click to choose a model${visionNote}`;
 		this.brainBtn.classList.toggle("disabled-pill", !this.reasoning);
 		this.brainBtn.title = this.reasoning ? `Thinking level: ${this.currentThinking}` : "This model does not support thinking";
 		this.brainBtn.disabled = !this.reasoning;
@@ -294,6 +297,7 @@ export class Composer {
 			this.contextWrap.style.display = "none";
 			return;
 		}
+		this.contextWindowCurrent = window ?? this.contextWindowCurrent;
 		this.contextWrap.style.display = "";
 		this.contextFill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
 		this.contextFill.className = `context-fill${percent > 85 ? " hot" : percent > 65 ? " warm" : ""}`;
@@ -304,6 +308,7 @@ export class Composer {
 
 	// ---- auto-compact threshold flyout ----
 
+	private contextWindowCurrent: number | undefined;
 	private compactThreshold: number | null = null;
 	private compactDefaultPercent: number | null = null;
 	private thresholdFlyout: HTMLElement | null = null;
@@ -377,9 +382,16 @@ export class Composer {
 		return panel;
 	}
 
+	private abbrevTokens(n: number | undefined): string {
+		if (n == null || n <= 0) return "";
+		return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${Math.round(n / 1_000)}k` : `${n}`;
+	}
+
 	private renderThresholdFlyout(): void {
 		const panel = this.thresholdFlyout;
 		if (!panel) return;
+		const tokensAt = (pct: number | null): string =>
+			pct != null && this.contextWindowCurrent ? ` · ${this.abbrevTokens(Math.round((pct / 100) * this.contextWindowCurrent))}` : "";
 		const titleEl = panel.querySelector(".threshold-title");
 		const slider = panel.querySelector(".threshold-slider") as HTMLInputElement | null;
 		const valueEl = panel.querySelector(".threshold-value");
@@ -387,11 +399,11 @@ export class Composer {
 		if (this.compactThreshold != null) {
 			if (titleEl) titleEl.textContent = `Force session auto-compact ≥ ${this.compactThreshold}%`;
 			if (slider) slider.value = String(this.compactThreshold);
-			if (valueEl) valueEl.textContent = `${this.compactThreshold}%`;
+			if (valueEl) valueEl.textContent = `${this.compactThreshold}%${tokensAt(this.compactThreshold)}`;
 		} else {
 			if (titleEl) titleEl.textContent = effective != null ? `Agent auto-compact (default ~${effective}%)` : "Agent auto-compact (default)";
 			if (slider && effective != null) slider.value = String(effective);
-			if (valueEl) valueEl.textContent = effective != null ? `${effective}%` : "default";
+			if (valueEl) valueEl.textContent = effective != null ? `${effective}%${tokensAt(effective)}` : "default";
 		}
 		const offBtn = panel.querySelector(".threshold-reset");
 		offBtn?.classList.toggle("active", this.compactThreshold === null);
@@ -512,6 +524,20 @@ export class Composer {
 	// ---------------------------------------------------------------
 	// Model + thinking menus
 	// ---------------------------------------------------------------
+
+	/** Mid-truncate a long model label tastefully: chutes/…/Model-Name. Fixed budget ~30 chars. */
+	private truncateModelLabel(label: string, maxLen = 30): string {
+		if (label.length <= maxLen) return label;
+		const parts = label.split("/").filter(Boolean);
+		if (parts.length >= 3) {
+			return `${parts[0]}/…/${parts[parts.length - 1]}`;
+		}
+		if (parts.length === 2) {
+			const budget = maxLen - parts[0].length - 3;
+			if (budget > 8) return `${parts[0]}/${parts[1].slice(0, budget)}…`;
+		}
+		return `${label.slice(0, Math.max(8, maxLen - 1))}…`;
+	}
 
 	private modelLabelFor(model: RpcModel): string {
 		return `${model.provider}/${model.id}`;

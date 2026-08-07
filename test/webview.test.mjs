@@ -273,7 +273,9 @@ const meter = document.querySelector(".context-meter");
 meter.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const flyout = document.querySelector(".threshold-flyout");
 check("threshold flyout opens", !!flyout && flyout.className.includes("visible"));
+hostMessage({ type: "status", status: { ...baseStatus, compactDefaultPercent: 94 } });
 check("flyout shows default state", flyout.querySelector(".threshold-title").textContent.includes("Agent auto-compact"), flyout.querySelector(".threshold-title").textContent);
+check("flyout value shows pct + tokens", flyout.querySelector(".threshold-value").textContent.includes("94% · 246k"), flyout.querySelector(".threshold-value").textContent);
 hostMessage({ type: "compactThreshold", percent: 55 });
 check("flyout switches to override state", flyout.querySelector(".threshold-title").textContent.includes("Force session auto-compact"), flyout.querySelector(".threshold-title").textContent);
 flyout.closest(".context-meter")?.classList.remove("visible");
@@ -314,6 +316,27 @@ check("history rename input appears", !!renameInput);
 renameInput.value = "local-chat-updated";
 renameInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 check("enter posts renameHistorySession", posted.some((m) => m.type === "renameHistorySession" && m.sessionId === "hist-a" && m.name === "local-chat-updated"), "payload=" + JSON.stringify(posted.filter((m) => m.type === "renameHistorySession")));
+
+// --- model pill truncation + hover shows full name ---
+hostMessage({ type: "status", status: { ...baseStatus, modelLabel: "chutes/Qwen/Qwen3-235B-A22B-Thinking-2507-TEE" } });
+const pillLabel = document.querySelector(".rail-pill.model .pill-label");
+check("model pill truncates tastefully mid-path", pillLabel.textContent === "chutes/…/Qwen3-235B-A22B-Thinking-2507-TEE", pillLabel.textContent);
+check("model pill full name on hover", document.querySelector(".rail-pill.model").title.includes("chutes/Qwen/Qwen3-235B-A22B-Thinking-2507-TEE"));
+
+// --- history search ranking: exact beats tokens beats fuzzy; recency breaks ties ---
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "r1", path: "/tmp/r1.jsonl", cwd: "/ws", timestamp: new Date(Date.now() - 4000).toISOString(), modifiedMs: Date.now() - 4000, name: "ray button setup", inWorkspace: true },
+		{ id: "r2", path: "/tmp/r2.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), modifiedMs: Date.now(), name: "ray tracing demo", inWorkspace: true },
+		{ id: "r3", path: "/tmp/r3.jsonl", cwd: "/other", timestamp: new Date().toISOString(), modifiedMs: Date.now(), name: "totally different topic", inWorkspace: false },
+	],
+});
+document.querySelector(".history-search").value = "ray";
+document.querySelector(".history-search").dispatchEvent(new window.Event("input", { bubbles: true }));
+const rNames = [...document.querySelectorAll(".history-item .history-item-name")].map((n) => n.textContent);
+check("exact/tokens results keep bucket order, recency breaks ties", rNames[0] === "ray tracing demo" && rNames[1] === "ray button setup", rNames.join("|"));
+check("non-matching entries filtered", rNames.length === 2);
 
 // --- inline mentions: mirror styles typed tokens; folders accepted with trailing slash ---
 hostMessage({ type: "fileSearchResults", requestId: 0, files: [] }); // no-op staleness guard
