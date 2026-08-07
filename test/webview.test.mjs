@@ -181,7 +181,27 @@ hostMessage({
 		{ path: "/tmp/b.jsonl", cwd: "/other/proj", timestamp: new Date().toISOString(), firstPrompt: "work on proj", inWorkspace: false },
 	],
 });
-check("history groups rendered", document.querySelectorAll(".history-item").length === 2);
+hostMessage({
+	type: "history",
+	sessions: [
+		{ path: "/tmp/old.jsonl", cwd: "/ws", timestamp: new Date(Date.now() - 86_400e3 * 3).toISOString(), modifiedMs: Date.now() - 86_400e3 * 3, name: "oldest", inWorkspace: true },
+		{ path: "/tmp/new.jsonl", cwd: "/ws", timestamp: new Date(Date.now() - 86_400e3).toISOString(), modifiedMs: Date.now() - 86_400e3, name: "renamed-just-now", inWorkspace: true },
+		{ path: "/tmp/mid.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), modifiedMs: Date.now(), name: "newest", inWorkspace: true },
+	],
+});
+const itemNames = [...document.querySelectorAll(".history-item .history-item-name")].map((n) => n.textContent);
+check("history sorted recent-descending within bucket", itemNames[0] === "newest" && itemNames[1] === "renamed-just-now" && itemNames[2] === "oldest", itemNames.join("|"));
+const relativeTimes = [...document.querySelectorAll(".history-item .history-item-time")].map((n) => n.textContent);
+check("renamed session labels by activity time", relativeTimes[1].includes("d"), JSON.stringify(relativeTimes));
+check("history groups rendered", document.querySelectorAll(".history-item").length === 3);
+ // re-seed the canonical 2-item list for downstream checks
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "hist-a", path: "/tmp/a.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "local chat", inWorkspace: true },
+		{ id: "hist-b", path: "/tmp/b.jsonl", cwd: "/other/proj", timestamp: new Date().toISOString(), firstPrompt: "work on proj", inWorkspace: false },
+	],
+});
 check("other session shows folder", [...document.querySelectorAll(".history-item")].some((i) => i.textContent.includes("proj")));
 posted.length = 0;
 document.querySelectorAll(".history-item")[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

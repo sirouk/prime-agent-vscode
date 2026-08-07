@@ -289,6 +289,8 @@ export interface RecentSession {
 	path: string;
 	cwd: string;
 	timestamp: string;
+	/** Filesystem mtime in ms — the true "last activity" signal (renames/forks move it). */
+	modifiedMs?: number;
 	name?: string;
 	firstPrompt?: string;
 	inWorkspace: boolean;

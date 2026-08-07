@@ -71,8 +71,11 @@ export class HistoryView {
 			this.listEl.appendChild(el("div", "history-empty", needle ? `No sessions match "${needle}".` : "No previous sessions found."));
 			return;
 		}
-		const inWorkspace = filtered.filter((s) => s.inWorkspace);
-		const others = filtered.filter((s) => !s.inWorkspace);
+		const activityOf = (s: RecentSession): number =>
+			s.modifiedMs ?? (Number.isFinite(Date.parse(s.timestamp)) ? Date.parse(s.timestamp) : 0);
+		const byActivityDesc = (a: RecentSession, b: RecentSession) => activityOf(b) - activityOf(a);
+		const inWorkspace = filtered.filter((s) => s.inWorkspace).sort(byActivityDesc);
+		const others = filtered.filter((s) => !s.inWorkspace).sort(byActivityDesc);
 		if (inWorkspace.length > 0) {
 			this.listEl.appendChild(el("div", "history-group", "This workspace"));
 			for (const session of inWorkspace) this.listEl.appendChild(this.buildItem(session, false));
@@ -94,7 +97,13 @@ export class HistoryView {
 		const top = el("div", "history-item-top");
 		const name = session.name || session.firstPrompt || "(untitled session)";
 		top.appendChild(el("span", "history-item-name", isCurrent ? `${name} (current)` : name));
-		top.appendChild(el("span", "history-item-time", relativeTime(session.timestamp)));
+		top.appendChild(
+			el(
+				"span",
+				"history-item-time",
+				relativeTime(session.modifiedMs != null ? new Date(session.modifiedMs).toISOString() : session.timestamp),
+			),
+		);
 		const actions = el("div", "history-actions");
 		if (!isCurrent) {
 			const rename = document.createElement("button");

@@ -117,7 +117,7 @@ export async function listRecentSessions(workspaceRoot: string, limit = 40): Pro
 
 	const normalizedRoot = normalizePath(workspaceRoot);
 	const results: RecentSession[] = [];
-	for (const { file } of sorted) {
+	for (const { file, mtime } of sorted) {
 		if (results.length >= limit) break;
 		const { header, name, firstPrompt } = await readHeader(file);
 		if (!header.cwd) continue;
@@ -127,6 +127,7 @@ export async function listRecentSessions(workspaceRoot: string, limit = 40): Pro
 			path: file,
 			cwd: header.cwd,
 			timestamp: header.timestamp ?? new Date().toISOString(),
+			modifiedMs: mtime,
 			name,
 			firstPrompt,
 			inWorkspace,

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Session history: recent-descending within each bucket by true activity time (renames/forks resurface at the top with current dates)
+
 - Live-view parity for attached sessions proved end-to-end (host e2e dual phase: independent writer client streams into the extension transcript live)
 - Composer caret mirrors scroll exactly when the field hits max-height (native scrollbar hidden so the caret stays truthful at the end of input)
 
