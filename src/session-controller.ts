@@ -477,6 +477,57 @@ export class SessionController implements vscode.Disposable {
 	 * Fork the session from the (N-th) user message — mirrors /fork: resolves
 	 * the entryId via get_fork_messages order alignment with user rows.
 	 */
+	/** Rename the active session: daemon set_session_name on attached mode, RPC otherwise. */
+	async renameSession(name: string): Promise<void> {
+		const trimmed = name.trim();
+		if (this.attached) {
+			const sidecar = await this.ensureSidecar();
+			try {
+				await sidecar.request({ type: "set_session_name", activeSessionId: this.attached.activeSessionId, name: trimmed }, 15_000);
+				if (this.rentedState) this.rentedState.sessionName = trimmed || undefined;
+				this.pushStatus();
+				this.broadcast({ type: "notice", level: "info", text: trimmed ? `Session renamed to "${trimmed}".` : "Session name cleared." });
+			} catch (err) {
+				this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${err instanceof Error ? err.message : String(err)}` });
+			}
+			return;
+		}
+		await this.ensureStarted();
+		if (!this.client) return;
+		const response = await this.client.request({ type: "set_session_name", name: trimmed }, 30_000);
+		if (response.success) {
+			if (this.state) this.state.sessionName = trimmed || undefined;
+			this.pushStatusLight();
+			this.broadcast({ type: "notice", level: "info", text: trimmed ? `Session renamed to "${trimmed}".` : "Session name cleared." });
+		} else {
+			this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${response.error ?? "unknown error"}` });
+		}
+	}
+
+	/** Rename any history session: live sessions go through their owner; offline files get a session_info entry. */
+	async renameHistorySession(sessionPath: string, sessionId: string, name: string): Promise<void> {
+		if (this.state?.sessionId === sessionId || this.attached?.activeSessionId === sessionId) {
+			await this.renameSession(name);
+			return;
+		}
+		if (isSessionActive(sessionPath)) {
+			this.broadcast({
+				type: "notice",
+				level: "error",
+				text: "That session is live in another client — rename it from there (browse it, then use the pencil).",
+			});
+			return;
+		}
+		const { renameSessionOffline } = await import("./session-actions.js");
+		const result = await renameSessionOffline(sessionPath, name);
+		if (result.ok) {
+			this.broadcast({ type: "notice", level: "info", text: `Session renamed to "${name.trim()}".` });
+			void this.listHistory();
+		} else {
+			this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${result.error ?? "unknown error"}` });
+		}
+	}
+
 	async forkFromUser(ordinal: number): Promise<void> {
 		await this.ensureStarted();
 		if (!this.client) return;
@@ -551,8 +602,16 @@ export class SessionController implements vscode.Disposable {
 	setCompactThreshold(percent: number | null): void {
 		if (percent !== null && (percent < 20 || percent > 80)) return;
 		void this.context.globalState.update(this.thresholdKey(), percent ?? undefined);
-		this.broadcast({ type: "compactThreshold", percent });
+		this.broadcast({ type: "compactThreshold", percent, defaultPercent: this.defaultCompactPercent() });
 		this.pushStatus();
+	}
+
+	/** Effective agent default: prime-agent compacts when ~reserveTokens (16384) of the window remain. */
+	private defaultCompactPercent(): number | null {
+		const cw = this.lastUsage.contextWindow;
+		if (!cw || cw <= 0) return null;
+		const percent = Math.ceil(((cw - 16_384) / cw) * 100);
+		return Math.max(20, Math.min(97, percent));
 	}
 
 	private autoCompactSent = false;
@@ -897,29 +956,61 @@ export class SessionController implements vscode.Disposable {
 				parentActive = "";
 				parentUuid = this.state?.sessionId;
 			}
-			const children = sessions.filter((s) => {
-				const kind = (s as SessionSummaryRef & { runtimeKind?: string }).runtimeKind;
-				if (!kind || kind === "root") return false;
+			type Rich = SessionSummaryRef & { runtimeKind?: string; rlmDepth?: number; parentSessionId?: string; isStreaming?: boolean; activity?: string; sessionName?: string };
+			const byActive = (s: SessionSummaryRef): string => s.activeSessionId ?? s.id ?? "";
+			const asChild = (c: SessionSummaryRef) => {
+				const rich = c as Rich;
+				return {
+					id: c.id ?? "",
+					activeSessionId: byActive(c),
+					name: rich.sessionName,
+					runtimeKind: rich.runtimeKind,
+					rlmDepth: rich.rlmDepth,
+					isStreaming: rich.isStreaming ?? false,
+					attachedClients: c.attachedClients ?? 0,
+				};
+			};
+			const isChildKind = (rich: Rich): boolean => !!rich.runtimeKind && rich.runtimeKind !== "root";
+			let children = sessions.filter((s) => {
+				const rich = s as Rich;
+				if (!isChildKind(rich)) return false;
 				if (this.attached) {
 					return (
 						(s.parentActiveSessionId && s.parentActiveSessionId === parentActive) ||
-						((s as SessionSummaryRef & { parentSessionId?: string }).parentSessionId === parentActive)
+						(rich.parentSessionId === parentActive)
 					);
 				}
-				const byParent = (s as SessionSummaryRef & { parentSessionId?: string }).parentSessionId;
-				return parentUuid != null && byParent === parentUuid;
+				return parentUuid != null && rich.parentSessionId === parentUuid;
 			});
+
+			// Viewing context for the strip: parent + siblings (when the current
+			// session has a parent of its own), plus the viewed id for the
+			// highlight. Works for browsed subagents and terminal-live sessions.
+			let parent: ReturnType<typeof asChild> | undefined;
+			let siblings: ReturnType<typeof asChild>[] | undefined;
+			const currentId = this.attached ? parentActive : undefined;
+			const currentSummary = sessions.find((s) => byActive(s) === currentId) as (SessionSummaryRef & Rich) | undefined;
+			if (this.attached && currentSummary) {
+				const parentActiveId = currentSummary.parentActiveSessionId;
+				const parentSummaryRef = parentActiveId
+					? sessions.find((s) => byActive(s) === parentActiveId)
+					: undefined;
+				if (parentSummaryRef) parent = asChild(parentSummaryRef);
+				if (parentActiveId) {
+					siblings = sessions
+						.filter((s) => {
+							const rich = s as Rich;
+							return isChildKind(rich) && rich.parentActiveSessionId === parentActiveId && byActive(s) !== currentId;
+						})
+						.map(asChild);
+				}
+			}
 			this.broadcast({
 				type: "sessionChildren",
-				children: children.map((c) => ({
-					id: c.id ?? "",
-					activeSessionId: c.activeSessionId ?? c.id ?? "",
-					name: c.sessionName,
-					runtimeKind: (c as SessionSummaryRef & { runtimeKind?: string }).runtimeKind,
-					rlmDepth: (c as SessionSummaryRef & { rlmDepth?: number }).rlmDepth,
-					isStreaming: (c as SessionSummaryRef & { isStreaming?: boolean }).isStreaming ?? false,
-					attachedClients: c.attachedClients ?? 0,
-				})),
+				children: children.map(asChild),
+				parent,
+				siblings,
+				viewedActiveSessionId: currentId,
 			});
 		} catch {
 			// quiet — stale layout tolerated until the next refresh
@@ -1155,6 +1246,7 @@ private async clearObservation(): Promise<void> {
 			modelId: model?.id,
 			observingId: this.observingId,
 			compactThresholdPercent: this.compactThreshold(),
+			compactDefaultPercent: this.defaultCompactPercent(),
 			...this.lastUsage,
 		};
 	}

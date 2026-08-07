@@ -33,6 +33,7 @@ export class Composer {
 	private contextFill: HTMLElement;
 	private contextLabel: HTMLElement;
 	private modelBtn: HTMLButtonElement;
+	private modelLabelEl: HTMLElement;
 	private brainBtn: HTMLButtonElement;
 	private availableThinkingLevels: string[] | null = null;
 	private attachMenu: Dropdown | null = null;
@@ -83,6 +84,8 @@ export class Composer {
 		this.modelBtn = document.createElement("button");
 		this.modelBtn.className = "rail-pill model";
 		this.modelBtn.title = "Choose model";
+		this.modelLabelEl = el("span", "pill-label");
+		this.modelBtn.appendChild(this.modelLabelEl);
 		this.modelBtn.addEventListener("click", (event) => {
 			event.stopPropagation();
 			this.toggleModelMenu();
@@ -169,15 +172,20 @@ export class Composer {
 	}
 
 	setModel(label: string, provider?: string, modelId?: string): void {
+		// Debug hook: instrument setModel label churn to catch menu-killers live.
+		const dbg = window as unknown as { __modelLog?: string[] };
+		if (Array.isArray(dbg.__modelLog)) {
+			dbg.__modelLog.push(`${this.currentModel.modelId ?? "?"}|${this.modelBtn.textContent} -> ${provider ?? "?"}/${modelId ?? "?"}|${label}`);
+		}
 		// Guard: dropdowns are children of this pill; rewriting identical text
 		// would destroy an open menu mid-use (the churn you see while streaming).
 		const unchanged =
 			this.currentModel.provider === provider &&
 			this.currentModel.modelId === modelId &&
-			this.modelBtn.textContent === label;
+			this.modelLabelEl.textContent === label;
 		if (unchanged) return;
 		this.currentModel = { provider, modelId };
-		this.modelBtn.textContent = label;
+		this.modelLabelEl.textContent = label;
 		this.modelBtn.title = `Choose model (now ${label})`;
 		this.updateReasoningState();
 	}
@@ -294,11 +302,34 @@ export class Composer {
 	// ---- auto-compact threshold flyout ----
 
 	private compactThreshold: number | null = null;
+	private compactDefaultPercent: number | null = null;
 	private thresholdFlyout: HTMLElement | null = null;
+	private contextTick: HTMLElement | null = null;
 
-	setCompactThreshold(percent: number | null): void {
+	setCompactThreshold(percent: number | null, defaultPercent?: number | null): void {
 		this.compactThreshold = percent;
+		if (defaultPercent != null) this.compactDefaultPercent = defaultPercent;
 		this.renderThresholdFlyout();
+		this.renderContextTick();
+	}
+
+	private renderContextTick(): void {
+		const effective = this.compactThreshold ?? this.compactDefaultPercent;
+		if (effective == null) {
+			this.contextTick?.remove();
+			this.contextTick = null;
+			return;
+		}
+		if (!this.contextTick) {
+			this.contextTick = el("span", "context-tick");
+		}
+		this.contextTick.className = `context-tick${this.compactThreshold != null ? " override" : ""}`;
+		this.contextTick.style.left = `${Math.min(100, Math.max(0, effective))}%`;
+		this.contextTick.title =
+			this.compactThreshold != null
+				? `Auto-compact at ${this.compactThreshold}% (override for this session)`
+				: `Agent auto-compact default ~${this.compactDefaultPercent}%`;
+		if (this.contextTick.parentElement !== this.contextWrap) this.contextWrap.appendChild(this.contextTick);
 	}
 
 	/** The flyout is built lazily; state renders into it. */
@@ -325,8 +356,16 @@ export class Composer {
 		slider.addEventListener("change", () => {
 			this.deps.onSetCompactThreshold(Number(slider.value));
 		});
-		offBtn.addEventListener("click", () => {
+		const resetFlyoutToDefault = (): void => {
+			this.compactThreshold = null;
+			this.renderThresholdFlyout();
+			this.renderContextTick();
+		};
+		offBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			event.preventDefault();
 			this.deps.onSetCompactThreshold(null);
+			resetFlyoutToDefault();
 		});
 		row.append(slider, valueEl, offBtn);
 		panel.append(title, row);
@@ -341,13 +380,15 @@ export class Composer {
 		const titleEl = panel.querySelector(".threshold-title");
 		const slider = panel.querySelector(".threshold-slider") as HTMLInputElement | null;
 		const valueEl = panel.querySelector(".threshold-value");
+		const effective = this.compactThreshold ?? this.compactDefaultPercent;
 		if (this.compactThreshold != null) {
 			if (titleEl) titleEl.textContent = `Force session auto-compact ≥ ${this.compactThreshold}%`;
 			if (slider) slider.value = String(this.compactThreshold);
 			if (valueEl) valueEl.textContent = `${this.compactThreshold}%`;
 		} else {
-			if (titleEl) titleEl.textContent = "Agent auto-compact on (default)";
-			if (valueEl) valueEl.textContent = "off";
+			if (titleEl) titleEl.textContent = effective != null ? `Agent auto-compact (default ~${effective}%)` : "Agent auto-compact (default)";
+			if (slider && effective != null) slider.value = String(effective);
+			if (valueEl) valueEl.textContent = effective != null ? `${effective}%` : "default";
 		}
 		const offBtn = panel.querySelector(".threshold-reset");
 		offBtn?.classList.toggle("active", this.compactThreshold === null);
@@ -801,7 +842,9 @@ export class Composer {
 			const after = this.textarea.value.slice(caret);
 			const path = item.insert;
 			const tail = after.replace(/^\s+/, "");
-			this.textarea.value = `${before}@${path}${tail ? " " : ""}${tail}`;
+			// Always terminate the token: without the space, typed letters merge
+			// into the path and the highlight bleeds forward.
+			this.textarea.value = `${before}@${path} ${tail}`;
 			const pos = before.length + path.length + 2;
 			this.textarea.selectionStart = this.textarea.selectionEnd = pos;
 		}

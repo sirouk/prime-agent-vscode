@@ -8,6 +8,7 @@ import type { RecentSession } from "../src/protocol.js";
 export interface HistoryDeps {
 	onResume: (path: string, sessionId: string) => void;
 	onDelete: (path: string, sessionId: string) => void;
+	onRename: (path: string, sessionId: string, name: string) => void;
 	onBack: () => void;
 }
 
@@ -96,6 +97,14 @@ export class HistoryView {
 		top.appendChild(el("span", "history-item-time", relativeTime(session.timestamp)));
 		const actions = el("div", "history-actions");
 		if (!isCurrent) {
+			const rename = document.createElement("button");
+			rename.className = "history-action";
+			rename.title = "Rename session";
+			rename.appendChild(icon("pencil", 11));
+			rename.addEventListener("click", (event) => {
+				event.stopPropagation();
+				this.armRename(item, session);
+			});
 			const del = document.createElement("button");
 			del.className = "history-action";
 			del.title = "Delete (moves to Trash when possible, also removes session data)";
@@ -104,7 +113,7 @@ export class HistoryView {
 				event.stopPropagation();
 				this.armDelete(item, session, actions, top);
 			});
-			actions.appendChild(del);
+			actions.append(rename, del);
 		}
 		top.appendChild(actions);
 		item.appendChild(top);
@@ -114,6 +123,38 @@ export class HistoryView {
 			item.addEventListener("click", () => this.deps.onResume(session.path, session.id));
 		}
 		return item;
+	}
+
+	/** Inline rename: pencil swaps the name for a small input; Enter commits, Esc cancels. */
+	private armRename(item: HTMLElement, session: RecentSession): void {
+		if (item.classList.contains("renaming") || item.classList.contains("confirming")) return;
+		item.classList.add("renaming");
+		const nameSpan = item.querySelector(".history-item-name") as HTMLElement | null;
+		if (!nameSpan) return;
+		const currentText = session.name || session.firstPrompt || "";
+		const input = document.createElement("input");
+		input.className = "history-rename-input";
+		input.value = currentText;
+		input.spellcheck = false;
+		const restore = (): void => {
+			item.classList.remove("renaming");
+			input.replaceWith(nameSpan);
+		};
+		input.addEventListener("keydown", (event) => {
+			event.stopPropagation();
+			if (event.key === "Enter") {
+				restore();
+				this.deps.onRename(session.path, session.id, input.value.trim());
+			} else if (event.key === "Escape") {
+				restore();
+			} else {
+				input.style.width = `${Math.min(320, Math.max(120, input.value.length * 8 + 16))}px`;
+			}
+		});
+		input.addEventListener("blur", () => restore());
+		nameSpan.replaceWith(input);
+		input.focus();
+		input.select();
 	}
 
 	/** Inline one-tap confirm: swaps the subtle buttons for ✓ Delete / ✕ for a few seconds. */

@@ -10,6 +10,7 @@ import type {
 	AgentEvent,
 	HostToWebview,
 	RpcModel,
+	SessionChild,
 	StatusSnapshot,
 	WebviewToHost,
 } from "../src/protocol.js";
@@ -37,8 +38,52 @@ brand.addEventListener("click", () => post({ type: "openExternal", url: "https:/
 brand.addEventListener("keydown", (event) => {
 	if (event.key === "Enter" || event.key === " ") post({ type: "openExternal", url: "https://www.primeintellect.ai/blog/prime-agent#article-top" });
 });
+const sessionTitleWrap = el("div", "session-title-wrap");
 const sessionTitle = el("span", "session-title", "");
-topbar.append(brand, sessionTitle, el("span", "spacer"));
+const titleEditBtn = el("button", "title-edit-btn") as HTMLButtonElement;
+titleEditBtn.title = "Rename this session";
+titleEditBtn.appendChild(icon("pencil", 11) as unknown as Node);
+sessionTitleWrap.append(sessionTitle, titleEditBtn);
+topbar.append(brand, sessionTitleWrap, el("span", "spacer"));
+
+// Inline session-title editing on the header.
+let titleEditing = false;
+function startTitleEdit(): void {
+	if (titleEditing) return;
+	titleEditing = true;
+	titleEditBtn.style.display = "none";
+	const input = document.createElement("input");
+	input.className = "session-title-input";
+	input.value = sessionTitle.textContent ?? "";
+	input.spellcheck = false;
+	sessionTitle.replaceWith(input);
+	input.addEventListener("keydown", (event) => {
+		if (event.key === "Enter") {
+			titleEditing = false;
+			post({ type: "renameSession", name: input.value.trim() });
+			input.replaceWith(sessionTitle);
+			titleEditBtn.style.display = "";
+		} else if (event.key === "Escape") {
+			titleEditing = false;
+			input.replaceWith(sessionTitle);
+			titleEditBtn.style.display = "";
+		} else {
+			input.style.width = `${Math.min(340, Math.max(120, input.value.length * 8 + 24))}px`;
+		}
+	});
+	input.addEventListener("blur", () => {
+		if (!titleEditing) return;
+		titleEditing = false;
+		input.replaceWith(sessionTitle);
+		titleEditBtn.style.display = "";
+	});
+	input.focus();
+	input.select();
+}
+titleEditBtn.addEventListener("click", (event) => {
+	event.stopPropagation();
+	startTitleEdit();
+});
 
 const newChatBtn = iconButton("plus", "New session", 16);
 const historyBtn = iconButton("history", "Sessions in this workspace", 16);
@@ -158,6 +203,9 @@ const historyView = new HistoryView({
 	onDelete: (path, sessionId) => {
 		post({ type: "deleteSession", path, sessionId });
 	},
+	onRename: (path, sessionId, name) => {
+		post({ type: "renameHistorySession", path, sessionId, name });
+	},
 	onBack: () => showView("chat"),
 });
 
@@ -182,65 +230,81 @@ statusStrip.append(connDot, liveLabel, sessionIdLabel, el("span", "spacer"), sta
 // Subagents strip: collapsible panel floating on top of the composer.
 const subagentsStrip = el("div", "subagents-strip") as HTMLElement;
 let subagentsExpanded = false;
-let browsingChild = false;
-let sessionChildren: import("../src/protocol.js").SessionChild[] = [];
+let sessionChildren: SessionChild[] = [];
 
 function renderSubagentsStrip(): void {
 	subagentsStrip.textContent = "";
-	if (!browsingChild && sessionChildren.length === 0) {
+	const parent = sessionParent;
+	const viewedId = sessionViewedId;
+	const siblings = sessionSiblings;
+	const nothingToShow = !parent && sessionChildren.length === 0;
+	if (nothingToShow) {
 		subagentsStrip.classList.remove("visible");
 		return;
 	}
 	subagentsStrip.classList.add("visible");
-	const header = el("button", "subagents-header") as HTMLButtonElement;
-	const parts: Array<HTMLElement | string> = [];
-	if (browsingChild) {
-		const back = el("span", "subagents-back", "‹ parent");
-		header.append(back, el("span", "subagents-sep"));
-		if (sessionChildren.length > 0) {
-			header.append(`${sessionChildren.length} subagent${sessionChildren.length === 1 ? "" : "s"}`);
-		}
-		header.addEventListener("click", () => post({ type: "backToParent" }));
-		header.title = "Return to the parent agent";
-	} else {
-		header.append(
-			el("span", "subagents-caret", subagentsExpanded ? "▾" : "▸"),
-			`Subagents (${sessionChildren.length})`,
-		);
-		header.title = "Subagents spawned by this session — click to expand, browse one to look inside";
-		header.addEventListener("click", () => {
-			subagentsExpanded = !subagentsExpanded;
-			renderSubagentsStrip();
-		});
+
+	// Back row (separate, never part of the toggle) — always reliable.
+	if (parent) {
+		const back = el("button", "subagents-back-row") as HTMLButtonElement;
+		back.append(el("span", "subagents-back", "‹ parent"), el("span", "subagents-back-name", parent.name ?? parent.id));
+		back.title = "Return to the parent agent";
+		back.addEventListener("click", () => post({ type: "backToParent" }));
+		subagentsStrip.appendChild(back);
 	}
+
+	// Collapsible header (always a toggle).
+	const header = el("button", "subagents-header") as HTMLButtonElement;
+	header.append(
+		el("span", "subagents-caret", subagentsExpanded ? "▾" : "▸"),
+		`Subagents (${sessionChildren.length + siblings.length})`,
+	);
+	header.title = "Subagents related to this session — click to expand, browse one to look inside";
+	header.addEventListener("click", () => {
+		subagentsExpanded = !subagentsExpanded;
+		renderSubagentsStrip();
+	});
 	subagentsStrip.appendChild(header);
-	if ((!browsingChild && subagentsExpanded) || browsingChild) {
-		const list = el("div", "subagents-list");
-		for (const child of sessionChildren) {
-			const row = el("button", "subagent-row") as HTMLButtonElement;
-			row.title = `${child.runtimeKind === "subagent" ? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : (child.runtimeKind ?? "session")}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
-			const dot = el("span", `subagent-dot${child.isStreaming ? " active" : ""}`);
-			dot.title = child.isStreaming ? "active" : "idle";
-			const name = el("span", "subagent-name", child.name ?? child.id);
-			const badge = child.isStreaming ? el("span", "subagent-badge", "active") : "";
-			const suffix = el("span", "subagent-go", "view ›");
-			const viewing = currentStatus?.sessionId === child.activeSessionId;
-			if (viewing) {
-				row.classList.add("viewing");
-				row.title = "Currently viewing — this transcript shows this subagent";
-			}
-			row.append(dot, name, badge, suffix);
-			row.addEventListener("click", (event) => {
-				event.stopPropagation();
-				post({ type: "browseChild", activeSessionId: child.activeSessionId, parentSessionId: child.id });
-				browsingChild = true;
-				renderSubagentsStrip();
-			});
-			list.appendChild(row);
+
+	if (!subagentsExpanded) return;
+
+	const buildRow = (child: SessionChild, isSibling: boolean): HTMLElement => {
+		const row = el("button", `subagent-row${isSibling ? " sibling" : ""}`) as HTMLButtonElement;
+		const viewing = viewedId === child.activeSessionId;
+		const dot = el("span", `subagent-dot${child.isStreaming ? " active" : " idle"}`);
+		dot.title = child.isStreaming ? "active (working)" : "idle";
+		const name = el("span", "subagent-name", child.name ?? child.id);
+		const badge = child.isStreaming ? el("span", "subagent-badge", "active") : el("span", "subagent-badge idle", "idle");
+		const suffix = el("span", "subagent-go", viewing ? "" : "view ›");
+		row.title = `${child.runtimeKind === "subagent" ? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : (child.runtimeKind ?? "session")}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
+		if (viewing) {
+			row.classList.add("viewing");
+			row.title = "Currently viewing — this transcript shows this subagent";
 		}
+		row.append(dot, name, badge, suffix);
+		row.addEventListener("click", (event) => {
+			event.stopPropagation();
+			if (!viewing) post({ type: "browseChild", activeSessionId: child.activeSessionId, parentSessionId: child.id });
+		});
+		return row;
+	};
+
+	if (sessionChildren.length > 0) {
+		const list = el("div", "subagents-list");
+		for (const child of sessionChildren) list.appendChild(buildRow(child, false));
 		subagentsStrip.appendChild(list);
 	}
+	if (siblings.length > 0) {
+		const siblingHeader = el("div", "subagents-sibling-header", "Siblings");
+		const list = el("div", "subagents-list siblings");
+		for (const sib of siblings) list.appendChild(buildRow(sib, true));
+		subagentsStrip.append(siblingHeader, list);
+	}
 }
+
+let sessionParent: SessionChild | null = null;
+let sessionViewedId: string | null = null;
+let sessionSiblings: SessionChild[] = [];
 
 app.append(topbar, menu, notices, observeBanner, chatView, historyView.root, subagentsStrip, composer.root, statusStrip);
 historyView.root.style.display = "none";
@@ -254,7 +318,6 @@ function showView(view: "chat" | "history"): void {
 
 newChatBtn.addEventListener("click", () => {
 	showView("chat");
-	browsingChild = false;
 	subagentsExpanded = false;
 	renderSubagentsStrip();
 	post({ type: "newSession" });
@@ -302,12 +365,16 @@ function applyStatus(status: StatusSnapshot): void {
 				: "offline";
 	liveLabel.className = `live-label${status.connected ? " on" : ""}`;
 
-	if (status.sessionName) {
-		sessionTitle.textContent = status.sessionName;
-		sessionTitle.style.display = "";
-	} else if (status.sessionId) {
-		sessionTitle.textContent = "";
-		sessionTitle.style.display = "none";
+	if (!titleEditing) {
+		if (status.sessionName) {
+			sessionTitle.textContent = status.sessionName;
+			sessionTitleWrap.style.display = "";
+			sessionTitle.title = `${status.sessionName} — click the pencil to rename`;
+		} else {
+			sessionTitle.textContent = status.sessionId ? `session ${status.sessionId.slice(0, 8)}` : "";
+			sessionTitleWrap.style.display = status.sessionId ? "" : "none";
+			sessionTitle.title = "Unnamed session — click the pencil to name it";
+		}
 	}
 	sessionIdLabel.textContent = status.sessionId ? `#${status.sessionId.slice(0, 8)}` : "";
 	sessionIdLabel.title = status.sessionFile ?? "";
@@ -321,7 +388,7 @@ function applyStatus(status: StatusSnapshot): void {
 	composer.setThinking(status.thinkingLevel, status.availableThinkingLevels ?? null);
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
-	if (status.compactThresholdPercent !== undefined) composer.setCompactThreshold(status.compactThresholdPercent);
+	if (status.compactThresholdPercent !== undefined) composer.setCompactThreshold(status.compactThresholdPercent ?? null, status.compactDefaultPercent ?? null);
 	if (status.statusText) liveLabel.textContent = status.statusText;
 	setObserving(!!status.observingId);
 }
@@ -409,10 +476,13 @@ function dispatchHostMessage(message: HostToWebview): void {
 			}
 			break;
 		case "compactThreshold":
-			composer.setCompactThreshold(message.percent);
+			composer.setCompactThreshold(message.percent, currentStatus?.compactDefaultPercent ?? null);
 			break;
 		case "sessionChildren":
 			sessionChildren = message.children ?? [];
+			sessionParent = message.parent ?? null;
+			sessionViewedId = message.viewedActiveSessionId ?? null;
+			sessionSiblings = message.siblings ?? [];
 			renderSubagentsStrip();
 			break;
 		case "commands":

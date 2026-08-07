@@ -186,6 +186,12 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 		case "browseChild":
 			await controller.browseChild(message.activeSessionId);
 			return;
+		case "renameSession":
+			await controller.renameSession(message.name);
+			return;
+		case "renameHistorySession":
+			await controller.renameHistorySession(message.path, message.sessionId, message.name);
+			return;
 		case "backToParent":
 			await controller.backToParent();
 			return;

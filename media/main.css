@@ -2151,3 +2151,158 @@ body.vscode-light pre.term {
 	margin: 3px 6px;
 	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
 }
+
+/* ---------- subagent v2: back row, idle/active contrast, siblings ---------- */
+
+.subagents-back-row {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 4px 10px;
+	text-align: left;
+	font-size: 10.5px;
+}
+
+.subagents-back-row:hover .subagents-back-name {
+	color: var(--pa-accent);
+}
+
+.subagents-back-name {
+	color: var(--pa-dim);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.subagent-dot.idle {
+	background: transparent;
+	border: 1px solid var(--pa-faint);
+	box-shadow: none;
+}
+
+.subagent-badge.idle {
+	color: var(--pa-faint);
+	border-color: transparent;
+	font-size: 8.5px;
+}
+
+.subagent-badge {
+	font-size: 8.5px;
+}
+
+.subagents-sibling-header {
+	font-size: 9px;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	color: var(--pa-faint);
+	padding: 2px 12px 2px 16px;
+}
+
+.subagents-list.siblings .subagent-name {
+	opacity: 0.9;
+}
+
+.subagents-list.siblings .subagent-row.viewing .subagent-name {
+	opacity: 1;
+}
+
+/* ---------- brain rail pill (icon-centered, tight) ---------- */
+
+.rail-pill.brain {
+	padding: 0;
+	width: 22px;
+	height: 22px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.rail-pill.brain svg {
+	display: block;
+}
+
+.rail-pill.brain.disabled-pill {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+
+/* ---------- context gauge threshold tick ---------- */
+
+.context-tick {
+	position: absolute;
+	top: -2px;
+	bottom: -2px;
+	width: 2px;
+	margin-left: -1px;
+	background: var(--pa-text);
+	border-radius: 1px;
+	opacity: 0.5;
+	pointer-events: none;
+}
+
+.context-tick.override {
+	background: var(--pa-accent);
+	opacity: 0.9;
+}
+
+/* ---------- session title (with inline edit) ---------- */
+
+.session-title-wrap {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+	max-width: 280px;
+}
+
+.session-title {
+	font-size: 11px;
+	color: var(--pa-dim);
+	max-width: 240px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.title-edit-btn {
+	display: none;
+	padding: 0;
+	width: 13px;
+	height: 13px;
+	border-radius: 3px;
+	color: var(--pa-faint);
+}
+
+.session-title-wrap:hover .title-edit-btn,
+.session-title-wrap:focus-within .title-edit-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.title-edit-btn:hover {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}
+
+.session-title-input,
+.history-rename-input {
+	font: inherit;
+	font-size: inherit;
+	background: var(--pa-surface-2);
+	border: 1px solid var(--pa-accent-dim);
+	border-radius: 4px;
+	color: var(--pa-text);
+	padding: 1px 6px;
+	outline: none;
+}
+
+.history-rename-input {
+	width: auto;
+}
+
+.history-item.renaming,
+.history-item.confirming {
+	border-color: var(--pa-accent-dim);
+}

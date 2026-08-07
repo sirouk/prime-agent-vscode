@@ -177,7 +177,7 @@ check("requests history on toggle", posted.some((m) => m.type === "requestHistor
 hostMessage({
 	type: "history",
 	sessions: [
-		{ path: "/tmp/a.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "local chat", inWorkspace: true },
+		{ path: "/tmp/a.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "local chat", inWorkspace: true, id: "hist-a", sessionId: "019fd749-a" },
 		{ path: "/tmp/b.jsonl", cwd: "/other/proj", timestamp: new Date().toISOString(), firstPrompt: "work on proj", inWorkspace: false },
 	],
 });
@@ -206,10 +206,22 @@ check("active badge on streaming child", [...rows].some((r) => r.querySelector("
 posted.length = 0;
 [...rows].find((r) => r.textContent.includes("verify-threads")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("browse posts browseChild", posted.some((m) => m.type === "browseChild" && m.activeSessionId === "abcdef123450"));
-check("strip switches to parent mode", !!document.querySelector(".subagents-strip .subagents-back"), document.querySelector(".subagents-header")?.textContent ?? "");
+// host confirms the browse with a parent context: back-row appears and is clickable
+hostMessage({
+	type: "sessionChildren",
+	children: [],
+	parent: { id: "019fd749-root", activeSessionId: "019fd749main", name: "parent-agent" },
+	siblings: [
+		{ id: "019fdaa2-0001", activeSessionId: "abcdef123451", name: "audit-style", runtimeKind: "subagent", rlmDepth: 1, isStreaming: false, attachedClients: 1 },
+	],
+	viewedActiveSessionId: "abcdef123450",
+});
+const backRow = document.querySelector(".subagents-strip .subagents-back-row");
+check("back-row appears while viewing a child", !!backRow, document.querySelector(".subagents-strip")?.textContent?.slice(0, 60) ?? "");
+check("siblings section lists the other children", [...document.querySelectorAll(".subagents-list.siblings .subagent-row")].length === 1);
 posted.length = 0;
-document.querySelector(".subagents-header").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("header click in parent mode posts backToParent", posted.some((m) => m.type === "backToParent"));
+backRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("back-row click posts backToParent", posted.some((m) => m.type === "backToParent"));
 
 // --- boot splash: present on cold start, gone after first live status ---
 check("boot splash visible on cold start", !!document.querySelector(".boot-splash"));
@@ -246,6 +258,32 @@ hostMessage({ type: "compactThreshold", percent: 55 });
 check("flyout switches to override state", flyout.querySelector(".threshold-title").textContent.includes("Force session auto-compact"), flyout.querySelector(".threshold-title").textContent);
 flyout.closest(".context-meter")?.classList.remove("visible");
 document.body.click();
+
+// --- session title with pencil rename (header) ---
+hostMessage({ type: "status", status: { ...baseStatus, sessionName: "vscode-extension" } });
+const titleWrap = document.querySelector(".session-title-wrap");
+check("session title shown in header", titleWrap && titleWrap.querySelector(".session-title").textContent === "vscode-extension");
+check("title pencil present", !!titleWrap.querySelector(".title-edit-btn"));
+posted.length = 0;
+titleWrap.querySelector(".title-edit-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const titleInput = document.querySelector(".session-title-input");
+check("editing swaps the span for an input", !!titleInput && titleInput.value === "vscode-extension");
+titleInput.value = "shiny-browser-app";
+titleInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("enter posts renameSession", posted.some((m) => m.type === "renameSession" && m.name === "shiny-browser-app"));
+check("input restores to the span after commit", !!document.querySelector(".session-title-wrap .session-title"));
+
+// --- history row pencil rename ---
+posted.length = 0;
+const hRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("local chat"));
+const pencil = [...hRow.querySelectorAll(".history-action")].find((b) => b.title === "Rename session");
+check("history row has pencil action", !!pencil);
+pencil.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const renameInput = hRow.querySelector(".history-rename-input");
+check("history rename input appears", !!renameInput);
+renameInput.value = "local-chat-updated";
+renameInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("enter posts renameHistorySession", posted.some((m) => m.type === "renameHistorySession" && m.sessionId === "hist-a" && m.name === "local-chat-updated"), "payload=" + JSON.stringify(posted.filter((m) => m.type === "renameHistorySession")));
 
 // --- inline mentions: mirror styles typed tokens; folders accepted with trailing slash ---
 hostMessage({ type: "fileSearchResults", requestId: 0, files: [] }); // no-op staleness guard
@@ -289,7 +327,7 @@ const prompt2 = posted.find((m) => m.type === "prompt");
 check("folder mention sent inline", !!prompt2 && prompt2.payload.text.includes("@webview/"));
 
 // --- paste image on a text-only model shows a composer hint ---
-// Current model is chutes/kimi with no "image" input modality (vision gate off).
+hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 posted.length = 0;
 const pasteEvent = new window.Event("paste", { bubbles: true, cancelable: true });
 // happy-dom has no DataTransfer-backed ClipboardEvent; inject the shape onPaste reads.
@@ -356,7 +394,7 @@ hostMessage({
 });
 const delItem = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("local chat"));
 posted.length = 0;
-delItem.querySelector(".history-action").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+[...delItem.querySelectorAll(".history-action")].find((b) => (b.title ?? "").startsWith("Delete")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("delete arms inline confirm", delItem.classList.contains("confirming"));
 const confirmBtn = delItem.querySelector(".history-action.destructive");
 check("confirm button labeled Delete", !!confirmBtn && confirmBtn.textContent.includes("Delete"));
@@ -373,7 +411,7 @@ check("no resume fired during delete", !posted.some((m) => m.type === "switchSes
 // --- history delete: cancel restores the item without posting ---
 const cancelItem = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("work on proj"));
 posted.length = 0;
-cancelItem.querySelector(".history-action").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+[...cancelItem.querySelectorAll(".history-action")].find((b) => (b.title ?? "").startsWith("Delete")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("second item arms confirm", cancelItem.classList.contains("confirming"));
 const cancelBtn = [...cancelItem.querySelectorAll(".history-action")].find((b) => b.title === "Cancel");
 cancelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));

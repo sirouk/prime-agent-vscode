@@ -244,6 +244,9 @@ export type WebviewToHost =
 	| { type: "backToParent" }
 	| { type: "forkFromUser"; ordinal: number }
 	| { type: "copyConversation" }
+	| { type: "dismissInstallPrompt" }
+	| { type: "renameSession"; name: string }
+	| { type: "renameHistorySession"; path: string; sessionId: string; name: string }
 	| { type: "draftChanged"; text: string }
 	| { type: "setCompactThreshold"; percent: number | null }
 	| { type: "openExternal"; url: string };
@@ -263,6 +266,7 @@ export interface StatusSnapshot {
 	statsText: string;
 	statusText?: string;
 	compactThresholdPercent?: number | null;
+	compactDefaultPercent?: number | null;
 	usageTotal?: number;
 	costUsd?: number;
 	contextTokens?: number | null;
@@ -299,10 +303,11 @@ export type HostToWebview =
 			steerDefault?: "steer" | "followUp";
 		}
 	| { type: "favorites"; favorites: ModelRef[] }
-	| { type: "sessionChildren"; children: SessionChild[] }
+	| { type: "sessionChildren"; children: SessionChild[]; parent?: SessionChild; siblings?: SessionChild[]; viewedActiveSessionId?: string }
+	| { type: "installPrompt"; url: string; reason: string }
 	| ThreadDiffsMessage
 	| { type: "draft"; text: string }
-	| { type: "compactThreshold"; percent: number | null }
+	| { type: "compactThreshold"; percent: number | null; defaultPercent?: number | null }
 	| { type: "event"; event: AgentEvent }
 	| { type: "status"; status: StatusSnapshot }
 	| { type: "models"; models: RpcModel[] }

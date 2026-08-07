@@ -8,8 +8,9 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { rm, unlink } from "node:fs/promises";
+import { appendFile, rm, unlink } from "node:fs/promises";
 import * as os from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -83,6 +84,38 @@ async function deleteSessionArtifacts(sessionPath: string): Promise<void> {
 	if (!sessionId) return;
 	const artifactDir = join(os.homedir(), ".prime", "agent", "session-artifacts", sessionId);
 	await rm(artifactDir, { recursive: true, force: true });
+}
+
+export interface RenameSessionResult {
+	ok: boolean;
+	error?: string;
+}
+
+/**
+ * Rename an OFFLINE session file (trash-constraint identical to delete: active sessions are refused).
+ * Appends a `session_info` entry matching packages/coding-agent/src/core/session-manager.ts
+ * (SessionInfoEntry): {type:"session_info", id, parentId, timestamp, name}.
+ */
+export async function renameSessionOffline(sessionPath: string, name: string): Promise<RenameSessionResult> {
+	if (isSessionActive(sessionPath)) {
+		return { ok: false, error: "Session is live in another process — rename it from that client." };
+	}
+	const trimmed = name.trim();
+	try {
+		const lines = readFileSync(sessionPath, "utf-8").split("\n").filter((l) => l.trim());
+		if (lines.length === 0) return { ok: false, error: "Empty session file" };
+		const entry = {
+			type: "session_info",
+			id: createHash("sha256").update(`${sessionPath}-${Date.now()}-${Math.random()}`).digest("hex").slice(0, 26),
+			parentId: (JSON.parse(lines[lines.length - 1]) as { id?: string }).id ?? null,
+			timestamp: new Date().toISOString(),
+			name: trimmed.length > 0 ? trimmed : undefined,
+		};
+		await appendFile(sessionPath, `\n${JSON.stringify(entry)}`, { encoding: "utf-8" });
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	}
 }
 
 /** Delete session file (trash-first) and its artifacts — same semantics as the CLI. */

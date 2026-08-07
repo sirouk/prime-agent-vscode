@@ -17,7 +17,13 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const VSCODE = "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
+const _defaultCandidates = [
+	"/Applications/Visual Studio Code.app/Contents/MacOS/Code",
+	"/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+	"/Applications/VS Code.app/Contents/MacOS/Code",
+	"/Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Code",
+];
+const VSCODE = process.env.E2E_CODE_BIN ?? _defaultCandidates.find((c) => fs.existsSync(c));
 const WORKSPACE = os.homedir() + "/prime-agent-vs-ext";
 const PORT = 7321;
 const PATH = `${os.homedir()}/.hermes/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
@@ -155,8 +161,9 @@ const scenarios = {
 		await frame.locator(".rail-pill.model").click();
 		await page.waitForTimeout(400);
 		await frame.locator(".dropdown-star").first().click();
-		await page.waitForTimeout(400);
-		steps.push(ok("favorites section", (await frame.locator(".dropdown-section").allTextContents()).some((t) => t.includes("Favorites"))));
+		const favSection = frame.locator(".dropdown-section").filter({ hasText: "Favorites" }).first();
+		const favsVisible = await favSection.waitFor({ state: "visible", timeout: 4_000 }).then(() => true).catch(() => false);
+		steps.push(ok("favorites section", favsVisible));
 		await page.keyboard.press("Escape");
 		await page.waitForTimeout(300);
 		// unified attach button opens menu with 4 items
@@ -192,6 +199,27 @@ const scenarios = {
 		} else {
 			steps.push(ok("agent answers", true));
 		}
+		return steps;
+	},
+
+	async "menu-stays-open-while-streaming"() {
+		const steps = [];
+		const ta = frame.locator(".composer-card textarea");
+		await ta.click();
+		await ta.fill("Count from 1 to 60, one per line, no tools.");
+		await page.keyboard.press("Enter");
+		await page.waitForTimeout(900);
+		await frame.locator(".rail-pill.model").click();
+		await page.waitForTimeout(2500);
+		steps.push(ok("menu still open 2.5s into the run", (await frame.locator(".dropdown").count()) > 0));
+		await frame.locator(".dropdown-star").first().click();
+		await page.waitForTimeout(2000);
+		steps.push(ok("menu also open after a menu-internal click", (await frame.locator(".dropdown").count()) > 0));
+		const picked = await frame.locator(".dropdown-item").first().textContent().catch(() => "");
+		steps.push(ok("menu content intact", (picked ?? "").length > 6, (picked ?? "").slice(0, 60)));
+		await page.waitForTimeout(6000);
+		steps.push(ok("menu still open 8s into the run", (await frame.locator(".dropdown").count()) > 0));
+		await page.keyboard.press("Escape");
 		return steps;
 	},
 

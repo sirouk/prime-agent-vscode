@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Session title in the header (ellipsis-wrapped) with a hover pencil -> inline rename (Enter commits; RPC or daemon-sidecar for attached sessions); history rows gain a pencil for offline renames (session_info entries, live sessions refused)
+- Menus survive streaming responses (pill label span, guarded updates) — menu-open-during-stream regression covered live
+- ipython tool cards summarize the real first line (skips %%magics, shebangs, comments)
+
 - Brain is a rail pill now (right of the model pill): the thinking picker opens per model, filtered to what the model supports; model menus stay open while replies stream
 - Dual-client guarantee (CLI + extension): writer + viewer on the same resident session both see prompts and answers — covered by the headless parity suite (17 checks)
 - Context gauge is the opener for the auto-compact flyout (hover gear removed); reset is a circle-arrow icon

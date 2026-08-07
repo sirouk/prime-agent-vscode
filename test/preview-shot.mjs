@@ -98,58 +98,40 @@ async function verifyModelmenu2(page) {
 	const all = items.filter((r) => r.section === "All models");
 	out.push(mk("All models section: 3 remaining models", all.length === 3, JSON.stringify(all.map((a) => a.label))));
 
-	// Brain accessory: reasoning models only, popout with six levels.
-	const brains = await page.evaluate(() =>
-		[...document.querySelectorAll(".dropdown-item")].map((r) => ({
-			label: r.querySelector(".dropdown-text")?.textContent ?? "",
-			brain: !!r.querySelector(".dropdown-brain"),
-		})),
-	);
-	const brainlessText = brains.filter((b) => !b.brain).map((b) => b.label);
-	// Fixture: Kimi/claude/gpt-5.2/GLM are reasoning=true, DeepSeek is not.
-	out.push(
-		mk(
-			"brain accessory on all four reasoning models, absent on DeepSeek",
-			brains.filter((b) => b.brain).length === 4 && brainlessText.length === 1 && brainlessText[0].includes("DeepSeek"),
-			JSON.stringify(brains),
-		),
-	);
-	// Open the brain popout on the current model row.
+	// Model rows carry NO brain accessory anymore — the brain lives on the rail as its own pill.
+	const brains = await page.evaluate(() => document.querySelectorAll(".dropdown-item .dropdown-brain").length);
+	out.push(mk("no per-row brain accessory (brain is a rail pill)", brains === 0, `${brains} brains in rows`));
+	// Open the rail brain pill -> the thinking menu with six levels for the current model.
 	await page.evaluate(() => {
-		const row = [...document.querySelectorAll(".dropdown-item")].find((r) => (r.querySelector(".dropdown-text")?.textContent ?? "").includes("Kimi"));
-		row?.querySelector(".dropdown-brain")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+		document.querySelector(".rail-pill.brain")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 	});
 	const menuInfo = await page.evaluate(() => {
 		const dd = document.querySelector(".dropdown");
 		const header = dd?.querySelector(".dropdown-header")?.textContent ?? "";
 		const levels = [...(dd?.querySelectorAll(".dropdown-item") ?? [])].map((r) => ({
-			label: r.querySelector(".dropdown-text, .dropdown-item, button")?.textContent?.trim() ?? r.textContent.trim(),
+			label: (r.querySelector(".dropdown-text")?.textContent ?? r.textContent ?? "").trim(),
 			current: r.classList.contains("current"),
 		}));
 		return { header, levels };
 	});
-	out.push(mk("brain popout header names the model", menuInfo.header.startsWith("Thinking —"), menuInfo.header));
+	out.push(mk("brain rail pill opens the thinking menu", menuInfo.header.startsWith("Thinking —"), menuInfo.header));
 	const levelNames = menuInfo.levels.map((l) => l.label.split(" ")[0].split("\n")[0]);
-	out.push(mk("six levels including xhigh", levelNames.includes("off") && levelNames.includes("xhigh"), JSON.stringify(menuInfo.levels)));
+	out.push(mk("six levels including xhigh", levelNames.includes("off") && levelNames.includes("xhigh"), JSON.stringify(levelNames)));
 	out.push(
 		mk(
-			"current level marked (max normalized to xhigh)",
+			"current thinking level marked (max normalized)",
 			menuInfo.levels.filter((l) => l.current).length === 1 && menuInfo.levels.some((l) => l.current && l.label.startsWith("xhigh")),
 			JSON.stringify(menuInfo.levels.filter((l) => l.current)),
 		),
 	);
-	// Selecting high posts setThinkingLevel.
 	await page.evaluate(() => {
 		const dd = document.querySelector(".dropdown");
-		const row = [...(dd?.querySelectorAll(".dropdown-item") ?? [])].find((r) => r.textContent.trim().startsWith("high"));
+		const row = [...(dd?.querySelectorAll(".dropdown-item") ?? [])].find((r) => (r.querySelector(".dropdown-text")?.textContent ?? r.textContent ?? "").trim().startsWith("high"));
 		row?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 	});
 	const thinkPosts = await page.evaluate(() => postedMessages.filter((m) => m.type === "setThinkingLevel").map((m) => m.level));
 	out.push(mk("selecting high posts setThinkingLevel", thinkPosts.includes("high"), JSON.stringify(thinkPosts)));
 
-		const withImg = items.filter((r) => r.section !== "Thinking level" && (r.right ?? "").includes("img")).map((r) => r.label);
-	const expectImg = ["chutes/moonshotai/Kimi-K3-TEE", "anthropic/claude-sonnet-4-5", "openai/gpt-5.2-codex"];
-	const textOnlyImgless = items.filter((r) => ["chutes/deepseek-ai/DeepSeek-V3.2", "chutes/zai-org/GLM-4.7"].includes(r.label)).every((r) => !(r.right ?? "").includes("img"));
 	out.push(mk("vision-capable models show 'img' badge, text-only models do not", JSON.stringify(withImg.sort()) === JSON.stringify(expectImg.sort()) && textOnlyImgless, `img badges on ${JSON.stringify(withImg)}`));
 	return out;
 }

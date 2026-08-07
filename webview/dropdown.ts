@@ -91,6 +91,11 @@ export class Dropdown {
 	hide(): void {
 		if (!this.open) return;
 		this.open = false;
+		// Debug hook: live-driver probes can stack-trace every hidden() call.
+		const dbg = window as unknown as { __dropdownTrace?: string[] };
+		if (Array.isArray(dbg.__dropdownTrace)) {
+			dbg.__dropdownTrace.push(new Error().stack?.split("\n").slice(1, 6).join(" < ") ?? "?");
+		}
 		this.root.remove();
 		document.removeEventListener("mousedown", this.outsideHandler, true);
 		document.removeEventListener("keydown", this.keyHandler, true);

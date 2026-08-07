@@ -620,7 +620,18 @@ export class Transcript {
 		for (const key of ["code", "command", "path", "file", "prompt", "query", "url"]) {
 			const value = args?.[key];
 			if (typeof value === "string" && value.trim()) {
-				const firstLine = value.split("\n").find((l) => l.trim().length > 0) ?? "";
+				// Skip magic lines, shebangs and comments: pull the first meaningful line.
+				const lines = value.split("\n");
+				let firstLine = lines.find((l) => {
+					const t = l.trim();
+					if (!t) return false;
+					if (t.startsWith("%%") || t.startsWith("#!") || t.startsWith("# ")) return false;
+					return true;
+				}) ?? "";
+				if (!firstLine) {
+					const buffer = (lines.find((l) => l.trim().trimStart().startsWith("%%")) ?? "").trim().replace(/^%%\s*/, "");
+					firstLine = buffer ? `${buffer} cell` : lines[0] ?? "";
+				}
 				return firstLine.length > 140 ? `${firstLine.slice(0, 140)}…` : firstLine;
 			}
 		}
