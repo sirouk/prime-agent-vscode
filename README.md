@@ -21,10 +21,15 @@ terminal client. The extension is a UI over the RPC protocol, not a reimplementa
   composer rail chooses mid-turn steering or end-of-run delivery. Stop button aborts the run.
 - **Editor context**: `@` mentions with file autocomplete, attach the current selection with a
   click or `Cmd+Alt+K`/`Alt+K` (the snippet is sent as context), paste or drop images.
-- **Composer rail**: model picker, thinking level, steering behavior, and a live context-window
-  meter that warms up as you approach the model's limit.
-- **Session control**: new session, in-webview history view for recent workspace sessions,
-  manual compact, export the chat as HTML, restart the agent process.
+- **Composer rail**: searchable model menu with ★ favorites (persisted), reasoning badges and
+  context-window sizes; thinking menu that disables for non-reasoning models; steer/queue
+  toggle (default configurable via `primeAgent.defaultStreamingBehavior`); and a live
+  context-window meter that warms up near the model's limit.
+- **Tool rendering built for agents**: edit calls render as red/green diff hunks with a
+  jump-to-file button; shell calls render as terminal cards with live streaming output.
+- **Session control**: new session, in-webview history grouped by *This workspace* / *Other
+  folders* (prime-agent sessions resume from any directory), manual compact, export the chat
+  as HTML, restart the agent process.
 - **Changes strip**: files the agent touched during the last run, one click to open or diff
   against git HEAD.
 
@@ -46,6 +51,7 @@ If `prime-agent` is not on `PATH`, set `primeAgent.command` to an absolute path,
 | `primeAgent.model` | `""` | Model passed as `--model` on start. |
 | `primeAgent.maxFileSearchResults` | `40` | Max `@` mention search results. |
 | `primeAgent.sendSelectionSnippet` | `true` | Include the selected code when attaching a selection. |
+| `primeAgent.defaultStreamingBehavior` | `steer` | Delivery for messages sent mid-run: `steer` (interrupt after current turn) or `followUp` (run to completion first). |
 
 ## Commands
 

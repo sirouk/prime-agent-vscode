@@ -3,8 +3,9 @@
  * steering behavior picker, context meter, and Send/Stop controls.
  */
 
-import { el, icon, iconButton } from "./dom.js";
-import type { ImageAttachment, RpcSlashCommand, SelectionAttachment } from "../src/protocol.js";
+import { Dropdown, type DropdownItem } from "./dropdown.js";
+import { el, icon, iconButton, svgIcon } from "./dom.js";
+import type { ImageAttachment, ModelRef, RpcModel, RpcSlashCommand, SelectionAttachment } from "../src/protocol.js";
 
 export interface ComposerDeps {
 	onSend: (text: string, images: ImageAttachment[], selections: SelectionAttachment[]) => void;
@@ -13,8 +14,9 @@ export interface ComposerDeps {
 	onPickImage: () => void;
 	onAttachSelection: () => void;
 	onAttachActiveFile: () => void;
-	onPickModel: () => void;
-	onPickThinking: () => void;
+	onSetModel: (provider: string, modelId: string) => void;
+	onSetThinking: (level: string) => void;
+	onToggleFavorite: (provider: string, modelId: string) => void;
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => void;
 }
 
@@ -37,6 +39,14 @@ export class Composer {
 	private commands: RpcSlashCommand[] = [];
 	private streaming = false;
 	private behavior: "steer" | "followUp" = "steer";
+	private models: RpcModel[] = [];
+	private favorites: ModelRef[] = [];
+	private currentModel: { provider?: string; modelId?: string } = {};
+	private currentThinking = "off";
+	private reasoning = true;
+	private steerDefault: "steer" | "followUp" = "steer";
+	private modelMenu: Dropdown | null = null;
+	private thinkingMenu: Dropdown | null = null;
 
 	private acItems: Array<{ label: string; sub?: string; insert: string }> = [];
 	private acSelected = 0;
@@ -64,12 +74,18 @@ export class Composer {
 
 		this.modelBtn = document.createElement("button");
 		this.modelBtn.className = "rail-pill model";
-		this.modelBtn.title = "Select model";
+		this.modelBtn.title = "Choose model";
 		this.thinkingBtn = document.createElement("button");
 		this.thinkingBtn.className = "rail-pill subtle";
-		this.thinkingBtn.title = "Select thinking level";
-		this.modelBtn.addEventListener("click", () => this.deps.onPickModel());
-		this.thinkingBtn.addEventListener("click", () => this.deps.onPickThinking());
+		this.thinkingBtn.title = "Thinking level";
+		this.modelBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.toggleModelMenu();
+		});
+		this.thinkingBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.toggleThinkingMenu();
+		});
 
 		this.behaviorBtn = document.createElement("button");
 		this.behaviorBtn.className = "rail-pill subtle behavior";
@@ -90,7 +106,7 @@ export class Composer {
 
 		this.stopBtn = document.createElement("button");
 		this.stopBtn.className = "send-btn stop";
-		this.stopBtn.title = "Stop the run";
+		this.stopBtn.title = "Stop run (Esc)";
 		this.stopBtn.appendChild(icon("stop", 13));
 		this.stopBtn.style.display = "none";
 		this.stopBtn.addEventListener("click", () => this.deps.onStop());
@@ -122,12 +138,43 @@ export class Composer {
 		this.commands = commands;
 	}
 
-	setModel(label: string): void {
+	setModels(models: RpcModel[]): void {
+		this.models = models;
+		this.updateReasoningState();
+	}
+
+	setFavorites(favorites: ModelRef[]): void {
+		this.favorites = favorites;
+	}
+
+	setModel(label: string, provider?: string, modelId?: string): void {
 		this.modelBtn.textContent = label;
+		this.modelBtn.title = `Choose model (now ${label})`;
+		this.currentModel = { provider, modelId };
+		this.updateReasoningState();
 	}
 
 	setThinking(level: string): void {
+		this.currentThinking = level;
 		this.thinkingBtn.textContent = level === "off" ? "thinking off" : `thinking ${level}`;
+	}
+
+	setSteerDefault(behavior: "steer" | "followUp"): void {
+		this.steerDefault = behavior;
+		if (!this.streaming) this.behavior = behavior;
+		this.updateBehaviorLabel();
+	}
+
+	private updateReasoningState(): void {
+		const model = this.models.find((m) => m.provider === this.currentModel.provider && m.id === this.currentModel.modelId);
+		this.reasoning = model?.reasoning ?? true;
+		if (!this.reasoning) {
+			this.thinkingBtn.classList.add("disabled-pill");
+			this.thinkingBtn.title = "This model does not support thinking";
+		} else {
+			this.thinkingBtn.classList.remove("disabled-pill");
+			this.thinkingBtn.title = "Thinking level";
+		}
 	}
 
 	setStreaming(streaming: boolean): void {
@@ -218,6 +265,102 @@ export class Composer {
 
 	private updateBehaviorLabel(): void {
 		this.behaviorBtn.textContent = this.behavior === "steer" ? "steer" : "queue";
+		this.behaviorBtn.title =
+			this.behavior === "steer"
+				? "Steer: delivered after the current turn, mid-run"
+				: "Queue: delivered when the run ends";
+	}
+
+	// ---------------------------------------------------------------
+	// Model + thinking menus
+	// ---------------------------------------------------------------
+
+	private modelLabelFor(model: RpcModel): string {
+		return `${model.provider}/${model.id}`;
+	}
+
+	private formatCtx(windowSize?: number): string | undefined {
+		if (!windowSize) return undefined;
+		if (windowSize >= 1_000_000) return `${(windowSize / 1_000_000).toFixed(1)}M ctx`;
+		if (windowSize >= 1_000) return `${Math.round(windowSize / 1_000)}k ctx`;
+		return `${windowSize}`;
+	}
+
+	private isFavorite(model: RpcModel): boolean {
+		return this.favorites.some((f) => f.provider === model.provider && f.modelId === model.id);
+	}
+
+	private starAccessory(model: RpcModel): (row: HTMLElement) => void {
+		return (row) => {
+			const star = el("button", `dropdown-star${this.isFavorite(model) ? " active" : ""}`);
+			star.title = this.isFavorite(model) ? "Remove from favorites" : "Save as favorite";
+			star.appendChild(svgIcon(["M12 3.8l2.6 5.3 5.8 1-4.2 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.2-4.2 5.8-1z"], 13));
+			star.addEventListener("click", (event) => {
+				event.stopPropagation();
+				event.preventDefault();
+				// Optimistic flip; the host confirms with a favorites broadcast.
+				this.favorites = this.isFavorite(model)
+					? this.favorites.filter((f) => !(f.provider === model.provider && f.modelId === model.id))
+					: [...this.favorites, { provider: model.provider, modelId: model.id }];
+				this.deps.onToggleFavorite(model.provider, model.id);
+				// Rebuild the menu so the star + sections reorder immediately.
+				this.modelMenu?.hide();
+				this.modelMenu = null;
+				this.toggleModelMenu();
+			});
+			star.addEventListener("mousedown", (event) => event.preventDefault());
+			row.appendChild(star);
+		};
+	}
+
+	private toggleModelMenu(): void {
+		if (this.modelMenu?.isOpen()) {
+			this.modelMenu.hide();
+			return;
+		}
+		const favorites = this.models.filter((m) => this.isFavorite(m));
+		const rest = this.models.filter((m) => !this.isFavorite(m));
+		const makeItem = (model: RpcModel, section: string): DropdownItem => ({
+			label: this.modelLabelFor(model),
+			sub: model.name && model.name !== model.id ? model.name : undefined,
+			right: `${this.formatCtx(model.contextWindow) ?? ""}${model.reasoning ? " · T" : ""}`.replace(/^ /, "") || undefined,
+			section,
+			current: model.provider === this.currentModel.provider && model.id === this.currentModel.modelId,
+			accessory: this.starAccessory(model),
+			onSelect: () => this.deps.onSetModel(model.provider, model.id),
+		});
+		const items: DropdownItem[] = [
+			...favorites.map((m) => makeItem(m, "Favorites")),
+			...rest.map((m) => makeItem(m, favorites.length > 0 ? "All models" : "Models")),
+		];
+		this.thinkingMenu?.hide();
+		this.modelMenu = new Dropdown(this.modelBtn, { placeholder: "Search models…", maxHeight: 320 });
+		this.modelMenu.show(items);
+	}
+
+	private toggleThinkingMenu(): void {
+		if (this.thinkingMenu?.isOpen()) {
+			this.thinkingMenu.hide();
+			return;
+		}
+		if (!this.reasoning) return;
+		const levels: Array<{ level: string; sub: string }> = [
+			{ level: "off", sub: "No extended thinking" },
+			{ level: "minimal", sub: "Shortest reasoning pass" },
+			{ level: "low", sub: "Light reasoning" },
+			{ level: "medium", sub: "Balanced reasoning" },
+			{ level: "high", sub: "Deep reasoning (slower)" },
+			{ level: "xhigh", sub: "Max reasoning — codex-max only" },
+		];
+		const items: DropdownItem[] = levels.map(({ level, sub }) => ({
+			label: level,
+			sub,
+			current: level === this.currentThinking,
+			onSelect: () => this.deps.onSetThinking(level),
+		}));
+		this.modelMenu?.hide();
+		this.thinkingMenu = new Dropdown(this.thinkingBtn, { header: "Thinking level" });
+		this.thinkingMenu.show(items);
 	}
 
 	private onKeyDown(event: KeyboardEvent): void {

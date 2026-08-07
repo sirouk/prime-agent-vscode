@@ -35,21 +35,32 @@ export class HistoryView {
 	render(sessions: RecentSession[]): void {
 		this.listEl.textContent = "";
 		if (sessions.length === 0) {
-			this.listEl.appendChild(el("div", "history-empty", "No previous sessions here yet."));
+			this.listEl.appendChild(el("div", "history-empty", "No previous sessions found."));
 			return;
 		}
-		for (const session of sessions) {
-			const item = el("button", "history-item");
-			const top = el("div", "history-item-top");
-			top.appendChild(el("span", "history-item-name", session.name || session.firstPrompt || "(untitled session)"));
-			top.appendChild(el("span", "history-item-time", relativeTime(session.timestamp)));
-			item.appendChild(top);
-			if (session.name && session.firstPrompt) {
-				item.appendChild(el("div", "history-item-sub", session.firstPrompt.slice(0, 110)));
-			}
-			item.addEventListener("click", () => this.deps.onResume(session.path));
-			this.listEl.appendChild(item);
+		const inWorkspace = sessions.filter((s) => s.inWorkspace);
+		const others = sessions.filter((s) => !s.inWorkspace);
+		if (inWorkspace.length > 0) {
+			this.listEl.appendChild(el("div", "history-group", "This workspace"));
+			for (const session of inWorkspace) this.listEl.appendChild(this.buildItem(session, false));
 		}
+		if (others.length > 0) {
+			this.listEl.appendChild(el("div", "history-group", inWorkspace.length > 0 ? "Other folders" : "Sessions"));
+			for (const session of others) this.listEl.appendChild(this.buildItem(session, true));
+		}
+	}
+
+	private buildItem(session: RecentSession, showFolder: boolean): HTMLButtonElement {
+		const item = el("button", "history-item") as HTMLButtonElement;
+		item.title = session.cwd;
+		const top = el("div", "history-item-top");
+		top.appendChild(el("span", "history-item-name", session.name || session.firstPrompt || "(untitled session)"));
+		top.appendChild(el("span", "history-item-time", relativeTime(session.timestamp)));
+		item.appendChild(top);
+		const sub = session.name && session.firstPrompt ? session.firstPrompt.slice(0, 110) : showFolder ? session.cwd : undefined;
+		if (sub) item.appendChild(el("div", "history-item-sub", sub));
+		item.addEventListener("click", () => this.deps.onResume(session.path));
+		return item;
 	}
 }
 

@@ -256,6 +256,10 @@ export class Transcript {
 
 	private buildUserRow(message: UserMessage): HTMLElement {
 		const row = el("div", "row row-user");
+		const plainText = this.userMessageText(message);
+		const actions = el("div", "row-actions");
+		actions.appendChild(this.makeCopyButton(plainText));
+		row.appendChild(actions);
 		const bubble = el("div", "bubble bubble-user");
 		if (typeof message.content === "string") {
 			bubble.appendChild(el("div", "bubble-text", message.content));
@@ -282,11 +286,37 @@ export class Transcript {
 	private buildAssistantRow(message: AssistantMessage, isPartial: boolean): HTMLElement {
 		const row = el("div", "row row-assistant");
 		this.fillAssistantRow(row, message, isPartial);
+		const actions = el("div", "row-actions");
+		actions.appendChild(this.makeCopyButton(this.assistantAllText(message)));
+		row.appendChild(actions);
 		return row;
+	}
+
+	private userMessageText(message: UserMessage): string {
+		if (typeof message.content === "string") return message.content;
+		if (Array.isArray(message.content)) {
+			return message.content
+				.filter((p) => p.type === "text")
+				.map((p) => (p as { text: string }).text)
+				.join("\n")
+				.trim();
+		}
+		return "";
+	}
+
+	private assistantAllText(message: AssistantMessage): string {
+		return (message.content ?? [])
+			.filter((p) => p.type === "text")
+			.map((p) => (p as { text: string }).text)
+			.join("\n\n")
+			.trim();
 	}
 
 	private fillAssistantRow(row: HTMLElement, message: AssistantMessage, isPartial: boolean): void {
 		row.textContent = "";
+		const existingActions = el("div", "row-actions");
+		existingActions.appendChild(this.makeCopyButton(this.assistantAllText(message)));
+		row.appendChild(existingActions);
 		const avatar = el("div", "avatar");
 		avatar.appendChild(butterfly(16));
 		const body = el("div", "row-body");
@@ -367,6 +397,7 @@ export class Transcript {
 
 		const root = el("div", "tool");
 		const header = el("button", "tool-header");
+		header.title = "Expand tool details";
 		const chevron = icon("chevron", 13);
 		chevron.classList.add("tool-chevron");
 		const statusDot = el("span", "tool-dot running");
@@ -381,33 +412,46 @@ export class Transcript {
 		});
 
 		const inputSection = el("div", "tool-section");
-		const inputHead = el("div", "tool-section-head");
-		inputHead.appendChild(el("span", "", "input"));
-		const copyBtn = el("button", "tool-copy", "Copy");
 		const codeish = (args?.code ?? args?.command) as string | undefined;
 		const inputText = typeof codeish === "string" ? codeish : JSON.stringify(args, null, 2);
-		copyBtn.addEventListener("click", (event) => {
-			event.stopPropagation();
-			copyToClipboard(inputText, () => {
-				copyBtn.textContent = "Copied";
-				setTimeout(() => (copyBtn.textContent = "Copy"), 1000);
-			});
-		});
-		inputHead.appendChild(copyBtn);
+		const inputLabel = name === "ipython" ? "python" : name === "bash" ? "shell" : "input";
+		const inputHead = el("div", "tool-section-head");
+		inputHead.appendChild(el("span", "", inputLabel));
+		inputHead.appendChild(this.makeCopyButton(inputText));
 		inputSection.appendChild(inputHead);
-		const pre = el("pre");
-		pre.textContent = inputText;
-		inputSection.appendChild(pre);
 
-		// Edit-tool convenience: jump to the target file.
-		const maybePath = args?.path;
-		if ((name === "edit" || name === "write" || name === "read") && typeof maybePath === "string" && maybePath.trim()) {
-			const openBtn = el("button", "tool-open", `Open ${shortenPath(maybePath)}`);
-			openBtn.addEventListener("click", (event) => {
-				event.stopPropagation();
-				this.deps.onOpenFile(maybePath);
-			});
-			inputSection.appendChild(openBtn);
+		if (name === "edit" && Array.isArray(args?.edits)) {
+			this.buildEditSections(args, inputHead, inputSection);
+		} else {
+			const pre = el("pre");
+			if (name === "bash") {
+				pre.className = "term";
+				pre.textContent = "";
+				for (const [index, line] of inputText.split("\n").entries()) {
+					if (index > 0) pre.appendChild(document.createTextNode("\n"));
+					const lineEl = el("span", "term-line", line);
+					if (index === 0) {
+						const prompt = el("span", "term-prompt", "$ ");
+						pre.appendChild(prompt);
+					}
+					pre.appendChild(lineEl);
+				}
+			} else {
+				pre.textContent = inputText;
+			}
+			inputSection.appendChild(pre);
+
+			// Edit-tool convenience: jump to the target file.
+			const maybePath = args?.path;
+			if ((name === "edit" || name === "write" || name === "read") && typeof maybePath === "string" && maybePath.trim()) {
+				const openBtn = el("button", "tool-open", `Open ${shortenPath(maybePath)}`);
+				openBtn.title = "Open file in editor";
+				openBtn.addEventListener("click", (event) => {
+					event.stopPropagation();
+					this.deps.onOpenFile(maybePath);
+				});
+				inputSection.appendChild(openBtn);
+			}
 		}
 		body.appendChild(inputSection);
 
@@ -425,6 +469,60 @@ export class Transcript {
 		return block;
 	}
 
+	private makeCopyButton(text: string): HTMLButtonElement {
+		const btn = el("button", "tool-copy", "Copy") as HTMLButtonElement;
+		btn.title = "Copy to clipboard";
+		btn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			copyToClipboard(text, () => {
+				btn.textContent = "Copied";
+				setTimeout(() => (btn.textContent = "Copy"), 1000);
+			});
+		});
+		return btn;
+	}
+
+	/** Render edit-tool args as per-edit red/green diff blocks. */
+	private buildEditSections(args: Record<string, unknown>, inputHead: HTMLElement, inputSection: HTMLElement): void {
+		const wrapper = el("div", "tool-edits");
+		const path = typeof args.path === "string" ? args.path : "";
+		if (path) {
+			const pathRow = el("div", "tool-path-row");
+			pathRow.appendChild(el("span", "tool-path", path));
+			const openBtn = el("button", "tool-open", "Open");
+			openBtn.title = "Open file in editor";
+			openBtn.addEventListener("click", (event) => {
+				event.stopPropagation();
+				this.deps.onOpenFile(path);
+			});
+			pathRow.appendChild(openBtn);
+			inputSection.insertBefore(pathRow, inputHead);
+		}
+		const edits = (Array.isArray(args.edits) ? args.edits : []) as Array<{ oldText?: string; newText?: string }>;
+		for (const [index, edit] of edits.entries()) {
+			const editBox = el("div", "edit-hunk");
+			if (edits.length > 1) {
+				editBox.appendChild(el("div", "edit-hunk-label", `edit ${index + 1}/${edits.length}`));
+			}
+			const oldLines = (edit.oldText ?? "").split("\n");
+			const newLines = (edit.newText ?? "").split("\n");
+			for (const line of oldLines) {
+				const row = el("div", "diff-line del");
+				row.appendChild(el("span", "diff-sign", "-"));
+				row.appendChild(el("span", "diff-text", line));
+				editBox.appendChild(row);
+			}
+			for (const line of newLines) {
+				const row = el("div", "diff-line add");
+				row.appendChild(el("span", "diff-sign", "+"));
+				row.appendChild(el("span", "diff-text", line));
+				editBox.appendChild(row);
+			}
+			wrapper.appendChild(editBox);
+		}
+		inputSection.appendChild(wrapper);
+	}
+
 	private setToolState(id: string, state: "running" | "done" | "error"): void {
 		const block = this.toolBlocks.get(id);
 		if (!block) return;
@@ -439,7 +537,9 @@ export class Transcript {
 		if (block.resultSection) return block.resultSection;
 		const section = el("div", `tool-section tool-result${isError ? " error" : ""}`);
 		section.appendChild(el("div", "tool-section-label", label));
-		section.appendChild(el("pre"));
+		const pre = el("pre");
+		if (block.root.dataset.toolName === "bash") pre.className = "term";
+		section.appendChild(pre);
 		block.body.appendChild(section);
 		block.resultSection = section;
 		return section;
@@ -494,11 +594,11 @@ export class Transcript {
 		for (const file of files.slice(0, 10)) {
 			const chip = el("span", "cf-chip");
 			const nameBtn = el("button", "cf-open", shortenPath(file));
-			nameBtn.title = `${file} — open`;
+			nameBtn.title = `Open ${file}`;
 			nameBtn.addEventListener("click", () => this.deps.onOpenFile(file));
 			const diffBtn = document.createElement("button");
 			diffBtn.className = "cf-diff";
-			diffBtn.title = `Diff ${file} against git HEAD`;
+			diffBtn.title = "Diff against git HEAD";
 			diffBtn.appendChild(icon("diff", 12));
 			diffBtn.addEventListener("click", () => this.deps.onOpenDiff(file));
 			chip.append(nameBtn, diffBtn);

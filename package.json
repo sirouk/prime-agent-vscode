@@ -69,7 +69,7 @@
       },
       {
         "command": "primeAgent.history",
-        "title": "Resume Recent Session…",
+        "title": "Resume Recent Session\u2026",
         "icon": "$(history)"
       },
       {
@@ -157,6 +157,15 @@
           "type": "boolean",
           "default": true,
           "description": "Include the selected code as context when using 'Add Selection to Chat'."
+        },
+        "primeAgent.defaultStreamingBehavior": {
+          "type": "string",
+          "enum": [
+            "steer",
+            "followUp"
+          ],
+          "default": "steer",
+          "description": "How messages sent while the agent is working are delivered: steer interrupts after the current turn, followUp waits until the run ends. Toggleable per-run in the chat rail."
         }
       }
     }

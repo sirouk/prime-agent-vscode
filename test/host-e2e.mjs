@@ -16,6 +16,7 @@ const { SessionController } = require("./dist/controller.cjs");
 const { vscodeStub } = require("./test/vscode-stub.cjs");
 
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-host-e2e-"));
+process.env.PRIME_AGENT_ARGS = `--session-dir ${path.join(workdir, "sessions")}`;
 vscodeStub.workspace.workspaceFolders = [{ uri: { fsPath: workdir, scheme: "file" }, name: "e2e", index: 0 }];
 
 let failed = 0;

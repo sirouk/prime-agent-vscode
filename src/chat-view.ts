@@ -92,6 +92,7 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			await controller.refreshSnapshot();
 			await controller.listModels();
 			await controller.listCommands();
+			controller.sendFavorites();
 			return;
 		case "prompt":
 			await controller.prompt(message.payload);
@@ -160,6 +161,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			return;
 		case "pickThinkingLevel":
 			await controller.pickThinkingQuickPick();
+			return;
+		case "toggleFavoriteModel":
+			await controller.toggleFavoriteModel(message.provider, message.modelId);
 			return;
 		case "openExternal":
 			await vscode.env.openExternal(vscode.Uri.parse(message.url));

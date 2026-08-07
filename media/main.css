@@ -5,8 +5,8 @@
 body.vscode-dark,
 body.vscode-high-contrast {
 	--pa-bg: var(--vscode-sideBar-background, #0f0f0f);
-	--pa-surface: color-mix(in srgb, var(--vscode-sideBar-background, #0f0f0f) 82%, #ffffff 4%);
-	--pa-surface-2: color-mix(in srgb, var(--vscode-sideBar-background, #0f0f0f) 72%, #ffffff 8%);
+	--pa-surface: color-mix(in srgb, var(--vscode-sideBar-background, #0f0f0f) 94%, #ffffff 6%);
+	--pa-surface-2: color-mix(in srgb, var(--vscode-sideBar-background, #0f0f0f) 88%, #ffffff 12%);
 	--pa-border: color-mix(in srgb, var(--vscode-sideBar-background, #0f0f0f) 78%, #d8d8d8 22%);
 	--pa-border-strong: color-mix(in srgb, var(--vscode-sideBar-background, #0f0f0f) 62%, #d8d8d8 38%);
 	--pa-text: var(--vscode-foreground, #f5f7f8);
@@ -22,8 +22,8 @@ body.vscode-light {
 	--pa-bg: var(--vscode-sideBar-background, #fafafa);
 	--pa-surface: #ffffff;
 	--pa-surface-2: color-mix(in srgb, #ffffff 92%, #0f0f0f 8%);
-	--pa-border: color-mix(in srgb, #ffffff 72%, #0f0f0f 16%);
-	--pa-border-strong: color-mix(in srgb, #ffffff 55%, #0f0f0f 30%);
+	--pa-border: color-mix(in srgb, #ffffff 84%, #0f0f0f 16%);
+	--pa-border-strong: color-mix(in srgb, #ffffff 70%, #0f0f0f 30%);
 	--pa-text: var(--vscode-foreground, #1c1c1c);
 	--pa-dim: var(--vscode-descriptionForeground, #6e6e6e);
 	--pa-accent: #1f9d44;
@@ -1149,4 +1149,302 @@ details.thinking .thinking-body {
 
 .stats-label {
 	white-space: nowrap;
+}
+
+/* ---------- dropdown menus ---------- */
+
+.dropdown {
+	position: absolute;
+	bottom: calc(100% + 8px);
+	left: -6px;
+	min-width: 240px;
+	max-width: 340px;
+	z-index: 80;
+	display: flex;
+	flex-direction: column;
+	background: var(--pa-surface-2, var(--vscode-editorWidget-background));
+	border: 1px solid var(--pa-border);
+	border-radius: 9px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+	overflow: hidden;
+}
+
+.dropdown-header {
+	padding: 7px 10px 3px;
+	font-size: 9.5px;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	color: var(--pa-dim);
+}
+
+.dropdown-search {
+	margin: 6px 8px;
+	padding: 5px 9px;
+	font-size: 11.5px;
+	font-family: inherit;
+	color: var(--pa-text);
+	background: var(--pa-surface);
+	border: 1px solid var(--pa-border);
+	border-radius: 6px;
+	outline: none;
+}
+
+.dropdown-search:focus {
+	border-color: var(--pa-accent);
+}
+
+.dropdown-list {
+	overflow-y: auto;
+	padding: 3px;
+	max-height: 260px;
+}
+
+.dropdown-list::-webkit-scrollbar {
+	width: 8px;
+}
+
+.dropdown-section {
+	padding: 6px 9px 2px;
+	font-size: 9.5px;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	color: var(--pa-dim);
+}
+
+.dropdown-item {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	width: 100%;
+	padding: 5px 8px;
+	border-radius: 6px;
+	text-align: left;
+	font-size: 11.5px;
+}
+
+.dropdown-item.selected,
+.dropdown-item:hover {
+	background: var(--pa-accent-dim);
+}
+
+.dropdown-item.disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.dropdown-label {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	flex: 1;
+}
+
+.dropdown-text {
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 11px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.dropdown-sub {
+	font-size: 10px;
+	color: var(--pa-dim);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.dropdown-right {
+	font-size: 10px;
+	color: var(--pa-dim);
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.dropdown-item.current .dropdown-text {
+	color: var(--pa-accent);
+	font-weight: 600;
+}
+
+.dropdown-star {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 4px;
+	color: var(--pa-dim);
+	flex-shrink: 0;
+	opacity: 0.55;
+}
+
+.dropdown-star:hover {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}
+
+.dropdown-star.active {
+	color: var(--pa-accent);
+}
+
+.dropdown-star svg {
+	fill: none;
+}
+
+.dropdown-star.active svg {
+	fill: currentColor;
+}
+
+.dropdown-empty {
+	padding: 10px;
+	font-size: 11px;
+	color: var(--pa-dim);
+	text-align: center;
+}
+
+.rail-pill.disabled-pill {
+	opacity: 0.45;
+	cursor: default;
+	text-decoration: line-through;
+}
+
+/* ---------- terminal blocks ---------- */
+
+pre.term {
+	background: #0a0a0a;
+	color: #d6d6d6;
+	border: 1px solid var(--pa-border);
+}
+
+body.vscode-light pre.term {
+	background: #f2f2f2;
+	color: #2a2a2a;
+}
+
+.term-prompt {
+	color: var(--pa-accent);
+	font-weight: 600;
+	user-select: none;
+}
+
+/* ---------- edit diff blocks ---------- */
+
+.tool-path-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 2px 0 4px;
+}
+
+.tool-path {
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 11px;
+	color: var(--pa-accent);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.tool-edits {
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+	margin-bottom: 6px;
+}
+
+.edit-hunk {
+	border: 1px solid var(--pa-border);
+	border-radius: 6px;
+	overflow: hidden;
+	max-height: 240px;
+	overflow-y: auto;
+}
+
+.edit-hunk-label {
+	padding: 2px 8px;
+	font-size: 9.5px;
+	color: var(--pa-dim);
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	border-bottom: 1px solid var(--pa-border);
+}
+
+.diff-line {
+	display: flex;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10.5px;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.diff-sign {
+	width: 18px;
+	flex-shrink: 0;
+	text-align: center;
+	user-select: none;
+	opacity: 0.7;
+}
+
+.diff-text {
+	flex: 1;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10.5px;
+}
+
+.diff-line.del {
+	background: color-mix(in srgb, transparent 86%, #ff6b5e 14%);
+}
+
+.diff-line.del .diff-sign,
+.diff-line.del .diff-text {
+	color: color-mix(in srgb, currentColor 60%, #ff6b5e 40%);
+}
+
+.diff-line.add {
+	background: color-mix(in srgb, transparent 88%, var(--pa-accent) 12%);
+}
+
+.diff-line.add .diff-sign,
+.diff-line.add .diff-text {
+	color: color-mix(in srgb, currentColor 65%, var(--pa-accent) 35%);
+}
+
+/* ---------- hover row actions ---------- */
+
+.row {
+	position: relative;
+}
+
+.row-actions {
+	position: absolute;
+	top: -6px;
+	right: 2px;
+	display: none;
+	gap: 2px;
+	background: var(--pa-surface-2);
+	border: 1px solid var(--pa-border);
+	border-radius: 6px;
+	padding: 1px 3px;
+	z-index: 5;
+}
+
+.row:hover .row-actions {
+	display: inline-flex;
+}
+
+.row-user .row-actions {
+	top: -10px;
+}
+
+.history-group {
+	padding: 6px 4px 2px;
+	font-size: 9.5px;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	color: var(--pa-dim);
 }

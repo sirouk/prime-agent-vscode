@@ -55,6 +55,8 @@ export const icons = {
 	refresh: ["M20 12a8 8 0 1 1-2.3-5.6", "M20 3.5V8h-4.5"],
 	export: ["M12 15V3.5", "M7.5 8 12 3.5 16.5 8", "M4.5 14v6h15v-6"],
 	compact: ["M8 3.5h8M8 8h6M8 12.5h4M8 17h2.5", "M4 3.5v17M20 3.5v17"],
+	star: ["M12 3.8l2.6 5.3 5.8 1-4.2 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.2-4.2 5.8-1z"],
+	search: ["M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13z", "M21 21l-6-6"],
 } satisfies Record<string, string[]>;
 
 export type IconName = keyof typeof icons;

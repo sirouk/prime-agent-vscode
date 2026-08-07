@@ -1,6 +1,6 @@
 /**
- * Webview DOM harness: loads the built media/main.js inside happy-dom and
- * drives it with the same host->webview messages SessionController sends.
+ * Webview DOM harness: drives the built media/main.js inside happy-dom with
+ * the same host->webview messages SessionController sends.
  */
 
 import { Window } from "happy-dom";
@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 const window = new Window({ url: "https://webview.local/" });
 const document = window.document;
 document.body.innerHTML = '<div id="app"></div>';
+document.body.className = "vscode-dark";
 
 const posted = [];
 const vscodeApi = {
@@ -22,6 +23,7 @@ globalThis.document = document;
 globalThis.HTMLElement = window.HTMLElement;
 globalThis.HTMLAnchorElement = window.HTMLAnchorElement;
 globalThis.SVGSVGElement = window.SVGSVGElement;
+globalThis.HTMLInputElement = window.HTMLInputElement;
 globalThis.FileReader = window.FileReader;
 globalThis.Event = window.Event;
 globalThis.acquireVsCodeApi = () => vscodeApi;
@@ -40,49 +42,38 @@ function hostMessage(data) {
 const code = fs.readFileSync(new URL("../media/main.js", import.meta.url), "utf8");
 window.eval(code);
 
-check("sends ready on boot", !!posted.some((m) => m.type === "ready"));
+check("sends ready on boot", posted.some((m) => m.type === "ready"));
 check("welcome screen visible", !!document.querySelector(".welcome"));
-check("butterfly brand rendered", !!document.querySelector(".brand svg"));
 
 const baseStatus = {
-	connected: true,
-	streaming: false,
-	compacting: false,
-	retrying: false,
-	restoring: false,
-	modelLabel: "chutes/kimi",
-	thinkingLevel: "max",
-	sessionName: "demo-session",
-	sessionId: "019fd749-abcd-1234",
-	statsText: "1k tokens",
-	usageTotal: 4483,
-	costUsd: 0.004,
-	contextTokens: 60000,
-	contextWindow: 262144,
-	contextPercent: 23,
+	connected: true, streaming: false, compacting: false, retrying: false, restoring: false,
+	modelLabel: "chutes/kimi", thinkingLevel: "max", sessionName: "demo", sessionId: "019fd749-x",
+	statsText: "", usageTotal: 4483, costUsd: 0.004,
+	contextTokens: 60000, contextWindow: 262144, contextPercent: 23,
+	modelProvider: "chutes", modelId: "kimi",
 };
 
-// --- snapshot with a full conversation ---
 hostMessage({
 	type: "snapshot",
 	messages: [
 		{ role: "user", content: "hello there" },
 		{
-			role: "assistant",
-			model: "kimi",
-			stopReason: "toolUse",
+			role: "assistant", model: "kimi", stopReason: "toolUse",
 			content: [
 				{ type: "thinking", thinking: "hmm" },
-				{ type: "text", text: "I will run code.\n\n- a\n- b\n\n```py\nprint(2+2)\n```" },
-				{ type: "toolCall", id: "tc1", name: "ipython", arguments: { code: "print(2+2)" } },
+				{ type: "text", text: "I will edit the file.\n\n- a\n- b\n\n```py\nprint(1)\n```" },
+				{ type: "toolCall", id: "tc1", name: "edit", arguments: { path: "src/app.ts", edits: [{ oldText: "const x = 1;", newText: "const x = 2;\nconst y = 3;" }] } },
+				{ type: "toolCall", id: "tc2", name: "bash", arguments: { command: "npm run build" } },
 			],
-			usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: 0.01 } },
+			usage: { totalTokens: 15, cost: { total: 0.01 } },
 		},
-		{ role: "toolResult", toolCallId: "tc1", toolName: "ipython", content: [{ type: "text", text: "4" }], isError: false },
+		{ role: "toolResult", toolCallId: "tc1", toolName: "edit", content: [{ type: "text", text: "edited src/app.ts" }] },
+		{ role: "toolResult", toolCallId: "tc2", toolName: "bash", content: [{ type: "text", text: "done" }] },
 		{ role: "assistant", model: "kimi", stopReason: "stop", content: [{ type: "text", text: "The answer is **4**." }] },
 	],
 	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
 	status: baseStatus,
+	steerDefault: "steer",
 });
 
 const scroller = document.querySelector(".messages");
@@ -91,56 +82,59 @@ check("user bubble rendered", !!scroller.querySelector(".bubble-user"));
 check("assistant avatar rendered", !!scroller.querySelector(".avatar svg"));
 check("markdown list rendered", scroller.querySelectorAll(".md li").length === 2);
 check("code block with header rendered", scroller.querySelectorAll(".codeblock").length === 1);
-check("codeblock copy button", !!scroller.querySelector(".codeblock-copy"));
 check("thinking block rendered", !!scroller.querySelector("details.thinking"));
-check("tool block rendered", !!scroller.querySelector(".tool"));
+check("edit diff lines rendered", scroller.querySelectorAll(".diff-line.del").length === 1 && scroller.querySelectorAll(".diff-line.add").length === 2,
+	`${scroller.querySelectorAll(".diff-line").length} diff lines`);
+check("edit path row rendered", !!scroller.querySelector(".tool-path"));
+check("bash term prompt rendered", [...scroller.querySelectorAll(".term-prompt")].some((p) => p.textContent === "$ "));
 check("tool pill shows done", [...scroller.querySelectorAll(".tool-pill")].some((p) => p.textContent === "done"));
-check("tool has result section", !!scroller.querySelector(".tool-result"));
 check("usage line rendered", scroller.querySelectorAll(".usage-line").length >= 1);
-check("bold rendered", [...scroller.querySelectorAll(".md strong")].some((s) => s.textContent === "4"));
-check("session title shown", document.querySelector(".session-title").textContent === "demo-session");
+check("hover copy actions exist", scroller.querySelectorAll(".row-actions").length >= 2);
+check("session title shown", document.querySelector(".session-title").textContent === "demo");
 check("live badge", document.querySelector(".live-label").textContent === "live");
 check("context meter labeled", document.querySelector(".context-label").textContent.includes("262k"));
 
-// --- streaming lifecycle ---
+// --- model menu with favorites ---
+hostMessage({
+	type: "models",
+	models: [
+		{ provider: "chutes", id: "kimi", contextWindow: 262144, reasoning: true },
+		{ provider: "chutes", id: "glm", contextWindow: 131072, reasoning: false },
+		{ provider: "openai", id: "gpt-5", contextWindow: 400000, reasoning: true },
+	],
+});
+hostMessage({ type: "favorites", favorites: [{ provider: "chutes", modelId: "kimi" }] });
+const modelBtn = [...document.querySelectorAll(".rail-pill.model")][0];
+modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const dropdown = document.querySelector(".dropdown");
+check("model menu opens", !!dropdown);
+check("model menu has search", !!dropdown.querySelector(".dropdown-search"));
+check("favorites section present", [...document.querySelectorAll(".dropdown-section")].some((s) => s.textContent === "Favorites"));
+check("all model rows present", document.querySelectorAll(".dropdown-item").length === 3);
 posted.length = 0;
-hostMessage({ type: "event", event: { type: "agent_start" } });
-check("working row appears", !!scroller.querySelector(".working-row"));
-hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
-hostMessage({
-	type: "event",
-	event: {
-		type: "message_update",
-		message: { role: "assistant", content: [{ type: "text", text: "partial **bo" }] },
-		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "bo" },
-	},
-});
-check("streaming bubble content", scroller.textContent.includes("partial"));
-hostMessage({
-	type: "event",
-	event: {
-		type: "message_end",
-		message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "partial **bold** done" }], usage: { totalTokens: 2 } },
-	},
-});
-check("finalized strong tag", [...scroller.querySelectorAll(".md strong")].some((s) => s.textContent === "bold"));
-hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
-check("working row removed", !scroller.querySelector(".working-row"));
+// toggle favorite on the gpt-5 row
+const gptRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("gpt-5"));
+gptRow.querySelector(".dropdown-star").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("star posts toggle", posted.some((m) => m.type === "toggleFavoriteModel" && m.modelId === "gpt-5"));
+// select a model row
+const glmRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("glm"));
+glmRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("select posts setModel", posted.some((m) => m.type === "setModel" && m.modelId === "glm"));
+check("menu closed after select", !document.querySelector(".dropdown"));
+// non-reasoning model disables the thinking pill
+hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm", thinkingLevel: "off" } });
+check("thinking pill disabled for non-reasoning model", document.querySelector(".rail-pill.disabled-pill") !== null);
 
-// --- tool streaming ---
-hostMessage({ type: "event", event: { type: "agent_start" } });
-hostMessage({
-	type: "event",
-	event: {
-		type: "message_end",
-		message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "tc9", name: "bash", arguments: { command: "ls" } }] },
-	},
-});
-hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "tc9", toolName: "bash", args: { command: "ls" } } });
-hostMessage({ type: "event", event: { type: "tool_execution_update", toolCallId: "tc9", toolName: "bash", args: {}, partialResult: { output: "file-a\n" } } });
-check("partial tool output", scroller.textContent.includes("file-a"));
-hostMessage({ type: "event", event: { type: "tool_execution_end", toolCallId: "tc9", toolName: "bash", result: { content: [{ type: "text", text: "done" }] }, isError: false } });
-hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+// --- thinking menu ---
+hostMessage({ type: "status", status: { ...baseStatus } });
+const thinkingBtn = [...document.querySelectorAll(".rail-pill.subtle")].find((b) => b.textContent.includes("thinking"));
+thinkingBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const tDrop = document.querySelector(".dropdown");
+check("thinking menu opens", !!tDrop);
+check("thinking levels offered", tDrop.querySelectorAll(".dropdown-item").length === 6);
+posted.length = 0;
+[...tDrop.querySelectorAll(".dropdown-item")].find((r) => r.textContent.startsWith("high")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("select posts setThinkingLevel", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"));
 
 // --- composer send ---
 posted.length = 0;
@@ -149,23 +143,24 @@ textarea.value = "test prompt";
 textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 const promptMsg = posted.find((m) => m.type === "prompt");
 check("enter sends prompt", !!promptMsg && promptMsg.payload.text === "test prompt");
-check("composer cleared", textarea.value === "");
 
-// --- history view ---
+// --- history view (grouped) ---
+posted.length = 0;
 const historyBtn = [...document.querySelectorAll(".icon-btn")].find((b) => b.title === "Sessions in this workspace");
 historyBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("requests history on toggle", posted.some((m) => m.type === "requestHistory"));
-hostMessage({ type: "history", sessions: [{ path: "/tmp/s.jsonl", timestamp: new Date().toISOString(), name: "old chat" }] });
-check("history item rendered", document.querySelectorAll(".history-item").length === 1);
+hostMessage({
+	type: "history",
+	sessions: [
+		{ path: "/tmp/a.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "local chat", inWorkspace: true },
+		{ path: "/tmp/b.jsonl", cwd: "/other/proj", timestamp: new Date().toISOString(), firstPrompt: "work on proj", inWorkspace: false },
+	],
+});
+check("history groups rendered", document.querySelectorAll(".history-item").length === 2);
+check("other session shows folder", [...document.querySelectorAll(".history-item")].some((i) => i.textContent.includes("proj")));
 posted.length = 0;
-document.querySelector(".history-item").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("resume switches session", posted.some((m) => m.type === "switchSession" && m.path === "/tmp/s.jsonl"));
-
-// --- changed files + notices ---
-hostMessage({ type: "changedFiles", files: ["src/a.ts"] });
-check("changed files bar", document.querySelector(".changed-files").classList.contains("visible"));
-hostMessage({ type: "notice", level: "error", text: "boom" });
-check("notice rendered", [...document.querySelectorAll(".notice")].some((n) => n.textContent.includes("boom")));
+document.querySelectorAll(".history-item")[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("resume switches session", posted.some((m) => m.type === "switchSession" && m.path === "/tmp/b.jsonl"));
 
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

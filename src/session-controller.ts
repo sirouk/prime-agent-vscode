@@ -13,6 +13,7 @@ import type {
 	AgentMessage,
 	HostToWebview,
 	ImageAttachment,
+	ModelRef,
 	PromptPayload,
 	RecentSession,
 	RpcExtensionUIRequest,
@@ -104,6 +105,9 @@ export class SessionController implements vscode.Disposable {
 
 		const args = [...extraArgs];
 		if (model) args.push("--model", model);
+		// Escape hatch (tests, unusual launch setups): extra space-delimited args.
+		const envArgs = process.env.PRIME_AGENT_ARGS?.trim();
+		if (envArgs) args.push(...envArgs.split(/\s+/));
 
 		this.output.appendLine(`[prime-agent] starting: ${command} --mode rpc ${args.join(" ")}`);
 		const client = new RpcClient({ command, args, cwd: this.workspaceRoot });
@@ -436,6 +440,28 @@ export class SessionController implements vscode.Disposable {
 		void this.listHistory();
 	}
 
+	// ------------------------------------------------------------------
+	// Favorite models (persisted in globalState)
+	// ------------------------------------------------------------------
+
+	private favorites(): ModelRef[] {
+		return this.context.globalState.get<ModelRef[]>("primeAgent.favoriteModels", []);
+	}
+
+	sendFavorites(): void {
+		this.broadcast({ type: "favorites", favorites: this.favorites() });
+	}
+
+	async toggleFavoriteModel(provider: string, modelId: string): Promise<void> {
+		const current = this.favorites();
+		const exists = current.some((f) => f.provider === provider && f.modelId === modelId);
+		const next = exists
+			? current.filter((f) => !(f.provider === provider && f.modelId === modelId))
+			: [...current, { provider, modelId }];
+		await this.context.globalState.update("primeAgent.favoriteModels", next);
+		this.sendFavorites();
+	}
+
 	async listHistory(): Promise<void> {
 		const sessions = await listRecentSessions(this.workspaceRoot, 25);
 		this.broadcast({ type: "history", sessions });
@@ -508,11 +534,15 @@ export class SessionController implements vscode.Disposable {
 				this.state = stateRes.data as RpcSessionState;
 			}
 			const stats = await this.fetchStatsText();
+			const steerDefault = vscode.workspace
+				.getConfiguration("primeAgent")
+				.get<"steer" | "followUp">("defaultStreamingBehavior", "steer");
 			this.broadcast({
 				type: "snapshot",
 				messages: this.cachedMessages,
 				state: this.state,
 				status: this.buildStatus(stats),
+				steerDefault,
 			});
 		} catch (err) {
 			this.output.appendLine(`[prime-agent] snapshot failed: ${String(err)}`);
@@ -585,6 +615,8 @@ export class SessionController implements vscode.Disposable {
 			sessionId: this.state?.sessionId,
 			statsText,
 			statusText: this.extensionStatusText,
+			modelProvider: model?.provider,
+			modelId: model?.id,
 			...this.lastUsage,
 		};
 	}

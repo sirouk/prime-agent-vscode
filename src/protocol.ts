@@ -217,6 +217,7 @@ export type WebviewToHost =
 	| { type: "attachSelection" }
 	| { type: "pickModel" }
 	| { type: "pickThinkingLevel" }
+	| { type: "toggleFavoriteModel"; provider: string; modelId: string }
 	| { type: "openExternal"; url: string };
 
 export interface StatusSnapshot {
@@ -237,17 +238,33 @@ export interface StatusSnapshot {
 	contextTokens?: number | null;
 	contextWindow?: number;
 	contextPercent?: number | null;
+	modelProvider?: string;
+	modelId?: string;
+}
+
+export interface ModelRef {
+	provider: string;
+	modelId: string;
 }
 
 export interface RecentSession {
 	path: string;
+	cwd: string;
 	timestamp: string;
 	name?: string;
 	firstPrompt?: string;
+	inWorkspace: boolean;
 }
 
 export type HostToWebview =
-	| { type: "snapshot"; messages: AgentMessage[]; state: RpcSessionState | null; status: StatusSnapshot }
+	| {
+			type: "snapshot";
+			messages: AgentMessage[];
+			state: RpcSessionState | null;
+			status: StatusSnapshot;
+			steerDefault?: "steer" | "followUp";
+		}
+	| { type: "favorites"; favorites: ModelRef[] }
 	| { type: "event"; event: AgentEvent }
 	| { type: "status"; status: StatusSnapshot }
 	| { type: "models"; models: RpcModel[] }

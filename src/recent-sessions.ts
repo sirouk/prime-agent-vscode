@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import { realpathSync } from "node:fs";
 import type { RecentSession } from "./protocol.js";
 
 const MAX_SCAN = 400;
@@ -80,8 +81,12 @@ function extractUserText(content: unknown): string | undefined {
 	return undefined;
 }
 
-/** List recent sessions whose header cwd matches workspaceRoot, newest first. */
-export async function listRecentSessions(workspaceRoot: string, limit = 15): Promise<RecentSession[]> {
+/**
+ * List recent sessions, newest first. Sessions matching the workspace root are
+ * flagged `inWorkspace`; all others are included too — prime-agent sessions are
+ * resumable from any cwd, and the group header makes the distinction visible.
+ */
+export async function listRecentSessions(workspaceRoot: string, limit = 40): Promise<RecentSession[]> {
 	const dir = sessionsDir();
 	let entries: fs.Dirent[];
 	try {
@@ -110,18 +115,34 @@ export async function listRecentSessions(workspaceRoot: string, limit = 15): Pro
 		.sort((a, b) => b.mtime - a.mtime)
 		.slice(0, 80);
 
+	const normalizedRoot = normalizePath(workspaceRoot);
 	const results: RecentSession[] = [];
 	for (const { file } of sorted) {
 		if (results.length >= limit) break;
 		const { header, name, firstPrompt } = await readHeader(file);
 		if (!header.cwd) continue;
-		if (path.resolve(header.cwd) !== path.resolve(workspaceRoot)) continue;
+		const inWorkspace = normalizePath(header.cwd) === normalizedRoot;
 		results.push({
 			path: file,
+			cwd: header.cwd,
 			timestamp: header.timestamp ?? new Date().toISOString(),
 			name,
 			firstPrompt,
+			inWorkspace,
 		});
 	}
+	// Workspace sessions first, then everything else, both newest-first.
+	results.sort((a, b) => Number(b.inWorkspace) - Number(a.inWorkspace));
 	return results;
+}
+
+function normalizePath(p: string): string {
+	let resolved = path.resolve(p);
+	try {
+		resolved = realpathSync.native(resolved);
+	} catch {
+		// path may not exist; keep resolved form
+	}
+	if (process.platform === "darwin") resolved = resolved.toLowerCase();
+	return resolved.replace(/[/\\]+$/, "");
 }

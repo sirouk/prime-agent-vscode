@@ -29,7 +29,12 @@ async function waitFor(predicate, timeoutMs, label) {
 }
 
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-vs-ext-smoke-"));
-const client = new RpcClient({ command: process.env.PRIME_AGENT_COMMAND ?? "prime-agent", cwd: workdir });
+const sessionDir = path.join(workdir, "sessions");
+const client = new RpcClient({
+	command: process.env.PRIME_AGENT_COMMAND ?? "prime-agent",
+	cwd: workdir,
+	args: ["--session-dir", sessionDir],
+});
 
 const events = [];
 const seenTypes = new Set();
@@ -103,7 +108,7 @@ try {
 	client.stop();
 	await new Promise((r) => setTimeout(r, 300));
 	check("process stops", !client.running);
-	const client2 = new RpcClient({ command: process.env.PRIME_AGENT_COMMAND ?? "prime-agent", cwd: workdir });
+	const client2 = new RpcClient({ command: process.env.PRIME_AGENT_COMMAND ?? "prime-agent", cwd: workdir, args: ["--session-dir", sessionDir] });
 	client2.start();
 	await new Promise((r) => setTimeout(r, 300));
 	const s3 = await client2.request({ type: "get_state" }, 30_000);

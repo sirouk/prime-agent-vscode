@@ -92,8 +92,9 @@ const composerDeps = {
 	onPickImage: () => post({ type: "pickImage", requestId: Date.now() }),
 	onAttachSelection: () => post({ type: "attachSelection" }),
 	onAttachActiveFile: () => post({ type: "attachActiveFile" }),
-	onPickModel: () => post({ type: "pickModel" }),
-	onPickThinking: () => post({ type: "pickThinkingLevel" }),
+	onSetModel: (provider: string, modelId: string) => post({ type: "setModel", provider, modelId }),
+	onSetThinking: (level: string) => post({ type: "setThinkingLevel", level }),
+	onToggleFavorite: (provider: string, modelId: string) => post({ type: "toggleFavoriteModel", provider, modelId }),
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => post({ type: "openFile", path, startLine, endLine }),
 };
 const composer = new Composer(composerDeps);
@@ -184,7 +185,7 @@ function applyStatus(status: StatusSnapshot): void {
 	if (status.costUsd != null && status.costUsd > 0) statsBits.push(`$${status.costUsd.toFixed(4)}`);
 	statsLabel.textContent = statsBits.join(" · ");
 
-	composer.setModel(status.modelLabel);
+	composer.setModel(status.modelLabel, status.modelProvider, status.modelId);
 	composer.setThinking(status.thinkingLevel);
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
@@ -217,6 +218,7 @@ window.addEventListener("message", (messageEvent) => {
 			transcript.renderSnapshot(message.messages ?? []);
 			applyStatus(message.status);
 			composer.setStreaming(transcript.isStreaming());
+			if (message.steerDefault) composer.setSteerDefault(message.steerDefault);
 			break;
 		case "event":
 			transcript.handleEvent(message.event);
@@ -231,7 +233,10 @@ window.addEventListener("message", (messageEvent) => {
 			applyStatus(message.status);
 			break;
 		case "models":
-			// native QuickPick handles selection; model list cached for future menus
+			composer.setModels(message.models);
+			break;
+		case "favorites":
+			composer.setFavorites(message.favorites);
 			break;
 		case "commands":
 			composer.setCommands(message.commands);

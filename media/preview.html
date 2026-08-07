@@ -34,6 +34,31 @@
 
 		if (mode === "welcome") {
 			host({ type: "status", status: baseStatus });
+		} else if (mode === "modelmenu") {
+			host({ type: "snapshot", messages: [], state: null, status: baseStatus, steerDefault: "steer" });
+			host({ type: "models", models: [
+				{ provider: "chutes", id: "moonshotai/Kimi-K3-TEE", contextWindow: 262144, reasoning: true },
+				{ provider: "chutes", id: "deepseek-ai/DeepSeek-V3.2", contextWindow: 131072, reasoning: false },
+				{ provider: "anthropic", id: "claude-sonnet-4-5", contextWindow: 200000, reasoning: true },
+				{ provider: "openai", id: "gpt-5.2-codex", contextWindow: 400000, reasoning: true },
+				{ provider: "chutes", id: "zai-org/GLM-4.7", contextWindow: 131072, reasoning: true },
+			] });
+			host({ type: "favorites", favorites: [
+				{ provider: "chutes", modelId: "moonshotai/Kimi-K3-TEE" },
+				{ provider: "anthropic", modelId: "claude-sonnet-4-5" },
+			] });
+			host({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" }, status: baseStatus, steerDefault: "steer" });
+			setTimeout(() => document.querySelector(".rail-pill.model").dispatchEvent(new MouseEvent("click", { bubbles: true })), 150);
+		} else if (mode === "history") {
+			host({ type: "snapshot", messages: [], state: null, status: baseStatus, steerDefault: "steer" });
+			host({ type: "showHistory" });
+			const now = Date.now();
+			host({ type: "history", sessions: [
+				{ path: "/a/1.jsonl", cwd: "/Users/chrisk/prime-agent-vs-ext", timestamp: new Date(now - 3600e3).toISOString(), name: "vscode-extension", inWorkspace: true },
+				{ path: "/a/2.jsonl", cwd: "/Users/chrisk/prime-agent-vs-ext", timestamp: new Date(now - 3*3600e3).toISOString(), name: "vscode-session", firstPrompt: "Add a VS Code extension that talks to the RPC mode", inWorkspace: true },
+				{ path: "/a/3.jsonl", cwd: "/Users/chrisk/airship", timestamp: new Date(now - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
+				{ path: "/a/4.jsonl", cwd: "/Users/chrisk/prime-agent", timestamp: new Date(now - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
+			] });
 		} else {
 			host({
 				type: "snapshot",
