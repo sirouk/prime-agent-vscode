@@ -9,6 +9,28 @@ The agent keeps its own runtime: daemon-backed sessions, skills, the persistent 
 kernel, subagents, schedules, and the continual harness all behave exactly as in the
 terminal client. The extension is a UI over the RPC protocol, not a reimplementation.
 
+### Install from source (quick)
+
+One-liner — clones to a temp dir, builds, installs, cleans up:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sirouk/prime-agent-vscode/master/install.sh | sh
+```
+
+Manual:
+
+```sh
+git clone https://github.com/sirouk/prime-agent-vscode
+cd prime-agent-vscode
+npm ci
+npm run package
+code --install-extension prime-agent-vscode-<version>.vsix
+```
+
+Requires `git`, `node` >= 20, `npm`, and the `code` CLI on `PATH` (macOS: run *Shell
+Command: Install 'code' command in PATH* from the Command Palette). The extension
+usually activates without a window reload; otherwise run *Developer: Reload Window*.
+
 ## Features
 
 - **Streaming chat** with markdown rendering, collapsible thinking blocks, and live tool-call
