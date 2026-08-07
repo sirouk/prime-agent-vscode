@@ -8,6 +8,8 @@ import { execFile } from "node:child_process";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
+import { DaemonSidecar } from "./daemon-sidecar.js";
+import type { DaemonServerMessage, SessionSummaryRef } from "./daemon-sidecar.js";
 import type {
 	AgentEvent,
 	AgentMessage,
@@ -48,6 +50,12 @@ export class SessionController implements vscode.Disposable {
 	private startingPromise: Promise<void> | null = null;
 	private intentionalStop = false;
 	private observingId: string | null = null;
+	/** Daemon sidecar for resident-session parity (attach/prompt/abort on live sessions). */
+	private sidecar: DaemonSidecar | null = null;
+	private attached: { activeSessionId: string; sessionPath: string } | null = null;
+	/** Where browsing-into-a-child should return to. null → the baseline RPC session. */
+	private returnTarget: { kind: "rpc" } | { kind: "attached"; activeSessionId: string; sessionPath: string } = { kind: "rpc" };
+	private rentedState: RpcSessionState | null = null;
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -195,6 +203,7 @@ export class SessionController implements vscode.Disposable {
 				this.streaming = false;
 				this.retrying = false;
 				this.onBusySettled();
+				void this.scheduleChildrenRefresh();
 				break;
 			case "compaction_start":
 				this.compacting = true;
@@ -331,6 +340,28 @@ export class SessionController implements vscode.Disposable {
 	// ------------------------------------------------------------------
 
 	async prompt(payload: PromptPayload): Promise<void> {
+		if (this.attached) {
+			const sidecar = await this.ensureSidecar();
+			const text = this.composeMessageText(payload);
+			if (payload.images.length > 0) {
+				this.broadcast({
+					type: "notice",
+					level: "warning",
+					text: "Images aren't delivered to attached terminal sessions (daemon prompts are text-only).",
+				});
+			}
+			const behavior = this.streaming ? payload.streamingBehavior : "steer";
+			try {
+				await sidecar.prompt(this.attached.activeSessionId, text, behavior);
+				this.broadcast({ type: "promptAccepted", kind: "prompt" });
+			} catch (err) {
+				this.broadcast({
+					type: "promptRejected",
+					error: err instanceof Error ? err.message : "daemon prompt failed",
+				});
+			}
+			return;
+		}
 		await this.ensureStarted();
 		if (!this.client) throw new Error("agent unavailable");
 		this.output.appendLine(`[prime-agent] prompt: streaming=${this.streaming} behavior=${payload.streamingBehavior} text="${payload.text.slice(0, 60)}"`);
@@ -382,6 +413,15 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async abort(): Promise<void> {
+		if (this.attached) {
+			const sidecar = await this.ensureSidecar();
+			try {
+				await sidecar.abort(this.attached.activeSessionId);
+			} catch (err) {
+				this.output.appendLine(`[prime-agent] attached abort failed: ${String(err)}`);
+			}
+			return;
+		}
 		if (!this.client?.running) return;
 		try {
 			await this.client.request({ type: "abort" }, 10_000);
@@ -393,18 +433,30 @@ export class SessionController implements vscode.Disposable {
 	async newSession(): Promise<void> {
 		await this.ensureStarted();
 		if (!this.client) return;
+		await this.detachFromDaemon();
 		await this.clearObservation();
 		const response = await this.client.request({ type: "new_session" });
 		if (response.success) {
 			this.changedFiles.clear();
 			this.cachedMessages = [];
+			this.broadcast({ type: "sessionChildren", children: [] });
 			await this.refreshSnapshot();
+			void this.scheduleChildrenRefresh();
 		} else {
 			this.broadcast({ type: "notice", level: "error", text: `New session failed: ${response.error ?? "unknown error"}` });
 		}
 	}
 
 	async compact(instructions?: string): Promise<void> {
+		if (this.attached) {
+			const sidecar = await this.ensureSidecar();
+			try {
+				await sidecar.compact(this.attached.activeSessionId);
+			} catch (err) {
+				this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${err instanceof Error ? err.message : String(err)}` });
+			}
+			return;
+		}
 		await this.ensureStarted();
 		if (!this.client) return;
 		const response = await this.client.request(
@@ -702,16 +754,23 @@ export class SessionController implements vscode.Disposable {
 	async switchSession(sessionPath: string, sessionId?: string): Promise<void> {
 		await this.ensureStarted();
 		if (!this.client) return;
+		await this.detachFromDaemon();
 		await this.clearObservation();
 		const response = await this.client.request({ type: "switch_session", sessionPath }, 60_000);
 		if (response.success) {
 			this.changedFiles.clear();
 			await this.refreshSnapshot();
+			void this.scheduleChildrenRefresh();
 			return;
 		}
 		const error = response.error ?? "unknown error";
 		if (/already active/i.test(error)) {
 			const id = sessionId ?? path.basename(sessionPath, ".jsonl");
+			const attached = await this.attachViaDaemon(id, sessionPath);
+			if (attached) {
+				this.broadcast({ type: "notice", level: "info", text: "Attached to the live session — you can work here and in the terminal simultaneously." });
+				return;
+			}
 			const observed = await this.startObserving(id);
 			if (observed) return;
 			this.broadcast({
@@ -738,7 +797,206 @@ export class SessionController implements vscode.Disposable {
 		return true;
 	}
 
-	private async clearObservation(): Promise<void> {
+	
+	// ----------------------------------------------------------------
+	// Daemon sidecar: attached live sessions (terminal parity)
+	// ----------------------------------------------------------------
+
+	private async ensureSidecar(): Promise<DaemonSidecar> {
+		if (!this.sidecar) {
+			this.sidecar = new DaemonSidecar();
+			this.sidecar.onEvent = (message) => this.onDaemonEvent(message);
+			this.sidecar.onClose = () => {
+				if (this.attached) {
+					this.attached = null;
+					this.broadcast({ type: "notice", level: "warning", text: "Lost the daemon connection — detached from the live session." });
+					this.pushStatus();
+				}
+			};
+		}
+		if (!this.sidecar.connected) {
+			await this.sidecar.connect();
+		}
+		return this.sidecar;
+	}
+
+	/**
+	 * Attach to a session that is already live somewhere else (a terminal).
+	 * The daemon brokers it; both clients see the same stream, both can prompt.
+	 */
+	private async attachViaDaemon(activeSessionId: string, sessionPath: string): Promise<boolean> {
+		try {
+			const sidecar = await this.ensureSidecar();
+			const result = await sidecar.attach(activeSessionId);
+			this.attached = { activeSessionId, sessionPath };
+			const snapshot = result.snapshot;
+			if (snapshot?.messages) {
+				this.cachedMessages = snapshot.messages as AgentMessage[];
+			} else {
+				try {
+					this.cachedMessages = (await sidecar.getMessages(activeSessionId)) as AgentMessage[];
+				} catch {
+					this.cachedMessages = [];
+				}
+			}
+			this.rentedState = (snapshot?.state ?? null) as RpcSessionState | null;
+			void this.refreshChildren();
+			this.changedFiles.clear();
+			this.broadcast({
+				type: "snapshot",
+				messages: this.cachedMessages,
+				state: this.rentedState,
+				status: this.buildStatus(),
+				steerDefault: vscode.workspace.getConfiguration("primeAgent").get<"steer" | "followUp">("defaultStreamingBehavior", "steer"),
+			});
+			this.pushStatus();
+			return true;
+		} catch (error) {
+			this.output.appendLine(`[prime-agent] daemon attach failed: ${String(error)}`);
+			return false;
+		}
+	}
+
+	private async detachFromDaemon(): Promise<void> {
+		if (this.attached && this.sidecar?.connected) {
+			await this.sidecar.detach(this.attached.activeSessionId);
+		}
+		this.attached = null;
+		this.rentedState = null;
+	}
+
+	/** Connect the sidecar lazily and refresh children; fire-and-forget. */
+	private async scheduleChildrenRefresh(): Promise<void> {
+		try {
+			await this.ensureSidecar();
+			await this.refreshChildren();
+		} catch {
+			// daemon unavailable — panel stays empty
+		}
+	}
+
+	/** Refresh and broadcast the children (subagents) of the CURRENT session. */
+	private async refreshChildren(): Promise<void> {
+		if (!this.sidecar?.connected) return;
+		try {
+			const sessions = await this.sidecar.list(true);
+			let parentActive: string;
+			let parentUuid: string | undefined;
+			if (this.attached) {
+				parentActive = this.attached.activeSessionId;
+				parentUuid = undefined;
+			} else {
+				parentActive = "";
+				parentUuid = this.state?.sessionId;
+			}
+			const children = sessions.filter((s) => {
+				const kind = (s as SessionSummaryRef & { runtimeKind?: string }).runtimeKind;
+				if (!kind || kind === "root") return false;
+				if (this.attached) {
+					return (
+						(s.parentActiveSessionId && s.parentActiveSessionId === parentActive) ||
+						((s as SessionSummaryRef & { parentSessionId?: string }).parentSessionId === parentActive)
+					);
+				}
+				const byParent = (s as SessionSummaryRef & { parentSessionId?: string }).parentSessionId;
+				return parentUuid != null && byParent === parentUuid;
+			});
+			this.broadcast({
+				type: "sessionChildren",
+				children: children.map((c) => ({
+					id: c.id ?? "",
+					activeSessionId: c.activeSessionId ?? c.id ?? "",
+					name: c.sessionName,
+					runtimeKind: (c as SessionSummaryRef & { runtimeKind?: string }).runtimeKind,
+					rlmDepth: (c as SessionSummaryRef & { rlmDepth?: number }).rlmDepth,
+					isStreaming: (c as SessionSummaryRef & { isStreaming?: boolean }).isStreaming ?? false,
+					attachedClients: c.attachedClients ?? 0,
+				})),
+			});
+		} catch {
+			// quiet — stale layout tolerated until the next refresh
+		}
+	}
+
+	/** Browse into a subagent (or any resident session): attach via the daemon. */
+	async browseChild(activeSessionId: string): Promise<boolean> {
+		// remember where to go back to
+		if (this.attached) {
+			this.returnTarget = { kind: "attached", ...this.attached };
+			const previous = this.attached.activeSessionId;
+			this.attached = null;
+			if (this.sidecar?.connected) await this.sidecar.detach(previous);
+		} else {
+			this.returnTarget = { kind: "rpc" };
+		}
+		const attached = await this.attachViaDaemon(activeSessionId, "");
+		if (!attached) {
+			this.broadcast({ type: "notice", level: "error", text: "Could not attach to that subagent session (it may be gone)." });
+			return false;
+		}
+		void this.refreshChildren();
+		return true;
+	}
+
+	async backToParent(): Promise<void> {
+		const target = this.returnTarget;
+		this.returnTarget = { kind: "rpc" };
+		if (target.kind === "attached") {
+			const path = target.sessionPath;
+			const id = target.activeSessionId;
+			if (this.attached && this.sidecar?.connected) {
+				await this.sidecar.detach(this.attached.activeSessionId);
+			}
+			this.attached = null;
+			await this.attachViaDaemon(id, path);
+			return;
+		}
+		// baseline: own RPC session
+		await this.detachFromDaemon();
+		await this.refreshSnapshot();
+		this.pushStatus();
+	}
+
+	/** Route daemon events for the attached session into the normal pipeline. */
+	private onDaemonEvent(message: DaemonServerMessage): void {
+		const attached = this.attached;
+		if (!attached) return;
+		const msgSessionId = message.activeSessionId;
+		if (message.type === "session_event" && msgSessionId === attached.activeSessionId && message.event) {
+			this.onAgentEvent(message.event as AgentEvent);
+			return;
+		}
+		if (message.type === "session_status" && msgSessionId === attached.activeSessionId) {
+			void this.refreshAttachedState();
+			return;
+		}
+		if (message.type === "session_replaced" && msgSessionId === attached.activeSessionId) {
+			void this.refreshAttachedState();
+			this.pushStatus();
+			return;
+		}
+		if (message.type === "session_closed" && msgSessionId === attached.activeSessionId) {
+			this.broadcast({ type: "notice", level: "warning", text: "The live session was closed by its other client." });
+			this.attached = null;
+			this.rentedState = null;
+			this.pushStatus();
+		}
+	}
+
+	private async refreshAttachedState(): Promise<void> {
+		const attached = this.attached;
+		if (!attached || !this.sidecar?.connected) return;
+		try {
+			this.rentedState = (await this.sidecar.getState(attached.activeSessionId)) as RpcSessionState;
+			this.pushStatus();
+		} catch {
+			// keep current state
+		}
+	}
+
+	/** Effective model/status snapshot accounting for daemon-attached sessions. */
+
+private async clearObservation(): Promise<void> {
 		if (!this.observingId || !this.client) {
 			this.observingId = null;
 			return;
@@ -845,6 +1103,27 @@ export class SessionController implements vscode.Disposable {
 	private lastUsage: { usageTotal?: number; costUsd?: number; contextTokens?: number | null; contextWindow?: number; contextPercent?: number | null } = {};
 
 	private buildStatus(statsText = this.lastStatsText): StatusSnapshot {
+		if (this.attached) {
+			const st = this.rentedState as (RpcSessionState & { model?: RpcSessionState["model"] }) | null;
+			const model = st?.model ?? null;
+			const label = model ? `${model.provider}/${model.id}` : "attached session";
+			return {
+				connected: true,
+				streaming: this.streaming,
+				compacting: this.compacting,
+				retrying: this.retrying,
+				restoring: false,
+				modelLabel: label,
+				thinkingLevel: st?.thinkingLevel ?? "off",
+				sessionName: st?.sessionName,
+				sessionFile: this.attached.sessionPath,
+				sessionId: this.attached.activeSessionId,
+				statsText,
+				statusText: "attached (shared with terminal)",
+				observingId: this.observingId,
+				...this.lastUsage,
+			};
+		}
 		const model = this.state?.model;
 		const modelLabel = model ? `${model.provider}/${model.id}` : "no model";
 		return {

@@ -183,6 +183,12 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 		case "forkFromUser":
 			await controller.forkFromUser(message.ordinal);
 			return;
+		case "browseChild":
+			await controller.browseChild(message.activeSessionId);
+			return;
+		case "backToParent":
+			await controller.backToParent();
+			return;
 		case "copyConversation":
 			await controller.copyConversation();
 			return;

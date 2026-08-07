@@ -161,7 +161,64 @@ convCopy.addEventListener("click", (event) => {
 });
 statusStrip.append(connDot, liveLabel, sessionIdLabel, el("span", "spacer"), statsLabel, convCopy);
 
-app.append(topbar, menu, notices, observeBanner, chatView, historyView.root, composer.root, statusStrip);
+// Subagents strip: collapsible panel floating on top of the composer.
+const subagentsStrip = el("div", "subagents-strip") as HTMLElement;
+let subagentsExpanded = false;
+let browsingChild = false;
+let sessionChildren: import("../src/protocol.js").SessionChild[] = [];
+
+function renderSubagentsStrip(): void {
+	subagentsStrip.textContent = "";
+	if (!browsingChild && sessionChildren.length === 0) {
+		subagentsStrip.classList.remove("visible");
+		return;
+	}
+	subagentsStrip.classList.add("visible");
+	const header = el("button", "subagents-header") as HTMLButtonElement;
+	const parts: Array<HTMLElement | string> = [];
+	if (browsingChild) {
+		const back = el("span", "subagents-back", "‹ parent");
+		header.append(back, el("span", "subagents-sep"));
+		if (sessionChildren.length > 0) {
+			header.append(`${sessionChildren.length} subagent${sessionChildren.length === 1 ? "" : "s"}`);
+		}
+		header.addEventListener("click", () => post({ type: "backToParent" }));
+		header.title = "Return to the parent agent";
+	} else {
+		header.append(
+			el("span", "subagents-caret", subagentsExpanded ? "▾" : "▸"),
+			`Subagents (${sessionChildren.length})`,
+		);
+		header.title = "Subagents spawned by this session — click to expand, browse one to look inside";
+		header.addEventListener("click", () => {
+			subagentsExpanded = !subagentsExpanded;
+			renderSubagentsStrip();
+		});
+	}
+	subagentsStrip.appendChild(header);
+	if ((!browsingChild && subagentsExpanded) || browsingChild) {
+		const list = el("div", "subagents-list");
+		for (const child of sessionChildren) {
+			const row = el("button", "subagent-row") as HTMLButtonElement;
+			row.title = `${child.runtimeKind === "subagent" ? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : (child.runtimeKind ?? "session")}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
+			const dot = el("span", `subagent-dot${child.isStreaming ? " active" : ""}`);
+			const name = el("span", "subagent-name", child.name ?? child.id);
+			const badge = child.isStreaming ? el("span", "subagent-badge", "active") : "";
+			const suffix = el("span", "subagent-go", browsingChild || true ? "inspect ›" : "browse ›");
+			row.append(dot, name, badge, suffix);
+			row.addEventListener("click", (event) => {
+				event.stopPropagation();
+				post({ type: "browseChild", activeSessionId: child.activeSessionId, parentSessionId: child.id });
+				browsingChild = true;
+				renderSubagentsStrip();
+			});
+			list.appendChild(row);
+		}
+		subagentsStrip.appendChild(list);
+	}
+}
+
+app.append(topbar, menu, notices, observeBanner, chatView, historyView.root, subagentsStrip, composer.root, statusStrip);
 historyView.root.style.display = "none";
 
 function showView(view: "chat" | "history"): void {
@@ -173,6 +230,9 @@ function showView(view: "chat" | "history"): void {
 
 newChatBtn.addEventListener("click", () => {
 	showView("chat");
+	browsingChild = false;
+	subagentsExpanded = false;
+	renderSubagentsStrip();
 	post({ type: "newSession" });
 });
 historyBtn.addEventListener("click", () => {
@@ -305,6 +365,10 @@ function dispatchHostMessage(message: HostToWebview): void {
 			break;
 		case "compactThreshold":
 			composer.setCompactThreshold(message.percent);
+			break;
+		case "sessionChildren":
+			sessionChildren = message.children ?? [];
+			renderSubagentsStrip();
 			break;
 		case "commands":
 			composer.setCommands(message.commands);

@@ -791,7 +791,9 @@ export class Transcript {
 		block.state = state;
 		const dot = block.root.querySelector(".tool-dot");
 		if (dot) dot.className = `tool-dot ${state}`;
-		block.pill.textContent = state === "done" ? "done" : state;
+		// No busy "done" pill: running shows the pill, the dot (green=done/red=error)
+		// is enough for finished states.
+		block.pill.textContent = state === "running" ? "running" : "";
 		block.pill.className = `tool-pill ${state}`;
 	}
 

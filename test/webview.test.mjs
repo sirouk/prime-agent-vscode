@@ -87,7 +87,7 @@ check("edit diff lines rendered", scroller.querySelectorAll(".diff-line.del").le
 	`${scroller.querySelectorAll(".diff-line").length} diff lines`);
 check("edit path row rendered", !!scroller.querySelector(".tool-path"));
 check("bash term prompt rendered", [...scroller.querySelectorAll(".term-prompt")].some((p) => p.textContent === "$ "));
-check("tool pill shows done", [...scroller.querySelectorAll(".tool-pill")].some((p) => p.textContent === "done"));
+check("no busy done pill (dot conveys state)", [...scroller.querySelectorAll(".tool-pill")].every((p) => p.textContent !== "done"));
 check("usage line rendered", scroller.querySelectorAll(".usage-line").length >= 1);
 check("user footer with copy + fork", !!scroller.querySelector(".row-user .user-footer .uf-icon") && scroller.querySelectorAll(".row-user .user-footer .uf-icon").length === 2);
 check("session title shown", document.querySelector(".session-title").textContent === "demo");
@@ -185,6 +185,30 @@ check("other session shows folder", [...document.querySelectorAll(".history-item
 posted.length = 0;
 document.querySelectorAll(".history-item")[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("resume switches session", posted.some((m) => m.type === "switchSession" && m.path === "/tmp/b.jsonl"));
+
+// --- subagents strip: renders children, browses into one, returns via parent ---
+check("subagents strip hidden with no children", !document.querySelector(".subagents-strip.visible"));
+hostMessage({
+	type: "sessionChildren",
+	children: [
+		{ id: "019fdaa1-0000", activeSessionId: "abcdef123450", name: "verify-threads", runtimeKind: "subagent", rlmDepth: 1, isStreaming: true, attachedClients: 0 },
+		{ id: "019fdaa2-0001", activeSessionId: "abcdef123451", name: "audit-style", runtimeKind: "subagent", rlmDepth: 1, isStreaming: false, attachedClients: 1 },
+	],
+});
+check("subagents strip visible with children", !!document.querySelector(".subagents-strip.visible"));
+const stripHeader = document.querySelector(".subagents-strip .subagents-header");
+check("strip header shows count", stripHeader && stripHeader.textContent.includes("Subagents (2)"), stripHeader?.textContent ?? "");
+stripHeader.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const rows = document.querySelectorAll(".subagents-strip .subagent-row");
+check("two subagent rows", rows.length === 2);
+check("active badge on streaming child", [...rows].some((r) => r.querySelector(".subagent-badge")?.textContent === "active"));
+posted.length = 0;
+[...rows].find((r) => r.textContent.includes("verify-threads")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("browse posts browseChild", posted.some((m) => m.type === "browseChild" && m.activeSessionId === "abcdef123450"));
+check("strip switches to parent mode", !!document.querySelector(".subagents-strip .subagents-back"), document.querySelector(".subagents-header")?.textContent ?? "");
+posted.length = 0;
+document.querySelector(".subagents-header").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("header click in parent mode posts backToParent", posted.some((m) => m.type === "backToParent"));
 
 // --- paste image on a text-only model shows a composer hint ---
 // Current model is chutes/kimi with no "image" input modality (vision gate off).

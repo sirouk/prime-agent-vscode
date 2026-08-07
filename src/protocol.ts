@@ -131,6 +131,18 @@ export interface RpcSessionState {
 	messageCount?: number;
 }
 
+export interface SessionChild {
+	/** bare id (uuid or sub-xxxx) for display */
+	id: string;
+	/** daemon attach target (12-char active id, or the id when resident) */
+	activeSessionId: string;
+	name?: string;
+	runtimeKind?: string;
+	rlmDepth?: number;
+	isStreaming?: boolean;
+	attachedClients?: number;
+}
+
 export interface RpcSlashCommand {
 	name: string;
 	description?: string;
@@ -223,6 +235,8 @@ export type WebviewToHost =
 	| { type: "pickModel" }
 	| { type: "pickThinkingLevel" }
 	| { type: "toggleFavoriteModel"; provider: string; modelId: string }
+	| { type: "browseChild"; activeSessionId: string; parentSessionId?: string }
+	| { type: "backToParent" }
 	| { type: "forkFromUser"; ordinal: number }
 	| { type: "copyConversation" }
 	| { type: "draftChanged"; text: string }
@@ -279,6 +293,7 @@ export type HostToWebview =
 			steerDefault?: "steer" | "followUp";
 		}
 	| { type: "favorites"; favorites: ModelRef[] }
+	| { type: "sessionChildren"; children: SessionChild[] }
 	| { type: "draft"; text: string }
 	| { type: "compactThreshold"; percent: number | null }
 	| { type: "event"; event: AgentEvent }
