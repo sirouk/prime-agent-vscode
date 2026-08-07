@@ -999,9 +999,26 @@ export class SessionController implements vscode.Disposable {
 		this.previousChildIds = null;
 		try {
 			const sidecar = await this.ensureSidecar();
-			const result = await sidecar.attach(activeSessionId);
-			this.attached = { activeSessionId, sessionPath };
-			this.attachAttempt = { activeSessionId, sessionPath };
+			// Resolve the canonical activeSessionId: root-session uuids and 12-char
+			// active windows differ, and events are addressed to the canonical id.
+			let canonicalId = activeSessionId;
+			try {
+				const listed = await sidecar.list(true);
+				const target =
+					listed.find((s) => s.activeSessionId === activeSessionId) ??
+					listed.find((s) => (s as { sessionId?: string }).sessionId === activeSessionId) ??
+					listed.find((s) => s.id === activeSessionId);
+				if (target?.activeSessionId) {
+					canonicalId = target.activeSessionId;
+				}
+			} catch {
+				// list failed — fall back to what was asked (attach may still succeed)
+			}
+			const result = await sidecar.attach(canonicalId);
+			const returnedId = (result.snapshot as { activeSessionId?: string } | undefined)?.activeSessionId;
+			const finalId = returnedId ?? canonicalId;
+			this.attached = { activeSessionId: finalId, sessionPath };
+			this.attachAttempt = { activeSessionId: finalId, sessionPath };
 			const snapshot = result.snapshot;
 			if (snapshot?.messages) {
 				this.cachedMessages = snapshot.messages as AgentMessage[];

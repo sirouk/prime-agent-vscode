@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Attached-session event routing uses the daemon's canonical activeSessionId (streaming from CLI continues to flow through the extension thread — the uuid/active-window mismatch is gone)
+- Spawn cards seed only for currently-running subagents; historical ones stay in the collapsible strip (no resume spam)
+
+
 - Subagent spawn cards announce each new subagent inline in the transcript (ordered by start time), clickable to browse into it; the strip refresh stays cheap and realtime via traffic-throttled daemon reads
 
 

@@ -526,11 +526,14 @@ function dispatchHostMessage(message: HostToWebview): void {
 			for (const spawn of spawnedList) {
 				transcript.injectSpawnCard({ id: spawn.activeSessionId, name: spawn.name, created: spawn.created });
 			}
-			// Resume-derived seeded cards for previously-spawned children (once per session view).
+			// Seed cards ONLY for currently-running children; historical ones stay in
+			// the collapsible strip. Spams nothing on resume.
 			if (!spawnSeenBaseline && sessionChildren.length > 0) {
 				spawnSeenBaseline = true;
 				for (const child of sessionChildren) {
-					if (child.created) transcript.injectSpawnCard({ id: child.activeSessionId, name: child.name, created: child.created });
+					if (child.isStreaming && child.created) {
+						transcript.injectSpawnCard({ id: child.activeSessionId, name: child.name, created: child.created });
+					}
 				}
 			}
 			renderSubagentsStrip();

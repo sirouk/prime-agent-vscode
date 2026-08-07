@@ -304,14 +304,24 @@ check("spawn card visible with name", !!spawnCard && spawnCard.textContent.inclu
 posted.length = 0;
 spawnCard.querySelector(".spawned-view").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("spawn card click posts browseChild", posted.some((m) => m.type === "browseChild" && m.activeSessionId === "aaaa1111"));
-// seeded baseline on first children payload only, no duplicate rows
+// seeded baseline (second payload): ended child gets NO card at all; running one keeps theirs
 hostMessage({
 	type: "sessionChildren",
 	children: [
 		{ id: "sub-a", activeSessionId: "aaaa1111", name: "verify-threads", runtimeKind: "subagent", created: "2026-08-07T15:00:00Z", isStreaming: false, attachedClients: 0, rlmDepth: 1 },
 	],
-	// no 'spawned' list — seed only, should not duplicate the card
 });
+check("re-broadcast does not duplicate the spawn card", document.querySelectorAll(".spawned-card").length === 1);
+hostMessage({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "high" }, status: baseStatus });
+hostMessage({
+	type: "sessionChildren",
+	children: [
+		{ id: "old-sub", activeSessionId: "bbbb2222", name: "login-session", runtimeKind: "subagent", created: "2026-08-06T10:00:00Z", isStreaming: false, attachedClients: 0, rlmDepth: 1 },
+		{ id: "live-sub", activeSessionId: "cccc3333", name: "audit-live", runtimeKind: "subagent", created: "2026-08-07T16:00:00Z", isStreaming: true, attachedClients: 0, rlmDepth: 1 },
+	],
+});
+const cards = document.querySelectorAll(".spawned-card");
+check("baseline seeds cards only for running children", cards.length === 1 && cards[0].textContent.includes("Subagent spawned — audit-live"), cards.length + " cards: " + [...cards].map((c) => c.textContent).join("|"));
 check("re-broadcast does not duplicate the spawn card", document.querySelectorAll(".spawned-card").length === 1);
 
 // --- history: running indicator + stop/rename/delete ordering ---
