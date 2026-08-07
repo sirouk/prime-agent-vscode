@@ -348,7 +348,8 @@ textarea::-webkit-scrollbar {
 }
 
 .row-user {
-	justify-content: flex-end;
+	flex-direction: column;
+	align-items: flex-end;
 }
 
 .bubble-user {
@@ -1613,23 +1614,31 @@ body.vscode-light pre.term {
 
 .jump-to-latest {
 	position: sticky;
-	bottom: 8px;
-	left: 50%;
-	transform: translateX(-50%);
+	bottom: 10px;
+	left: calc(100% - 30px);
 	display: none;
-	font-size: 10.5px;
-	padding: 2px 10px;
-	border-radius: 10px;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 50%;
 	background: var(--vscode-widget-background, var(--pa-raised));
 	border: 1px solid var(--vscode-widget-border, var(--pa-border));
 	color: var(--pa-dim);
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
 	cursor: pointer;
 	z-index: 5;
+	padding: 0;
+	opacity: 0.85;
 }
 
 .jump-to-latest.visible { display: inline-flex; }
-.jump-to-latest:hover { color: var(--pa-accent); border-color: var(--pa-accent-dim); }
+
+.jump-to-latest:hover {
+	opacity: 1;
+	color: var(--pa-accent);
+	border-color: var(--pa-accent-dim);
+}
 
 /* ---------- composer mention chips ---------- */
 
@@ -1979,30 +1988,30 @@ body.vscode-light pre.term {
 	border-radius: 0 6px 6px 0;
 }
 
-/* ---------- tiny context gear ---------- */
+/* ---------- threshold flyout (reset icon) ---------- */
 
-.context-gear {
-	position: absolute;
-	top: 4px;
-	right: -6px;
-	transform: none;
-	width: 14px;
-	height: 14px;
-	border-radius: 4px;
-	color: var(--pa-faint);
-	opacity: 0;
-	transition: opacity 0.12s ease, color 0.12s ease;
+.threshold-row .threshold-reset {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	border-radius: 50%;
+	border: 1px solid var(--pa-border);
+	color: var(--pa-dim);
+	flex-shrink: 0;
 }
 
-.context-meter:hover .context-gear,
-.context-gear:focus-visible,
-.context-meter:has(.threshold-flyout.visible) .context-gear {
-	opacity: 1;
-}
-
-.context-gear:hover {
+.threshold-row .threshold-reset:hover {
 	color: var(--pa-accent);
+	border-color: var(--pa-accent-dim);
 	background: var(--pa-accent-dim);
+}
+
+.threshold-row .threshold-reset.active {
+	color: var(--pa-accent);
+	border-color: var(--pa-accent-dim);
 }
 
 /* ---------- subagent rows: subtle indent + viewing highlight + pulse ---------- */

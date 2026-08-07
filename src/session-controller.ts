@@ -1124,6 +1124,7 @@ private async clearObservation(): Promise<void> {
 				restoring: false,
 				modelLabel: label,
 				thinkingLevel: st?.thinkingLevel ?? "off",
+				availableThinkingLevels: (st as RpcSessionState & { availableThinkingLevels?: string[] } | null)?.availableThinkingLevels ?? null,
 				sessionName: st?.sessionName,
 				sessionFile: this.attached.sessionPath,
 				sessionId: this.attached.activeSessionId,
@@ -1143,6 +1144,8 @@ private async clearObservation(): Promise<void> {
 			restoring: this.startingPromise !== null,
 			modelLabel,
 			thinkingLevel: this.state?.thinkingLevel ?? "off",
+			availableThinkingLevels:
+				(this.state as RpcSessionState & { availableThinkingLevels?: string[] } | null)?.availableThinkingLevels ?? null,
 			sessionName: this.state?.sessionName,
 			sessionFile: this.state?.sessionFile,
 			sessionId: this.state?.sessionId,

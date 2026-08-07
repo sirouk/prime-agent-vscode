@@ -337,7 +337,71 @@ try {
 	);
 
 	// ---------------------------------------------------------------
-	// 6. Kill every session we created (releases locks, stops workers).
+	// 6. Dual-client parity: one writer + one viewer attached to the same
+	//    live session — both see the prompt and the assistant answer.
+	// ---------------------------------------------------------------
+	const viewer = new DaemonSidecar();
+	const viewerEvents = [];
+	let viewerSawUser = false;
+	let viewerSawReply = false;
+	const dualText = "DUAL-CLIENT-77";
+	try {
+		await viewer.connect(CONNECT_TIMEOUT_MS);
+		viewer.onEvent = (message) => {
+			if (message.type !== "session_event") return;
+			if (message.activeSessionId !== session.id) return;
+			const inner = message.event ?? {};
+			const innerType = String(inner.type ?? "?");
+			viewerEvents.push(innerType);
+			const role = inner.message?.role;
+			const text = JSON.stringify(inner.message ?? {});
+			if (text.includes(dualText)) {
+				if (role === "user") viewerSawUser = true;
+				if (role === "assistant") viewerSawReply = true;
+			}
+			if (innerType === "turn_end" || innerType === "agent_end") viewerSawReply = true;
+		};
+		// Attach viewer BEFORE the main writer prompts, then re-attach writer and prompt.
+		await viewer.attach(session.id);
+		const writerReattach = await sidecar.attach(session.id);
+		check(
+			"viewer + writer both attached to the live session",
+			(writerReattach.snapshot?.activeSessionId ?? session.id) === session.id,
+			"attach returned a snapshot",
+		);
+		await sidecar.request(
+			{ type: "prompt", activeSessionId: session.id, message: `Reply with exactly: ${dualText}. Do not use any tools.`, streamingBehavior: "steer", queueIfBusy: true },
+			30_000,
+		);
+		const deadline = Date.now() + Math.min(budgetMs(), TURN_DEADLINE_MS);
+		while (Date.now() < deadline && !viewerSawReply) {
+			await sleep(500);
+		}
+		check(
+			"viewer saw the writer's prompt in its event stream",
+			viewerSawUser,
+			`${viewerEvents.length} viewer events (${viewerEvents.slice(-6).join(",") || "none"})`,
+		);
+		check(
+			"viewer saw the assistant reply while writer and viewer were both attached",
+			viewerSawReply,
+			`${viewerEvents.length} viewer events`,
+		);
+		const viewerMessages = await viewer.getMessages(session.id);
+		check(
+			"viewer's message history contains the dual-client reply",
+			JSON.stringify(viewerMessages).includes(dualText),
+			`${viewerMessages.length} messages via the viewer connection`,
+		);
+	} catch (error) {
+		check("dual-client phase failed unexpectedly", false, error instanceof Error ? error.message : String(error));
+	} finally {
+		try { await viewer.detach(session.id); } catch {}
+		viewer.dispose();
+	}
+
+	// ---------------------------------------------------------------
+	// 7. Kill every session we created (releases locks, stops workers).
 	// ---------------------------------------------------------------
 	let killOk = true;
 	let killDetail = "";

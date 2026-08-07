@@ -125,10 +125,12 @@ const scenarios = {
 		await ta.click();
 		await ta.fill("Reply with exactly: OMEGA-42. Do not use any tools.");
 		await page.keyboard.press("Enter");
-		const working = await frame.locator(".working-row").isVisible({ timeout: 20_000 }).catch(() => false);
-		steps.push(ok("agent starts (working row)", working));
-		const answer = frame.locator(".messages").filter({ hasText: /omega/i }).first();
-		steps.push(ok("agent answers", await answer.isVisible({ timeout: 120_000 }).catch(() => false)));
+		const working = await frame.locator(".working-row").waitFor({ state: "visible", timeout: 6_000 }).then(() => true).catch(() => false);
+		const answered = await frame.locator(".row-assistant").waitFor({ state: "visible", timeout: 6_000 }).then(() => true).catch(() => false);
+		steps.push(ok("agent starts (working row or fast answer)", working || answered, working ? "working row" : answered ? "instant answer" : "none"));
+		const answer = frame.locator(".messages").filter({ hasText: /om\s?ega/i }).first();
+		const answered2 = await answer.waitFor({ state: "visible", timeout: 120_000 }).then(() => true).catch(() => false);
+		steps.push(ok("agent answers", answered2));
 		return steps;
 	},
 
@@ -138,14 +140,16 @@ const scenarios = {
 		await page.waitForTimeout(500);
 		const itemCount = await frame.locator(".dropdown-item").count();
 		steps.push(ok("model menu items", itemCount > 0, `${itemCount}`));
-		// Brain popout: click the brain accessory of a reasoning model row -> levels menu
-		const brain = frame.locator(".dropdown-brain").first();
-		steps.push(ok("brain accessory present", (await brain.count()) > 0));
-		await brain.click();
+		steps.push(ok("model menu rows have no brain accessory", (await frame.locator(".dropdown-brain").count()) === 0));
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(300);
+		// Brain rail pill: opens the thinking menu for the current model
+		const brainPill = frame.locator(".rail-pill.brain");
+		await brainPill.click();
 		await page.waitForTimeout(400);
 		const thinkHeader = await frame.locator(".dropdown-header").first().textContent().catch(() => "");
 		const thinkItems = await frame.locator(".dropdown-item").count();
-		steps.push(ok("thinking popout opens", (thinkHeader ?? "").startsWith("Thinking —") && thinkItems >= 6, `${thinkHeader ?? "no-header"}|items=${thinkItems}`));
+		steps.push(ok("thinking menu from brain rail pill", (thinkHeader ?? "").startsWith("Thinking —") && thinkItems >= 6, `${thinkHeader ?? "no-header"}|items=${thinkItems}`));
 		await page.keyboard.press("Escape");
 		await page.waitForTimeout(300);
 		await frame.locator(".rail-pill.model").click();
@@ -168,8 +172,8 @@ const scenarios = {
 		await ta.click();
 		await ta.fill("Reply with exactly: OM EGA-42. Do not use any tools.");
 		await page.keyboard.press("Enter");
-		const answer = frame.locator(".row-assistant .md, .messages").filter({ hasText: /pong|omega/i }).first();
-		const got = await answer.isVisible({ timeout: 150_000 }).catch(() => false);
+		const answer = frame.locator(".row-assistant .md, .messages").filter({ hasText: /om\s?ega/i }).first();
+		const got = await answer.waitFor({ state: "visible", timeout: 150_000 }).then(() => true).catch(() => false);
 		if (!got) {
 			const dump = await frame.evaluate(() => ({
 				rows: document.querySelectorAll(".messages .row").length,

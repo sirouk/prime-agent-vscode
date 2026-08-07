@@ -46,11 +46,15 @@ const menuBtn = iconButton("kebab", "Session actions", 16);
 topbar.append(newChatBtn, historyBtn, menuBtn);
 
 const menu = el("div", "menu");
-function menuItem(label: string, iconName: Parameters<typeof icon>[0], action: () => void, title?: string): HTMLButtonElement {
+function menuItem(label: string, iconName: Parameters<typeof icon>[0] | "butterfly", action: () => void, title?: string): HTMLButtonElement {
 	const item = document.createElement("button");
 	item.className = "menu-item";
 	if (title) item.title = title;
-	item.appendChild(icon(iconName, 13));
+	if (iconName === "butterfly") {
+		item.appendChild(butterfly(13, "menu-butterfly"));
+	} else {
+		item.appendChild(icon(iconName, 13));
+	}
 	item.appendChild(el("span", "", label));
 	item.addEventListener("click", () => {
 		menu.classList.remove("visible");
@@ -71,7 +75,7 @@ menu.append(
 		post({ type: "restart" });
 	}),
 	menuSeparator(),
-	menuItem("Visit Prime Intellect", "spark", () => post({ type: "openExternal", url: "https://app.primeintellect.ai" }), "Prime Intellect dashboard — app.primeintellect.ai"),
+	menuItem("Visit Prime Intellect", "butterfly", () => post({ type: "openExternal", url: "https://app.primeintellect.ai" }), "Prime Intellect dashboard — app.primeintellect.ai"),
 );
 menuBtn.addEventListener("click", (event) => {
 	event.stopPropagation();
@@ -314,7 +318,7 @@ function applyStatus(status: StatusSnapshot): void {
 	statsLabel.textContent = statsBits.join(" · ");
 
 	composer.setModel(status.modelLabel, status.modelProvider, status.modelId);
-	composer.setThinking(status.thinkingLevel);
+	composer.setThinking(status.thinkingLevel, status.availableThinkingLevels ?? null);
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
 	if (status.compactThresholdPercent !== undefined) composer.setCompactThreshold(status.compactThresholdPercent);

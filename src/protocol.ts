@@ -256,6 +256,7 @@ export interface StatusSnapshot {
 	restoring: boolean;
 	modelLabel: string;
 	thinkingLevel: string;
+	availableThinkingLevels?: string[] | null;
 	sessionName?: string;
 	sessionFile?: string;
 	sessionId?: string;

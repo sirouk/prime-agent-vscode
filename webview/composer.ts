@@ -32,8 +32,9 @@ export class Composer {
 	private contextWrap: HTMLElement;
 	private contextFill: HTMLElement;
 	private contextLabel: HTMLElement;
-	private contextGear: HTMLButtonElement;
 	private modelBtn: HTMLButtonElement;
+	private brainBtn: HTMLButtonElement;
+	private availableThinkingLevels: string[] | null = null;
 	private attachMenu: Dropdown | null = null;
 	private autocompleteEl: HTMLElement;
 	private textWrap: HTMLElement;
@@ -81,10 +82,18 @@ export class Composer {
 
 		this.modelBtn = document.createElement("button");
 		this.modelBtn.className = "rail-pill model";
-		this.modelBtn.title = "Choose model · thinking level inside";
+		this.modelBtn.title = "Choose model";
 		this.modelBtn.addEventListener("click", (event) => {
 			event.stopPropagation();
 			this.toggleModelMenu();
+		});
+		this.brainBtn = document.createElement("button");
+		this.brainBtn.className = "rail-pill brain";
+		this.brainBtn.title = "Thinking level";
+		this.brainBtn.appendChild(icon("brain", 13));
+		this.brainBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.toggleThinkingMenu();
 		});
 
 		this.behaviorBtn = document.createElement("button");
@@ -94,16 +103,14 @@ export class Composer {
 		this.behaviorBtn.addEventListener("click", () => this.toggleBehavior());
 
 		this.contextWrap = el("div", "context-meter");
-		this.contextWrap.title = "Context window usage — hover for the gear to set an auto-compact threshold for this session";
+		this.contextWrap.title = "Context window usage — click to set the auto-compact threshold for this session";
 		this.contextFill = el("div", "context-fill");
 		this.contextLabel = el("span", "context-label", "");
-		this.contextGear = iconButton("gear", "Auto-compact threshold for this session", 10);
-		this.contextGear.classList.add("context-gear");
-		this.contextGear.addEventListener("click", (event) => {
+		this.contextWrap.addEventListener("click", (event) => {
 			event.stopPropagation();
 			this.toggleThresholdFlyout();
 		});
-		this.contextWrap.append(this.contextFill, this.contextLabel, this.contextGear);
+		this.contextWrap.append(this.contextFill, this.contextLabel);
 
 		this.sendBtn = document.createElement("button");
 		this.sendBtn.className = "send-btn muted";
@@ -118,7 +125,7 @@ export class Composer {
 		this.stopBtn.style.display = "none";
 		this.stopBtn.addEventListener("click", () => this.deps.onStop());
 
-		rail.append(attachBtn, this.modelBtn, this.behaviorBtn, el("span", "spacer"), this.contextWrap, this.stopBtn, this.sendBtn);
+		rail.append(attachBtn, this.modelBtn, this.brainBtn, this.behaviorBtn, el("span", "spacer"), this.contextWrap, this.stopBtn, this.sendBtn);
 		// Mentions render inline-styled via a mirrored layer behind a transparent textarea.
 		this.textWrap = el("div", "composer-text-wrap");
 		this.mirror = el("div", "composer-mirror");
@@ -162,15 +169,26 @@ export class Composer {
 	}
 
 	setModel(label: string, provider?: string, modelId?: string): void {
+		// Guard: dropdowns are children of this pill; rewriting identical text
+		// would destroy an open menu mid-use (the churn you see while streaming).
+		const unchanged =
+			this.currentModel.provider === provider &&
+			this.currentModel.modelId === modelId &&
+			this.modelBtn.textContent === label;
+		if (unchanged) return;
+		this.currentModel = { provider, modelId };
 		this.modelBtn.textContent = label;
 		this.modelBtn.title = `Choose model (now ${label})`;
-		this.currentModel = { provider, modelId };
 		this.updateReasoningState();
 	}
 
-	setThinking(level: string): void {
+	setThinking(level: string, availableLevels?: string[] | null): void {
 		// Daemon may report "max" for the top level; the UI list uses "xhigh".
 		this.currentThinking = level === "max" ? "xhigh" : level;
+		if (Array.isArray(availableLevels) && availableLevels.length > 0) {
+			this.availableThinkingLevels = availableLevels.map((l) => (l === "max" ? "xhigh" : l));
+		}
+		if (this.reasoning) this.brainBtn.title = `Thinking level: ${this.currentThinking}`;
 	}
 
 	setObserving(observing: boolean): void {
@@ -196,7 +214,10 @@ export class Composer {
 		// Only block when the model is KNOWN to be text-only; undeclared input
 		// fields mean "allow" so we don't silently eat pastes.
 		this.vision = model?.input ? model.input.includes("image") : true;
-		this.modelBtn.title = `Choose model · thinking level inside${this.vision ? " (accepts images)" : " (text-only, image attach off)"}`;
+		this.modelBtn.title = `Choose model${this.vision ? " (accepts images)" : " (text-only, image attach off)"}`;
+		this.brainBtn.classList.toggle("disabled-pill", !this.reasoning);
+		this.brainBtn.title = this.reasoning ? `Thinking level: ${this.currentThinking}` : "This model does not support thinking";
+		this.brainBtn.disabled = !this.reasoning;
 	}
 
 	private showHint(text: string): void {
@@ -295,7 +316,9 @@ export class Composer {
 		slider.step = "5";
 		slider.className = "threshold-slider";
 		const valueEl = el("span", "threshold-value", "");
-		const offBtn = el("button", "threshold-off", "Off") as HTMLButtonElement;
+		const offBtn = el("button", "threshold-reset") as HTMLButtonElement;
+		offBtn.title = "Reset to the agent default compaction";
+		offBtn.appendChild(icon("reset", 12));
 		slider.addEventListener("input", () => {
 			valueEl.textContent = `${slider.value}%`;
 		});
@@ -326,8 +349,7 @@ export class Composer {
 			if (titleEl) titleEl.textContent = "Agent auto-compact on (default)";
 			if (valueEl) valueEl.textContent = "off";
 		}
-		const offBtn = panel.querySelector(".threshold-off");
-		if (offBtn instanceof HTMLElement) offBtn.textContent = "use default";
+		const offBtn = panel.querySelector(".threshold-reset");
 		offBtn?.classList.toggle("active", this.compactThreshold === null);
 	}
 
@@ -462,43 +484,27 @@ export class Composer {
 		return this.favorites.some((f) => f.provider === model.provider && f.modelId === model.id);
 	}
 
-	/** Brain popout: per-row thinking-level picker for reasoning models. */
-	private brainAccessory(model: RpcModel): HTMLButtonElement {
-		const isCurrent = model.provider === this.currentModel.provider && model.id === this.currentModel.modelId;
-		const btn = document.createElement("button");
-		btn.className = "dropdown-brain";
-		btn.title = isCurrent ? `Thinking level: ${this.currentThinking} (click to change)` : "Thinking levels";
-		btn.setAttribute("aria-label", "Thinking levels");
-		btn.appendChild(icon("brain", 14));
-		btn.addEventListener("mousedown", (event) => event.preventDefault());
-		btn.addEventListener("click", (event) => {
-			event.stopPropagation();
-			this.openThinkingFor(model, isCurrent);
-		});
-		return btn;
-	}
-
-	private openThinkingFor(model: RpcModel, isCurrentModel: boolean): void {
-		const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
+	private toggleThinkingMenu(): void {
+		if (this.thinkingMenu?.isOpen()) {
+			this.thinkingMenu.hide();
+			return;
+		}
+		if (!this.reasoning) return;
+		const allLevels = ["off", "minimal", "low", "medium", "high", "xhigh"];
+		const levels = this.availableThinkingLevels?.length
+			? allLevels.filter((l) => this.availableThinkingLevels!.includes(l))
+			: allLevels;
+		const model = this.currentModelInfo();
 		const items: DropdownItem[] = levels.map((level) => ({
 			label: level,
-			sub: level === "xhigh" ? "max depth (codex-max only)" : undefined,
-			current: isCurrentModel && level === this.currentThinking,
-			onSelect: () => {
-				if (!isCurrentModel) this.deps.onSetModel(model.provider, model.id);
-				this.deps.onSetThinking(level);
-			},
+			sub: level === "xhigh" ? "deepest reasoning this model supports" : undefined,
+			current: level === this.currentThinking,
+			onSelect: () => this.deps.onSetThinking(level),
 		}));
 		this.modelMenu?.hide();
-		this.thinkingMenu?.hide();
-		if (!isCurrentModel) {
-			items.unshift({
-				label: "Select this model too",
-				sub: "Thinking levels apply to the active model",
-				onSelect: () => this.deps.onSetModel(model.provider, model.id),
-			});
-		}
-		this.thinkingMenu = new Dropdown(this.modelBtn, { header: `Thinking — ${this.modelLabelFor(model)}` });
+		this.thinkingMenu = new Dropdown(this.brainBtn, {
+			header: model ? `Thinking — ${this.modelLabelFor(model)}` : "Thinking level",
+		});
 		this.thinkingMenu.show(items);
 	}
 
@@ -543,10 +549,7 @@ export class Composer {
 			right: rightFor(model),
 			section,
 			current: model.provider === this.currentModel.provider && model.id === this.currentModel.modelId,
-			accessory: (row) => {
-				if (model.reasoning) row.appendChild(this.brainAccessory(model));
-				this.starAccessory(model)(row);
-			},
+			accessory: this.starAccessory(model),
 			onSelect: () => this.deps.onSetModel(model.provider, model.id),
 		});
 		const items: DropdownItem[] = [

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Brain is a rail pill now (right of the model pill): the thinking picker opens per model, filtered to what the model supports; model menus stay open while replies stream
+- Dual-client guarantee (CLI + extension): writer + viewer on the same resident session both see prompts and answers — covered by the headless parity suite (17 checks)
+- Context gauge is the opener for the auto-compact flyout (hover gear removed); reset is a circle-arrow icon
+- Kebab menu's "Visit Prime Intellect" uses the butterfly mark
+- Scroll-up affordance is a round down-arrow ("Jump to bottom" tooltip, always subtle)
+- User message footers (estimated tokens, copy, fork) sit under the bubble like the assistant usage line
+
 - Terminal-session parity: sessions live in a terminal attach through the daemon sidecar (full writer, not just observer).
 - Subagents strip above the composer: lists active/finished subagents, browse into them, back-to-parent.
 - Thread diff panel: expandable hunks from edit/write/bash during this thread, per file, above the composer.

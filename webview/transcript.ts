@@ -154,7 +154,11 @@ export class Transcript {
 			return;
 		}
 		if (!this.jumpBtn) {
-			this.jumpBtn = el("button", "jump-to-latest", "↓ latest");
+			this.jumpBtn = el("button", "jump-to-latest");
+			this.jumpBtn.title = "Jump to bottom";
+			this.jumpBtn.setAttribute("aria-label", "Jump to bottom");
+			this.jumpBtn.appendChild(icon("chevron", 12));
+			this.jumpBtn.classList.add("down");
 			this.jumpBtn.addEventListener("click", () => {
 				this.stickToBottom = true;
 				this.scrollToBottom();

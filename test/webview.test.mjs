@@ -122,33 +122,34 @@ const glmRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.te
 glmRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("select posts setModel", posted.some((m) => m.type === "setModel" && m.modelId === "glm"));
 check("menu closed after select", !document.querySelector(".dropdown"));
-// non-reasoning model rows: brain accessory absent
+// brain is its own rail pill right of the model pill
+const brainPill = document.querySelector(".composer-rail .rail-pill.brain");
+check("brain rail pill present", !!brainPill);
+// non-reasoning model: brain pill disabled, and model rows have no per-row accessories beyond the star
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm", thinkingLevel: "off" } });
+check("brain pill disabled on non-reasoning model", document.querySelector(".composer-rail .rail-pill.brain").className.includes("disabled-pill"));
 modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-const glmRowNoBrain = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("glm"));
-check("no brain popout on non-reasoning model", glmRowNoBrain && !glmRowNoBrain.querySelector(".dropdown-brain"));
+const glmRowAcc = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("glm"));
+check("no brain accessory on model rows", glmRowAcc && !glmRowAcc.querySelector(".dropdown-brain"));
 document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-// reasoning model: brain accessory opens the levels menu ("max" normalized)
+// reasoning model: brain pill opens the levels menu ("max" normalized & marked current)
 hostMessage({ type: "status", status: { ...baseStatus } });
 hostMessage({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" }, status: baseStatus });
-modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-const kimiRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("kimi"));
-const brain = kimiRow.querySelector(".dropdown-brain");
-check("brain accessory on reasoning model", !!brain);
+document.querySelector(".composer-rail .rail-pill.brain").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const tDrop = document.querySelector(".dropdown");
+check("thinking menu opens from brain pill", !!tDrop && (tDrop.querySelector(".dropdown-header")?.textContent ?? "").startsWith("Thinking —"));
+const tLevels = [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].map((r) => r.textContent.trim());
+check("all six levels listed", tLevels.some((l) => l.startsWith("xhigh")) && tLevels.some((l) => l.startsWith("off")));
+check("current level marked (max normalized)", [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].some((r) => r.className.includes("current") && r.textContent.startsWith("xhigh")));
+posted.length = 0;
+[...tDrop.querySelectorAll(".dropdown-item")].find((r) => r.textContent.startsWith("high")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("select posts setThinkingLevel", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"));
+// available-levels feed filters the list
+hostMessage({ type: "status", status: { ...baseStatus, availableThinkingLevels: ["off", "medium", "high"] } });
+document.querySelector(".composer-rail .rail-pill.brain").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const treatedLevels = [...(document.querySelector(".dropdown")?.querySelectorAll(".dropdown-item") ?? [])].map((r) => r.textContent.trim());
+check("available levels filter the picker", treatedLevels.length === 3 && treatedLevels.every((l) => ["off", "medium", "high"].some((a) => l.startsWith(a))), JSON.stringify(treatedLevels));
 document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-if (brain) {
-	modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-	const kimiRow2 = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("kimi"));
-	kimiRow2.querySelector(".dropdown-brain").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-	const tDrop = document.querySelector(".dropdown");
-	check("brain opens thinking levels menu", !!tDrop && (tDrop.querySelector(".dropdown-header")?.textContent ?? "").startsWith("Thinking —"));
-	const levels = [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].map((r) => r.textContent.trim());
-	check("all six levels listed", levels.some((l) => l.startsWith("xhigh")) && levels.some((l) => l.startsWith("off")));
-	check("current level marked (max normalized)", [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].some((r) => r.className.includes("current") && r.textContent.startsWith("xhigh")));
-	posted.length = 0;
-	[...tDrop.querySelectorAll(".dropdown-item")].find((r) => r.textContent.startsWith("high")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-	check("select posts setThinkingLevel", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"));
-}
 
 // --- unified attach menu (vision-gated image item on a text model) ---
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
@@ -237,8 +238,7 @@ check("search cleared restores both groups", document.querySelectorAll(".history
 
 // --- context meter: gear + flyout state wording ---
 const meter = document.querySelector(".context-meter");
-check("meter has gear button", !!meter.querySelector(".context-gear"));
-meter.querySelector(".context-gear").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+meter.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const flyout = document.querySelector(".threshold-flyout");
 check("threshold flyout opens", !!flyout && flyout.className.includes("visible"));
 check("flyout shows default state", flyout.querySelector(".threshold-title").textContent.includes("Agent auto-compact"), flyout.querySelector(".threshold-title").textContent);
