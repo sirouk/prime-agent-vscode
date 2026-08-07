@@ -217,8 +217,8 @@ async function verifyHistory2(page) {
 	const first = restored.find((r) => r.name === targetName);
 	out.push(
 		mk(
-			"cancel restores original item (not confirming, single x button, name intact)",
-			!!first && !first.confirming && first.actions === 1,
+			"cancel restores original item (not confirming, pencil+x actions back, name intact)",
+			!!first && !first.confirming && first.actions >= 2,
 			JSON.stringify(first),
 		),
 	);
