@@ -1,0 +1,181 @@
+{
+  "name": "prime-agent-vscode",
+  "displayName": "Prime Agent",
+  "description": "Chat with Prime Agent from VS Code. Streams from the Prime Agent RPC protocol with full tool-call visibility.",
+  "version": "0.0.1",
+  "publisher": "primeintellect",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prime-agent",
+          "title": "Prime Agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "prime-agent": [
+        {
+          "id": "primeAgent.chat",
+          "type": "webview",
+          "name": "Chat",
+          "icon": "media/icon.svg",
+          "contextualTitle": "Prime Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "primeAgent.openChat",
+        "title": "Open Chat in Editor Tab",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "primeAgent.focusChat",
+        "title": "Focus Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "primeAgent.newSession",
+        "title": "New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "primeAgent.abort",
+        "title": "Stop Agent",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "primeAgent.compact",
+        "title": "Compact Context",
+        "icon": "$(fold)"
+      },
+      {
+        "command": "primeAgent.exportHtml",
+        "title": "Export Chat as HTML",
+        "icon": "$(export)"
+      },
+      {
+        "command": "primeAgent.history",
+        "title": "Resume Recent Session\u2026",
+        "icon": "$(history)"
+      },
+      {
+        "command": "primeAgent.restart",
+        "title": "Restart Agent Process",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "primeAgent.addSelectionToChat",
+        "title": "Add Selection to Chat",
+        "icon": "$(symbol-snippet)"
+      },
+      {
+        "command": "primeAgent.addActiveFileToChat",
+        "title": "Add Active File to Chat",
+        "icon": "$(file)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "primeAgent.addSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "9_primeagent@1"
+        },
+        {
+          "command": "primeAgent.addActiveFileToChat",
+          "when": "!editorHasSelection",
+          "group": "9_primeagent@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "primeAgent.focusChat",
+          "when": "editorTextFocus",
+          "group": "navigation@99"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "primeAgent.addSelectionToChat",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "primeAgent.focusChat",
+        "key": "ctrl+alt+meta+p",
+        "mac": "ctrl+alt+cmd+p"
+      },
+      {
+        "command": "primeAgent.addSelectionToChat",
+        "key": "alt+cmd+k",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "Prime Agent",
+      "properties": {
+        "primeAgent.command": {
+          "type": "string",
+          "default": "prime-agent",
+          "description": "Command used to start the Prime Agent CLI. Set to an absolute path (e.g. /path/to/prime-agent.sh) when prime-agent is not on PATH."
+        },
+        "primeAgent.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra CLI arguments appended after `--mode rpc` (e.g. [\"--provider\", \"chutes\"])."
+        },
+        "primeAgent.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model passed as --model when the agent starts (provider/id pattern). Empty uses the default model."
+        },
+        "primeAgent.maxFileSearchResults": {
+          "type": "number",
+          "default": 40,
+          "description": "Maximum results returned for @ file mention search."
+        },
+        "primeAgent.sendSelectionSnippet": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include the selected code as context when using 'Add Selection to Chat'."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "node esbuild.config.mjs --production && npx @vscode/vsce package --no-dependencies",
+    "smoke": "node test/smoke.mjs",
+    "test": "node test/activate.test.mjs",
+    "pretest": "node esbuild.config.mjs",
+    "presmoke": "node esbuild.config.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.9.2"
+  }
+}

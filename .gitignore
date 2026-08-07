@@ -1,0 +1,6 @@
+node_modules/
+dist/
+out/
+media/main.js
+media/main.js.map
+*.vsix
