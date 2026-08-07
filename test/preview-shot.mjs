@@ -132,6 +132,11 @@ async function verifyModelmenu2(page) {
 	const thinkPosts = await page.evaluate(() => postedMessages.filter((m) => m.type === "setThinkingLevel").map((m) => m.level));
 	out.push(mk("selecting high posts setThinkingLevel", thinkPosts.includes("high"), JSON.stringify(thinkPosts)));
 
+	const withImg = rows
+		.filter((r) => r.kind === "item" && (r.right ?? "").includes("img"))
+		.map((r) => r.label);
+	const expectImg = ["anthropic/claude-sonnet-4-5", "chutes/moonshotai/Kimi-K3-TEE", "openai/gpt-5.2-codex"];
+	const textOnlyImgless = !withImg.some((l) => l.includes("GLM") || l.includes("DeepSeek"));
 	out.push(mk("vision-capable models show 'img' badge, text-only models do not", JSON.stringify(withImg.sort()) === JSON.stringify(expectImg.sort()) && textOnlyImgless, `img badges on ${JSON.stringify(withImg)}`));
 	return out;
 }

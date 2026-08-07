@@ -470,6 +470,8 @@ hostMessage({
 		{ id: "sess-b", path: "/tmp/b.jsonl", cwd: "/other/proj", timestamp: new Date().toISOString(), firstPrompt: "work on proj", inWorkspace: false },
 	],
 });
+document.querySelector(".history-search").value = "";
+document.querySelector(".history-search").dispatchEvent(new window.Event("input", { bubbles: true }));
 const delItem = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("local chat"));
 posted.length = 0;
 [...delItem.querySelectorAll(".history-action")].find((b) => (b.title ?? "").startsWith("Delete")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
