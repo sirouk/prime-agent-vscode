@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Attach keepalive: session keeps following across daemon restarts (seamless re-anchor, re-attach notice)
+- Running-state reads are consistent on every history visit (sidecar auto-reconnect; running strictly from isStreaming)
+
+
 - History rows show a subtle pulsing dot when a session is actively running, ordered hover actions: stop → rename → delete
 
 

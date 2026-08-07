@@ -53,6 +53,8 @@ export class SessionController implements vscode.Disposable {
 	/** Daemon sidecar for resident-session parity (attach/prompt/abort on live sessions). */
 	private sidecar: DaemonSidecar | null = null;
 	private attached: { activeSessionId: string; sessionPath: string } | null = null;
+	/** Attach attempt remembered across socket drops so a reconnect can re-anchor seamlessly. */
+	private attachAttempt: { activeSessionId: string; sessionPath: string } | null = null;
 	/** Where browsing-into-a-child should return to. null → the baseline RPC session. */
 	private returnTarget: { kind: "rpc" } | { kind: "attached"; activeSessionId: string; sessionPath: string } = { kind: "rpc" };
 	private rentedState: RpcSessionState | null = null;
@@ -818,26 +820,24 @@ export class SessionController implements vscode.Disposable {
 
 	async listHistory(): Promise<void> {
 		const sessions = await listRecentSessions(this.workspaceRoot, 25);
-		// Enrich with live running state when the daemon sidecar is reachable.
+		// Enrich with live running state; the sidecar auto-reconnects and stale
+		// sockets are tolerated (state stays accurate on every visit).
 		try {
-			if (this.sidecar === null || this.sidecar.connected) {
-				const sidecar = await this.ensureSidecar();
-				const live = await sidecar.list(true);
-				const runningByActive = new Map<string, boolean>();
-				const runningById = new Map<string, boolean>();
-				for (const l of live) {
-					const l2 = l as SessionSummaryRef & { isStreaming?: boolean; activity?: string };
-					const running = Boolean(l2.isStreaming) || l2.activity === "working";
-					if (l.activeSessionId) runningByActive.set(l.activeSessionId, running);
-					if (l.sessionId) runningById.set(l.sessionId, running);
-					if (l.id) runningById.set(l.id, running);
-				}
-				for (const s of sessions) {
-					s.running = runningById.get(s.id) ?? runningByActive.get(s.id) ?? false;
-				}
+			const sidecar = await this.ensureSidecar();
+			const live = await sidecar.list(true);
+			const runningByKey = new Map<string, boolean>();
+			for (const l of live) {
+				const l2 = l as SessionSummaryRef & { isStreaming?: boolean };
+				const running = Boolean(l2.isStreaming);
+				if (l.activeSessionId) runningByKey.set(l.activeSessionId, running);
+				if (l.sessionId) runningByKey.set(l.sessionId, running);
+				if (l.id) runningByKey.set(l.id, running);
+			}
+			for (const s of sessions) {
+				s.running = runningByKey.get(s.id) === true;
 			}
 		} catch {
-			// daemon unavailable — files alone still work
+			for (const s of sessions) s.running = false;
 		}
 		this.broadcast({ type: "history", sessions });
 	}
@@ -948,14 +948,35 @@ export class SessionController implements vscode.Disposable {
 			this.sidecar.onAnyLine = (line) => this.debugLog.append(`sidecar-line: ${line.slice(0, 100)}`);
 			this.sidecar.onClose = () => {
 				if (this.attached) {
-					this.attached = null;
-					this.broadcast({ type: "notice", level: "warning", text: "Lost the daemon connection — detached from the live session." });
+					this.attachAttempt = { ...this.attached };
+					this.broadcast({ type: "notice", level: "warning", text: "Daemon connection dropped — re-attaching when it comes back." });
 					this.pushStatus();
 				}
 			};
 		}
 		if (!this.sidecar.connected) {
 			await this.sidecar.connect();
+		}
+		// Seamless re-attach after a drop: pick up exactly where the user was.
+		if (this.sidecar.connected && this.attachAttempt && !this.attached) {
+			const attempt = this.attachAttempt;
+			try {
+				const result = await this.sidecar.attach(attempt.activeSessionId);
+				this.attached = attempt;
+				if (result.snapshot?.messages) {
+					this.cachedMessages = result.snapshot.messages as AgentMessage[];
+				}
+				this.rentedState = (result.snapshot?.state ?? null) as RpcSessionState | null;
+				this.pushStatus();
+				this.broadcast({
+					type: "notice",
+					level: "info",
+					text: "Re-attached to the live session.",
+				});
+			} catch {
+				// keep the attempt saved? user closed it in the meantime — drop
+				this.attachAttempt = null;
+			}
 		}
 		return this.sidecar;
 	}
@@ -971,6 +992,7 @@ export class SessionController implements vscode.Disposable {
 			const sidecar = await this.ensureSidecar();
 			const result = await sidecar.attach(activeSessionId);
 			this.attached = { activeSessionId, sessionPath };
+			this.attachAttempt = { activeSessionId, sessionPath };
 			const snapshot = result.snapshot;
 			if (snapshot?.messages) {
 				this.cachedMessages = snapshot.messages as AgentMessage[];
@@ -982,6 +1004,7 @@ export class SessionController implements vscode.Disposable {
 				}
 			}
 			this.rentedState = (snapshot?.state ?? null) as RpcSessionState | null;
+			void this.refreshAttachedState();
 			this.broadcast({
 				type: "notice",
 				level: "info",
@@ -1010,6 +1033,7 @@ export class SessionController implements vscode.Disposable {
 			await this.sidecar.detach(this.attached.activeSessionId);
 		}
 		this.attached = null;
+		this.attachAttempt = null;
 		this.rentedState = null;
 	}
 
