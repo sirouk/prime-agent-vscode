@@ -139,6 +139,7 @@ export interface SessionChild {
 	name?: string;
 	runtimeKind?: string;
 	rlmDepth?: number;
+	created?: string;
 	isStreaming?: boolean;
 	attachedClients?: number;
 }
@@ -308,7 +309,7 @@ export type HostToWebview =
 			steerDefault?: "steer" | "followUp";
 		}
 	| { type: "favorites"; favorites: ModelRef[] }
-	| { type: "sessionChildren"; children: SessionChild[]; parent?: SessionChild; siblings?: SessionChild[]; viewedActiveSessionId?: string }
+	| { type: "sessionChildren"; children: SessionChild[]; parent?: SessionChild; siblings?: SessionChild[]; viewedActiveSessionId?: string; spawned?: Array<{ activeSessionId: string; name?: string; created?: string }> }
 	| { type: "installPrompt"; url: string; reason: string }
 	| ThreadDiffsMessage
 	| { type: "draft"; text: string }

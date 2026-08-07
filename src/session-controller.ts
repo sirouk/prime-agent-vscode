@@ -229,6 +229,13 @@ export class SessionController implements vscode.Disposable {
 	// ------------------------------------------------------------------
 
 	private onAgentEvent(event: AgentEvent): void {
+		// Subagent strip: refresh children during traffic (throttled) — daemon list
+		// reads are in-process and cheap, and this keeps counts honest mid-run.
+		if (this.sidecar?.connected) {
+			if (event.type === "tool_execution_end" || event.type === "agent_start" || event.type === "agent_end" || event.type === "turn_end") {
+				this.scheduleChildrenRefresh();
+			}
+		}
 		switch (event.type) {
 			case "agent_start":
 				this.streaming = true;
@@ -473,6 +480,7 @@ export class SessionController implements vscode.Disposable {
 		if (!this.client) return;
 		await this.detachFromDaemon();
 		await this.clearObservation();
+		this.previousChildIds = null;
 		const response = await this.client.request({ type: "new_session" });
 		if (response.success) {
 			this.changedFiles.clear();
@@ -988,6 +996,7 @@ export class SessionController implements vscode.Disposable {
 	private async attachViaDaemon(activeSessionId: string, sessionPath: string): Promise<boolean> {
 		// Clear the subagent strip immediately — a different session owns nothing from the last view.
 		this.broadcast({ type: "sessionChildren", children: [] });
+		this.previousChildIds = null;
 		try {
 			const sidecar = await this.ensureSidecar();
 			const result = await sidecar.attach(activeSessionId);
@@ -1048,6 +1057,9 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** Refresh and broadcast the children (subagents) of the CURRENT session. */
+	/** Previous flattened children set (for spawn/retire card derivation). */
+	private previousChildIds: Set<string> | null = null;
+
 	private async refreshChildren(): Promise<void> {
 		if (!this.sidecar?.connected) return;
 		try {
@@ -1071,6 +1083,7 @@ export class SessionController implements vscode.Disposable {
 					name: rich.sessionName,
 					runtimeKind: rich.runtimeKind,
 					rlmDepth: rich.rlmDepth,
+					created: rich.created,
 					isStreaming: rich.isStreaming ?? false,
 					attachedClients: c.attachedClients ?? 0,
 				};
@@ -1110,12 +1123,29 @@ export class SessionController implements vscode.Disposable {
 						.map(asChild);
 				}
 			}
+			const flat = new Set<string>(children.map((c) => c.activeSessionId ?? c.id ?? ""));
+			const seed = this.previousChildIds === null;
+			const prev = this.previousChildIds;
+			const spawnCards = seed || prev === null
+				? []
+				: [...flat]
+						.filter((id) => !prev.has(id))
+						.map((id) => {
+							const child = children.find((c) => (c.activeSessionId ?? c.id) === id);
+							return {
+								activeSessionId: id,
+								name: child ? (child as { sessionName?: string }).sessionName : undefined,
+								created: (child ? (child as { created?: string }).created : undefined),
+							};
+						});
+			this.previousChildIds = flat;
 			this.broadcast({
 				type: "sessionChildren",
 				children: children.map(asChild),
 				parent,
 				siblings,
 				viewedActiveSessionId: currentId,
+				spawned: spawnCards,
 			});
 		} catch {
 			// quiet — stale layout tolerated until the next refresh

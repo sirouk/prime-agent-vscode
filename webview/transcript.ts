@@ -27,6 +27,7 @@ export interface TranscriptDeps {
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => void;
 	onOpenDiff: (path: string) => void;
 	onForkFromUser: (ordinal: number) => void;
+	onSpawnedCardClick: (activeSessionId: string) => void;
 	onNewSession: () => void;
 	onShowHistory: () => void;
 	onFocusComposer: () => void;
@@ -57,6 +58,56 @@ export class Transcript {
 	private changedFilesBar: HTMLElement;
 
 	private stickToBottom = true;
+	private spawnCardIds = new Set<string>();
+
+	/**
+	 * Insert a "subagent spawned" marker into the transcript, positioned by the
+	 * subagent's created time so it lines up with where in the run it happened.
+	 * Durable across resumes because it's re-derived from daemon state, not stored.
+	 */
+	clearSpawnCards(): void {
+		this.spawnCardIds.clear();
+		this.scroller.querySelectorAll(".spawned-card").forEach((n) => n.remove());
+	}
+
+	injectSpawnCard(options: { id: string; name?: string; created?: string | null }): void {
+		const card = el("div", "spawned-card");
+		if (this.spawnCardIds.has(options.id)) return;
+		this.spawnCardIds.add(options.id);
+		const dot = el("span", "spawned-dot");
+		card.appendChild(dot);
+		const label = el("span", "spawned-label");
+		label.textContent = `Subagent spawned${options.name ? ` — ${options.name}` : ""}`;
+		label.title = options.created ? `Started ${options.created}` : "Started";
+		card.appendChild(label);
+		const view = el("button", "spawned-view", "view ›") as HTMLButtonElement;
+		view.title = "Look inside this subagent";
+		card.appendChild(view);
+		// Ordered insert: before the first existing row newer than created.
+		const createdMs = options.created ? Date.parse(options.created) : NaN;
+		let insertBefore: Element | null = null;
+		if (Number.isFinite(createdMs)) {
+			for (const existing of Array.from(this.scroller.children)) {
+				const t = Number((existing as HTMLElement).dataset?.ts ?? "");
+				if (Number.isFinite(t) && t > createdMs) {
+					insertBefore = existing;
+					break;
+				}
+			}
+		}
+		if (insertBefore) this.scroller.insertBefore(card, insertBefore);
+		else this.scroller.appendChild(card);
+		this.hasContent = true;
+		view.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.deps.onSpawnedCardClick(options.id);
+		});
+		this.scrollToBottom();
+	}
+
+	private stickToBottomFieldsPlaceholder = false;
+
+	private stickToBottomUnused = false;
 	private jumpBtn: HTMLElement | null = null;
 	/** Selections saved on collapse, key = the collapsible element (details / .tool root). */
 	private savedSelections = new WeakMap<HTMLElement, string>();
@@ -451,6 +502,15 @@ export class Transcript {
 		return container;
 	}
 
+	private messageTimestamp(message: AgentMessage): string | null {
+		const ts = (message as unknown as { timestamp?: string }).timestamp;
+		return typeof ts === "string" && ts.length > 0 ? ts : null;
+	}
+
+	private markRowTimestamp(row: HTMLElement, ts: string | null): void {
+		if (ts) row.dataset.ts = String(Date.parse(ts) || "");
+	}
+
 	private buildUserRow(message: UserMessage): HTMLElement {
 		const row = el("div", "row row-user");
 		const plainText = this.userMessageText(message);
@@ -477,6 +537,7 @@ export class Transcript {
 		if (plainText.trim().length > 0) {
 			row.appendChild(this.buildUserFooter(row, plainText));
 		}
+		this.markRowTimestamp(row, this.messageTimestamp(message));
 		return row;
 	}
 
@@ -511,6 +572,7 @@ export class Transcript {
 	private buildAssistantRow(message: AssistantMessage, isPartial: boolean): HTMLElement {
 		const row = el("div", "row row-assistant");
 		this.fillAssistantRow(row, message, isPartial);
+		this.markRowTimestamp(row, this.messageTimestamp(message));
 		return row;
 	}
 

@@ -35,6 +35,8 @@ export interface SessionSummaryRef {
 	sessionFile?: string;
 	cwd?: string;
 	sessionName?: string;
+	created?: string;
+	modified?: string;
 	parentActiveSessionId?: string;
 	attachedClients?: number;
 	isStreaming?: boolean;

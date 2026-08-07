@@ -186,6 +186,7 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 	onOpenFile: (path, startLine, endLine) => post({ type: "openFile", path, startLine, endLine }),
 	onOpenDiff: (path) => post({ type: "openDiff", path }),
 	onForkFromUser: (ordinal) => post({ type: "forkFromUser", ordinal }),
+	onSpawnedCardClick: (activeSessionId) => post({ type: "browseChild", activeSessionId }),
 	onNewSession: () => post({ type: "newSession" }),
 	onShowHistory: () => {
 		showView("history");
@@ -306,6 +307,7 @@ function renderSubagentsStrip(): void {
 }
 
 let sessionParent: SessionChild | null = null;
+let spawnSeenBaseline = false;
 let sessionViewedId: string | null = null;
 let sessionSiblings: SessionChild[] = [];
 
@@ -351,6 +353,7 @@ function showView(view: "chat" | "history"): void {
 newChatBtn.addEventListener("click", () => {
 	showView("chat");
 	subagentsExpanded = false;
+	spawnSeenBaseline = false;
 	renderSubagentsStrip();
 	post({ type: "newSession" });
 });
@@ -480,6 +483,8 @@ window.addEventListener("message", (messageEvent) => {
 function dispatchHostMessage(message: HostToWebview): void {
 	switch (message.type) {
 		case "snapshot":
+			transcript.clearSpawnCards?.();
+			spawnSeenBaseline = false;
 			transcript.renderSnapshot(message.messages ?? []);
 			applyStatus(message.status);
 			composer.setStreaming(transcript.isStreaming());
@@ -512,13 +517,25 @@ function dispatchHostMessage(message: HostToWebview): void {
 		case "compactThreshold":
 			composer.setCompactThreshold(message.percent, currentStatus?.compactDefaultPercent ?? null);
 			break;
-		case "sessionChildren":
+		case "sessionChildren": {
 			sessionChildren = message.children ?? [];
 			sessionParent = message.parent ?? null;
 			sessionViewedId = message.viewedActiveSessionId ?? null;
 			sessionSiblings = message.siblings ?? [];
+			const spawnedList = message.spawned ?? [];
+			for (const spawn of spawnedList) {
+				transcript.injectSpawnCard({ id: spawn.activeSessionId, name: spawn.name, created: spawn.created });
+			}
+			// Resume-derived seeded cards for previously-spawned children (once per session view).
+			if (!spawnSeenBaseline && sessionChildren.length > 0) {
+				spawnSeenBaseline = true;
+				for (const child of sessionChildren) {
+					if (child.created) transcript.injectSpawnCard({ id: child.activeSessionId, name: child.name, created: child.created });
+				}
+			}
 			renderSubagentsStrip();
 			break;
+		}
 		case "commands":
 			composer.setCommands(message.commands);
 			break;

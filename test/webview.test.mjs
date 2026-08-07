@@ -291,6 +291,29 @@ posted.length = 0;
 banner.querySelector(".install-dismiss").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("dismiss posts and hides", !document.querySelector(".install-banner.visible") && posted.some((m) => m.type === "dismissInstallPrompt"));
 
+// --- spawn cards: announced inline on new child registrations, clickable to view ---
+hostMessage({
+	type: "sessionChildren",
+	children: [
+		{ id: "sub-a", activeSessionId: "aaaa1111", name: "verify-threads", runtimeKind: "subagent", created: "2026-08-07T15:00:00Z", isStreaming: true, attachedClients: 0, rlmDepth: 1 },
+	],
+	spawned: [{ activeSessionId: "aaaa1111", name: "verify-threads", created: "2026-08-07T15:00:00Z" }],
+});
+const spawnCard = document.querySelector(".spawned-card");
+check("spawn card visible with name", !!spawnCard && spawnCard.textContent.includes("Subagent spawned — verify-threads"), spawnCard?.textContent ?? "");
+posted.length = 0;
+spawnCard.querySelector(".spawned-view").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("spawn card click posts browseChild", posted.some((m) => m.type === "browseChild" && m.activeSessionId === "aaaa1111"));
+// seeded baseline on first children payload only, no duplicate rows
+hostMessage({
+	type: "sessionChildren",
+	children: [
+		{ id: "sub-a", activeSessionId: "aaaa1111", name: "verify-threads", runtimeKind: "subagent", created: "2026-08-07T15:00:00Z", isStreaming: false, attachedClients: 0, rlmDepth: 1 },
+	],
+	// no 'spawned' list — seed only, should not duplicate the card
+});
+check("re-broadcast does not duplicate the spawn card", document.querySelectorAll(".spawned-card").length === 1);
+
 // --- history: running indicator + stop/rename/delete ordering ---
 hostMessage({
 	type: "history",

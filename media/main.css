@@ -2382,3 +2382,46 @@ body.vscode-light pre.term {
 	0%, 100% { opacity: 0.35; transform: scale(0.85); }
 	50% { opacity: 1; transform: scale(1); }
 }
+
+/* ---------- subagent spawn card ---------- */
+
+.spawned-card {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	margin: 1px 0;
+	padding: 3px 9px;
+	border: 1px solid var(--pa-border-faint, color-mix(in srgb, transparent 60%, var(--pa-border) 40%));
+	border-radius: 7px;
+	font-size: 10px;
+	color: var(--pa-dim);
+	background: color-mix(in srgb, transparent 75%, var(--pa-raised) 25%);
+}
+
+.spawned-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--pa-accent);
+	opacity: 0.9;
+	flex-shrink: 0;
+}
+
+.spawned-label {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.spawned-view {
+	font-size: 9.5px;
+	color: var(--pa-faint);
+	padding: 0 4px;
+	border-radius: 4px;
+}
+
+.spawned-view:hover {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}

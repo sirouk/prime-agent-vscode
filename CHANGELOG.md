@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Subagent spawn cards announce each new subagent inline in the transcript (ordered by start time), clickable to browse into it; the strip refresh stays cheap and realtime via traffic-throttled daemon reads
+
+
 - Attach keepalive: session keeps following across daemon restarts (seamless re-anchor, re-attach notice)
 - Running-state reads are consistent on every history visit (sidecar auto-reconnect; running strictly from isStreaming)
 
