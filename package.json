@@ -17,10 +17,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/PrimeIntellect-ai/prime-agent-vscode"
+    "url": "https://github.com/sirouk/prime-agent-vscode"
   },
-  "homepage": "https://github.com/PrimeIntellect-ai/prime-agent-vscode",
-  "bugs": "https://github.com/PrimeIntellect-ai/prime-agent-vscode/issues",
+  "homepage": "https://github.com/sirouk/prime-agent-vscode",
+  "bugs": "https://github.com/sirouk/prime-agent-vscode/issues",
   "galleryBanner": {
     "color": "#0f0f0f",
     "theme": "dark"
