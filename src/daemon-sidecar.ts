@@ -71,6 +71,11 @@ export class DaemonSidecar {
 	private helloResolve: ((hello: DaemonHello) => void) | null = null;
 	hello: DaemonHello | null = null;
 	connected = false;
+	/** Diagnostic: number of parsed socket lines since attach (used by live-driver probes). */
+	traceCount = 0;
+	lastLineAtom = "";
+	/** Hook for EVERY raw socket line (diagnostic routing). */
+	onAnyLine: (line: string) => void = () => {};
 	/** Hook for every non-response daemon message (session_event, session_status, ...). */
 	onEvent: (message: DaemonServerMessage) => void = () => {};
 	/** Hook when the socket closes so hosts can invalidate attached state. */
@@ -149,6 +154,9 @@ export class DaemonSidecar {
 	}
 
 	private handleLine(line: string): void {
+		this.traceCount += 1;
+		this.lastLineAtom = line.slice(0, 60);
+		this.onAnyLine(line.slice(0, 120));
 		let message: DaemonServerMessage;
 		try {
 			message = JSON.parse(line) as DaemonServerMessage;

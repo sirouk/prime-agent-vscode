@@ -982,6 +982,14 @@ details.thinking .thinking-body {
 	min-height: 22px;
 	max-height: 200px;
 	line-height: 1.5;
+	/* The native scrollbar steals wrap width and drifts the caret away from the
+	   mirrored text — hide it; auto-grow keeps the field usable. */
+	scrollbar-width: none;
+	overflow-y: auto;
+}
+
+.composer-card textarea::-webkit-scrollbar {
+	display: none;
 }
 
 .composer-card textarea::placeholder {

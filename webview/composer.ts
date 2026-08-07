@@ -147,6 +147,9 @@ export class Composer {
 			window.clearTimeout(draftDebounce);
 			draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
 		});
+		this.textarea.addEventListener("scroll", () => {
+			if (this.mirror) this.mirror.scrollTop = this.textarea.scrollTop;
+		});
 		this.textarea.addEventListener("paste", (event) => this.onPaste(event));
 		this.textarea.addEventListener("drop", (event) => this.onDrop(event));
 		this.textarea.addEventListener("dragover", (event) => event.preventDefault());
@@ -636,6 +639,11 @@ export class Composer {
 	}
 
 	/** Mirror the textarea with @path tokens wrapped in styled spans (HTML-escaped). */
+	/** Textarea + mirror scroll-parity: caret must never drift from the rendered text. */
+	private syncScroll(): void {
+		if (this.mirror) this.mirror.scrollTop = this.textarea.scrollTop;
+	}
+
 	private syncMirror(): void {
 		if (!this.mirror) return;
 		const text = this.textarea.value;
@@ -663,6 +671,7 @@ export class Composer {
 		this.syncMirror();
 		this.textarea.style.height = "auto";
 		this.textarea.style.height = `${Math.min(this.textarea.scrollHeight, 200)}px`;
+		this.syncScroll();
 		this.updateSendState();
 	}
 

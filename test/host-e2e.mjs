@@ -36,6 +36,8 @@ async function waitFor(predicate, timeoutMs, label) {
 }
 
 const received = [];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const ownIds = new Set();
 const sink = { post: (message) => received.push(message) };
 const outputLines = [];
 const _mem = new Map();
@@ -74,6 +76,85 @@ try {
 		.join("\n");
 	check("transcript contains PONG reply", /pong/i.test(lastText), lastText.slice(0, 60));
 
+	// -----------------------------------------------------------------
+	// Daemon-attached live session: a third-party client writes; the
+	// extension must stream it to the webview transcript (dual-use).
+	// -----------------------------------------------------------------
+	{
+		const { createRequire } = await import("node:module");
+		const sidecarRequire = createRequire(import.meta.url);
+		const { DaemonSidecar } = sidecarRequire("../dist/daemon-sidecar.cjs");
+		const marker = `HOT-E2E-${Date.now() % 100_000}`;
+		const driver = new DaemonSidecar();
+		await driver.connect();
+		// Fresh resident session owned by the daemon (NOT by this extension's RPC client).
+		const residentName = `host-e2e-live-${Date.now()}`;
+		const createRes = await driver.request(
+			{ type: "create", lifecycle: "resident", name: residentName, config: { cwd: workdir } },
+			20_000,
+		);
+		check("resident session created for attach", createRes?.id != null, `id=${createRes?.id ?? "<none>"}`);
+		ownIds.add(createRes.id);
+		let sessionFile = createRes.sessionFile;
+		for (let i = 0; i < 20 && !sessionFile; i += 1) {
+			await new Promise((r) => setTimeout(r, 250));
+			const listed = await driver.list(true);
+			sessionFile = listed.find((s) => s.id === createRes.id)?.sessionFile;
+		}
+		check("resident session file surfaced", typeof sessionFile === "string" && sessionFile.length > 0, String(sessionFile ?? "<none>"));
+
+		const promptCountBefore = received.length;
+		// Attach through the same channel the righ-observe parity uses.
+		const attachOk = await controller.attachViaDaemon(createRes.id, sessionFile);
+		check("attachViaDaemon accepted", attachOk === true);
+		check("attached-mode notice went out", received.some((m) => m.type === "notice" && /attached to the live session/i.test(m.text ?? "")), received.filter((m) => m.type === "notice").slice(-3).map((m) => m.text).join(" | "));
+
+		const watcher = new DaemonSidecar();
+		await watcher.connect();
+		const watcherEvents = [];
+		watcher.onEvent = (msg) => {
+			if (msg.activeSessionId === createRes.id && msg.type === "session_event") watcherEvents.push(String((msg.event ?? {}).type ?? "?"));
+		};
+		await watcher.attach(createRes.id);
+		await driver.request(
+			{ type: "prompt", activeSessionId: createRes.id, message: `Reply with exactly: ${marker}. Do not use any tools.`, streamingBehavior: "steer", queueIfBusy: true },
+			30_000,
+		);
+		const started = Date.now();
+		let extSawEvent = null;
+		let snapAssistant = "";
+		while (Date.now() - started < 90_000) {
+			const later = received.slice(promptCountBefore);
+			extSawEvent =
+				later.find((m) => m.type === "event" && JSON.stringify(m.event ?? {}).includes(marker)) ??
+				later.find((m) => m.type === "event" && (m.event?.type ?? "").startsWith("message"));
+			const snapshots = received.filter((m) => m.type === "snapshot");
+			const lastSnap = snapshots[snapshots.length - 1];
+			snapAssistant = (lastSnap?.messages ?? [])
+				.filter((mm) => mm?.role === "assistant")
+				.flatMap((mm) => (Array.isArray(mm.content) ? mm.content : []))
+				.filter((p) => p?.type === "text")
+				.map((p) => p.text)
+				.join("\n");
+			if (extSawEvent || (snapAssistant && snapAssistant.includes(marker))) break;
+			await sleep(750);
+		}
+		check(
+			"extension streams third-party client traffic while attached",
+			extSawEvent != null || snapAssistant.includes(marker),
+			extSawEvent == null
+				? `received=${received.length - promptCountBefore} msgs after attach, watcherEvents=${watcherEvents.length}, lastExcerpt=${snapAssistant.slice(-80) || "<none>"}`
+				: String(extSawEvent?.type),
+		);
+		check(
+			"watcher client saw the same streamed turn",
+			watcherEvents.some((e) => e.startsWith("message_")),
+			`${watcherEvents.length} watcher events`,
+		);
+		watcher.dispose();
+		driver.dispose();
+	}
+
 	// Selection composition: snippet + attachment markers land in the outgoing text.
 	const composed = controller.composeMessageText({
 		text: "what does this do?",
@@ -95,6 +176,19 @@ try {
 	check("no protocol error notices", !received.some((m) => m.type === "notice" && m.level === "error"), 
 		received.filter((m) => m.type === "notice").map((m) => m.text).slice(0, 2).join(" | "));
 } finally {
+	for (const id of ownIds) {
+		try {
+			const { createRequire } = await import("node:module");
+		const sidecarRequire = createRequire(import.meta.url);
+		const { DaemonSidecar } = sidecarRequire("../dist/daemon-sidecar.cjs");
+			const killer = new DaemonSidecar();
+			await killer.connect();
+			await killer.request({ type: "kill", activeSessionId: id }, 15_000);
+			killer.dispose();
+		} catch {
+			// best effort
+		}
+	}
 	controller.dispose();
 	fs.rmSync(workdir, { recursive: true, force: true });
 }

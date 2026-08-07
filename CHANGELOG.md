@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Live-view parity for attached sessions proved end-to-end (host e2e dual phase: independent writer client streams into the extension transcript live)
+- Composer caret mirrors scroll exactly when the field hits max-height (native scrollbar hidden so the caret stays truthful at the end of input)
+
 - Session title in the header (ellipsis-wrapped) with a hover pencil -> inline rename (Enter commits; RPC or daemon-sidecar for attached sessions); history rows gain a pencil for offline renames (session_info entries, live sessions refused)
 - Menus survive streaming responses (pill label span, guarded updates) — menu-open-during-stream regression covered live
 - ipython tool cards summarize the real first line (skips %%magics, shebangs, comments)

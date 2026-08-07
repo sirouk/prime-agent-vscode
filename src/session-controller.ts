@@ -864,10 +864,7 @@ export class SessionController implements vscode.Disposable {
 		if (/already active/i.test(error)) {
 			const id = sessionId ?? path.basename(sessionPath, ".jsonl");
 			const attached = await this.attachViaDaemon(id, sessionPath);
-			if (attached) {
-				this.broadcast({ type: "notice", level: "info", text: "Attached to the live session — you can work here and in the terminal simultaneously." });
-				return;
-			}
+			if (attached) return;
 			const observed = await this.startObserving(id);
 			if (observed) return;
 			this.broadcast({
@@ -903,6 +900,7 @@ export class SessionController implements vscode.Disposable {
 		if (!this.sidecar) {
 			this.sidecar = new DaemonSidecar();
 			this.sidecar.onEvent = (message) => this.onDaemonEvent(message);
+			this.sidecar.onAnyLine = (line) => this.debugLog.append(`sidecar-line: ${line.slice(0, 100)}`);
 			this.sidecar.onClose = () => {
 				if (this.attached) {
 					this.attached = null;
@@ -939,6 +937,11 @@ export class SessionController implements vscode.Disposable {
 				}
 			}
 			this.rentedState = (snapshot?.state ?? null) as RpcSessionState | null;
+			this.broadcast({
+				type: "notice",
+				level: "info",
+				text: "Attached to the live session — you can work here and in the terminal simultaneously.",
+			});
 			void this.refreshChildren();
 			this.changedFiles.clear();
 			this.clearThreadDiffs();
@@ -1091,6 +1094,7 @@ export class SessionController implements vscode.Disposable {
 
 	/** Route daemon events for the attached session into the normal pipeline. */
 	private onDaemonEvent(message: DaemonServerMessage): void {
+		this.debugLog.append(`daemon-event: type=${message.type} sid=${String(message.activeSessionId).slice(0, 20)}${this.attached ? ` attached=${this.attached.activeSessionId.slice(0, 20)}` : " no-attach"}`);
 		const attached = this.attached;
 		if (!attached) return;
 		const msgSessionId = message.activeSessionId;
