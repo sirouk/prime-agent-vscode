@@ -8,3 +8,5 @@ media/main.js.map
 test/live-driver.log
 .env
 .env.local
+test/smoke.mjs
+test/smoke.mjs.map

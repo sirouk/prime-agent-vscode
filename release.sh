@@ -322,7 +322,7 @@ if ! confirm "Commit $chosen_tag, tag it, and publish a GitHub release?"; then
     fail "release cancelled"
 fi
 
-git add package.json CHANGELOG.md $(git ls-files --modified test/preview-*.png test/smoke.mjs test/smoke.mjs.map 2>/dev/null || true)
+git add package.json CHANGELOG.md $(git ls-files --modified test/preview-*.png 2>/dev/null || true)
 git commit -m "$commit_title" >/dev/null || fail "release commit failed"
 git tag -a "$chosen_tag" -m "$commit_title"
 
