@@ -86,10 +86,29 @@ VS Code extension host                Prime Agent CLI
 npm install
 npm run compile        # esbuild: dist/extension.js + media/main.js
 npm run typecheck      # tsc --noEmit
-npm test               # activation harness with a stubbed vscode module
+npm run test           # activation harness with a stubbed vscode module
 npm run smoke          # spawns a real prime-agent --mode rpc and round-trips a prompt
 npm run package        # produce prime-agent-vscode-<version>.vsix
 ```
+
+Test layers:
+
+- `test/webview.test.mjs` — happy-dom harness driving the built `media/main.js`
+  (rendering, menus, history, streaming states). Fully headless.
+- `test/host-e2e.mjs` — real `SessionController` + stubbed vscode vs. a real CLI.
+- `test/smoke.mjs` — RPC protocol round-trip (`--session-dir` temp store).
+- `test/vscode-e2e.mjs` — **real-shell trace**: Playwright drives actual VS Code
+  (minimized window, throwaway `--user-data-dir`, extension loaded from the repo via
+  `--extensionDevelopmentPath`). Covers the sidebar mount, tooltips, model/thinking
+  menus, prompt round-trip, grouped history, session resume, the observe fallback for
+  sessions already live elsewhere, and abort. Note: Electron can't run headless on
+  macOS; the suite minimizes the window instead. Uninstall the packaged extension
+  before running it so the dev-path build wins resolution.
+- `test/live-driver.mjs` — persistent http driver on `127.0.0.1:7321` that keeps one
+  backgrounded VS Code open and reloads the extension host in place for iterative runs.
+
+Set `PRIME_AGENT_VSCODE_LOG=/path/to/file` to get the env-gated host debug log
+(spawn config, wire summaries, prompt lifecycle) — useful when diagnosing in the field.
 
 To try it in VS Code without packaging: open this folder and press `F5` to launch an
 Extension Development Host, or install the built `.vsix` via the Extensions view
