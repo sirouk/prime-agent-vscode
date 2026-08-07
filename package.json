@@ -5,6 +5,33 @@
   "version": "0.0.1",
   "publisher": "primeintellect",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "keywords": [
+    "prime agent",
+    "prime intellect",
+    "ai agent",
+    "coding agent",
+    "chat",
+    "rlm",
+    "llm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PrimeIntellect-ai/prime-agent-vscode"
+  },
+  "homepage": "https://github.com/PrimeIntellect-ai/prime-agent-vscode",
+  "bugs": "https://github.com/PrimeIntellect-ai/prime-agent-vscode/issues",
+  "galleryBanner": {
+    "color": "#0f0f0f",
+    "theme": "dark"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Launches a local agent process that reads and writes files in the workspace."
+    },
+    "virtualWorkspaces": false
+  },
   "engines": {
     "vscode": "^1.90.0"
   },

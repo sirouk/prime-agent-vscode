@@ -54,10 +54,10 @@
 			host({ type: "showHistory" });
 			const now = Date.now();
 			host({ type: "history", sessions: [
-				{ path: "/a/1.jsonl", cwd: "/Users/chrisk/prime-agent-vs-ext", timestamp: new Date(now - 3600e3).toISOString(), name: "vscode-extension", inWorkspace: true },
-				{ path: "/a/2.jsonl", cwd: "/Users/chrisk/prime-agent-vs-ext", timestamp: new Date(now - 3*3600e3).toISOString(), name: "vscode-session", firstPrompt: "Add a VS Code extension that talks to the RPC mode", inWorkspace: true },
-				{ path: "/a/3.jsonl", cwd: "/Users/chrisk/airship", timestamp: new Date(now - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
-				{ path: "/a/4.jsonl", cwd: "/Users/chrisk/prime-agent", timestamp: new Date(now - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
+				{ path: "/a/1.jsonl", cwd: "/home/dev/prime-agent-vscode", timestamp: new Date(now - 3600e3).toISOString(), name: "vscode-extension", inWorkspace: true },
+				{ path: "/a/2.jsonl", cwd: "/home/dev/prime-agent-vscode", timestamp: new Date(now - 3*3600e3).toISOString(), name: "vscode-session", firstPrompt: "Add a VS Code extension that talks to the RPC mode", inWorkspace: true },
+				{ path: "/a/3.jsonl", cwd: "/home/dev/airship", timestamp: new Date(now - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
+				{ path: "/a/4.jsonl", cwd: "/home/oss/prime-agent", timestamp: new Date(now - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
 			] });
 		} else if (mode === "attachmenu") {
 			host({ type: "snapshot", messages: [], state: null, status: baseStatus, steerDefault: "steer" });
@@ -95,10 +95,10 @@
 			host({ type: "showHistory" });
 			const now2 = Date.now();
 			host({ type: "history", sessions: [
-				{ id: "019fd749-3f2a", path: "/a/1.jsonl", cwd: "/Users/chrisk/prime-agent-vs-ext", timestamp: new Date(now2 - 3600e3).toISOString(), name: "vscode-extension", inWorkspace: true },
-				{ id: "019fd111-aaaa", path: "/a/2.jsonl", cwd: "/Users/chrisk/prime-agent-vs-ext", timestamp: new Date(now2 - 3*3600e3).toISOString(), name: "vscode-session", firstPrompt: "Add a VS Code extension that talks to the RPC mode", inWorkspace: true },
-				{ id: "019fd222-bbbb", path: "/a/3.jsonl", cwd: "/Users/chrisk/airship", timestamp: new Date(now2 - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
-				{ id: "019fd333-cccc", path: "/a/4.jsonl", cwd: "/Users/chrisk/prime-agent", timestamp: new Date(now2 - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
+				{ id: "019fd749-3f2a", path: "/a/1.jsonl", cwd: "/home/dev/prime-agent-vscode", timestamp: new Date(now2 - 3600e3).toISOString(), name: "vscode-extension", inWorkspace: true },
+				{ id: "019fd111-aaaa", path: "/a/2.jsonl", cwd: "/home/dev/prime-agent-vscode", timestamp: new Date(now2 - 3*3600e3).toISOString(), name: "vscode-session", firstPrompt: "Add a VS Code extension that talks to the RPC mode", inWorkspace: true },
+				{ id: "019fd222-bbbb", path: "/a/3.jsonl", cwd: "/home/dev/airship", timestamp: new Date(now2 - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
+				{ id: "019fd333-cccc", path: "/a/4.jsonl", cwd: "/home/oss/prime-agent", timestamp: new Date(now2 - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
 			] });
 			// Pre-arm one item so the screenshot shows the inline Delete/cancel confirm state.
 			setTimeout(() => document.querySelectorAll(".history-item:not(.current) .history-actions .history-action")[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })), 150);

@@ -19,17 +19,24 @@ terminal client. The extension is a UI over the RPC protocol, not a reimplementa
   session id in the status strip); reopen and the full transcript, tools, and usage rebuild.
 - **Steer while working**: send messages while the agent runs; the *steer/queue* pill in the
   composer rail chooses mid-turn steering or end-of-run delivery. Stop button aborts the run.
-- **Editor context**: `@` mentions with file autocomplete, attach the current selection with a
-  click or `Cmd+Alt+K`/`Alt+K` (the snippet is sent as context), paste or drop images.
-- **Composer rail**: searchable model menu with ★ favorites (persisted), reasoning badges and
-  context-window sizes; thinking menu that disables for non-reasoning models; steer/queue
-  toggle (default configurable via `primeAgent.defaultStreamingBehavior`); and a live
-  context-window meter that warms up near the model's limit.
+- **Editor context**: `+` attach menu — mention files (`@` with indexed autocomplete), attach
+  the active file or the current selection (`Cmd+Alt+K` / `Alt+K` sends the snippet as
+  context), or attach images on vision-capable models. Paste and drag-drop work too, and are
+  gently refused on text-only models. Mentions render as clickable chips in your messages.
+- **Composer rail**: one searchable model menu holds everything model-related — ★ favorites
+  (persisted), reasoning and vision (`img`) badges, context-window sizes, and the six thinking
+  levels nested at the bottom (auto-hidden for non-reasoning models). Next to it: the
+  steer/queue toggle (default configurable via `primeAgent.defaultStreamingBehavior`) and a
+  live context-window meter that warms up near the model's limit.
 - **Tool rendering built for agents**: edit calls render as red/green diff hunks with a
   jump-to-file button; shell calls render as terminal cards with live streaming output.
-- **Session control**: new session, in-webview history grouped by *This workspace* / *Other
-  folders* (prime-agent sessions resume from any directory), manual compact, export the chat
-  as HTML, restart the agent process.
+- **Session control**: in-webview history grouped by *This workspace* / *Other folders*
+  (prime-agent sessions resume from any directory); hover a session to delete it with a
+  one-tap inline confirm (trash-first with artifact cleanup, live and current sessions are
+  refused). Plus new session, manual compact, markdown export, and agent restart from the
+  `⋯` menu.
+- **Export**: save the chat as Markdown — with tool calls summarized as one-liners, thinking
+  as blockquotes, and no tool-output dumps (choose *without tool calls* for a clean transcript).
 - **Changes strip**: files the agent touched during the last run, one click to open or diff
   against git HEAD.
 
@@ -56,8 +63,51 @@ If `prime-agent` is not on `PATH`, set `primeAgent.command` to an absolute path,
 ## Commands
 
 All under the `Prime Agent:` prefix, e.g. `Prime Agent: Focus Chat`, `New Session`,
-`Compact Context`, `Export Chat as HTML`, `Resume Recent Session…`, `Restart Agent Process`,
+`Compact Context`, `Export Chat…`, `Resume Recent Session…`, `Restart Agent Process`,
 `Add Selection to Chat`, `Add Active File to Chat`, `Open Chat in Editor Tab`, `Stop Agent`.
+
+## Development
+
+TypeScript + esbuild, no framework, no runtime npm dependencies in the shipped bundle.
+The webview is hand-written TS compiled to a single `media/main.js`.
+
+```bash
+npm install
+node esbuild.config.mjs        # build host (dist/) + webview (media/)
+npx tsc --noEmit               # type check
+node test/webview.test.mjs     # webview DOM harness (happy-dom)
+node test/export-md.test.mjs   # markdown export harness
+node test/activate.test.mjs    # activation harness
+node test/smoke.mjs            # confidence smoke
+node test/host-e2e.mjs         # extension-host e2e (stubbed vscode API)
+node test/preview-shot.mjs     # headless Chromium screenshots + DOM assertions
+```
+
+For a real VS Code shell without window-focus stealing, run the persistent live driver:
+
+```bash
+node test/live-driver.mjs      # listens on 127.0.0.1:7321, keeps one minimized window
+```
+
+It exposes scenario endpoints (`/scenario/menus-then-prompt`, `/scenario/stop-mid-run`,
+`/scenario/new-session`, `/scenario/resume-and-observe` …), `/eval?expr=…` to evaluate
+expressions inside the webview, and `/state` for DOM status. Get available scenario names
+by requesting a bogus one.
+
+Package a `.vsix` with `npm run package`.
+
+## Privacy
+
+The extension talks only to the local `prime-agent` process over stdio and reads sessions and
+workspace files on your machine. Everything else — providers, tools, skills, subagents — is the
+agent's own runtime, governed by your `prime-agent` configuration and the providers you choose
+there. Session history and favorites are stored locally (globalState + your
+`~/.prime/agent` directory) and never leave the machine except through the model providers
+you configured.
+
+## License
+
+MIT. The butterfly mark and the Prime Agent name belong to Prime Intellect.
 
 Editor context menu: *Prime Agent: Add Selection to Chat*.
 

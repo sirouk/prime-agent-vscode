@@ -4,3 +4,5 @@ out/
 media/main.js
 media/main.js.map
 *.vsix
+
+test/live-driver.log

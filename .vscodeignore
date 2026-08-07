@@ -11,3 +11,6 @@ tsconfig.json
 *.map
 media/*.map
 media/preview.html
+
+dist/*.map
+dist/controller.cjs
