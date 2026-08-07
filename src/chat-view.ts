@@ -33,25 +33,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
 	resolveWebviewView(view: vscode.WebviewView): void {
 		this.view = view;
+		// VS Code silently replaces the inner webview object when the panel is
+		// hidden/re-shown/reloaded (activity-bar toggles, window restore, Developer:
+		// Reload Webviews). Every time it becomes visible again we must re-wire onto
+		// the CURRENT webview object: reset html + re-register the receiver. Otherwise
+		// webview->host messages silently stop, mirroring the outbound stale-object
+		// failure that the dynamic sink fixes.
+		this.wire();
+		view.onDidChangeVisibility(() => {
+			if (view.visible) this.wire();
+		}, null, this.viewDisposables);
+	}
+
+	private wire(): void {
+		const view = this.view;
+		if (!view) return;
 		view.webview.options = {
 			enableScripts: true,
 			localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
 		};
 		view.webview.html = buildHtml(view.webview, this.extensionUri);
-		if (!this.sinkAttached) {
-			this.sinkAttached = true;
-			void this.controller.attach(this.dynamicSink);
-		}
+		for (const d of this.receiveDisposables.splice(0)) d.dispose();
 		view.webview.onDidReceiveMessage(
 			(message: WebviewToHost) => {
 				void handleMessage(message, this.controller);
 			},
 			undefined,
-			this.viewDisposables,
+			this.receiveDisposables,
 		);
+		if (!this.sinkAttached) {
+			this.sinkAttached = true;
+			void this.controller.attach(this.dynamicSink);
+		}
 	}
 
 	private viewDisposables: vscode.Disposable[] = [];
+	private receiveDisposables: vscode.Disposable[] = [];
 
 	reveal(): void {
 		this.view?.show?.(true);
@@ -63,6 +80,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
 	post(message: HostToWebview): void {
 		this.view?.webview.postMessage(message);
+	}
+
+	dispose(): void {
+		for (const d of this.viewDisposables.splice(0)) d.dispose();
+		for (const d of this.receiveDisposables.splice(0)) d.dispose();
 	}
 }
 
@@ -155,6 +177,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 		case "exportHtml":
 			await controller.exportHtml();
 			return;
+		case "exportChat":
+			await controller.exportChat();
+			return;
 		case "restart":
 			await controller.restart();
 			await controller.refreshSnapshot();
@@ -182,6 +207,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			return;
 		case "stopObserving":
 			await controller.stopObserving();
+			return;
+		case "deleteSession":
+			await controller.deleteSessionByPath(message.path, message.sessionId);
 			return;
 		case "searchFiles":
 			await controller.searchFiles(message.query, message.requestId);

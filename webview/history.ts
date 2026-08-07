@@ -7,6 +7,7 @@ import type { RecentSession } from "../src/protocol.js";
 
 export interface HistoryDeps {
 	onResume: (path: string, sessionId: string) => void;
+	onDelete: (path: string, sessionId: string) => void;
 	onBack: () => void;
 }
 
@@ -56,12 +57,26 @@ export class HistoryView {
 	private buildItem(session: RecentSession, showFolder: boolean): HTMLButtonElement {
 		const item = el("button", "history-item") as HTMLButtonElement;
 		item.title = session.cwd;
+		item.dataset.showFolder = showFolder ? "1" : "0";
 		const isCurrent = session.id === this.currentId;
 		if (isCurrent) item.classList.add("current");
 		const top = el("div", "history-item-top");
 		const name = session.name || session.firstPrompt || "(untitled session)";
 		top.appendChild(el("span", "history-item-name", isCurrent ? `${name} (current)` : name));
 		top.appendChild(el("span", "history-item-time", relativeTime(session.timestamp)));
+		const actions = el("div", "history-actions");
+		if (!isCurrent) {
+			const del = document.createElement("button");
+			del.className = "history-action";
+			del.title = "Delete (moves to Trash when possible, also removes session data)";
+			del.appendChild(icon("close", 11));
+			del.addEventListener("click", (event) => {
+				event.stopPropagation();
+				this.armDelete(item, session, actions, top);
+			});
+			actions.appendChild(del);
+		}
+		top.appendChild(actions);
 		item.appendChild(top);
 		const sub = session.name && session.firstPrompt ? session.firstPrompt.slice(0, 110) : showFolder ? session.cwd : undefined;
 		if (sub) item.appendChild(el("div", "history-item-sub", sub));
@@ -69,6 +84,40 @@ export class HistoryView {
 			item.addEventListener("click", () => this.deps.onResume(session.path, session.id));
 		}
 		return item;
+	}
+
+	/** Inline one-tap confirm: swaps the subtle buttons for ✓ Delete / ✕ for a few seconds. */
+	private armDelete(item: HTMLElement, session: RecentSession, actions: HTMLElement, top: HTMLElement): void {
+		if (item.classList.contains("confirming")) return;
+		item.classList.add("confirming");
+		actions.textContent = "";
+		const confirm = document.createElement("button");
+		confirm.className = "history-action destructive";
+		confirm.title = "Confirm delete";
+		confirm.appendChild(icon("check", 12));
+		confirm.appendChild(document.createTextNode("Delete"));
+		confirm.addEventListener("click", (event) => {
+			event.stopPropagation();
+			item.classList.remove("confirming");
+			this.deps.onDelete(session.path, session.id);
+		});
+		const cancel = document.createElement("button");
+		cancel.className = "history-action";
+		cancel.title = "Cancel";
+		cancel.appendChild(icon("close", 11));
+		cancel.addEventListener("click", (event) => {
+			event.stopPropagation();
+			if (!item.isConnected) return;
+			item.classList.remove("confirming");
+			item.parentElement?.insertBefore(this.buildItem(session, item.dataset.showFolder === "1"), item);
+			item.remove();
+		});
+		actions.append(confirm, cancel);
+		setTimeout(() => {
+			if (item.isConnected && item.classList.contains("confirming")) {
+				cancel.click();
+			}
+		}, 6000);
 	}
 }
 

@@ -1480,3 +1480,96 @@ body.vscode-light pre.term {
 .usage-line.error {
 	color: var(--pa-error);
 }
+
+/* ---------- composer hint ---------- */
+
+.composer-hint {
+	display: none;
+	font-size: 10.5px;
+	color: var(--pa-warn);
+	padding: 2px 4px;
+}
+
+.composer-hint.visible {
+	display: block;
+	animation: pa-hint-fade 3.5s ease forwards;
+}
+
+@keyframes pa-hint-fade {
+	0% { opacity: 0; transform: translateY(2px); }
+	8% { opacity: 1; transform: none; }
+	80% { opacity: 1; }
+	100% { opacity: 0.35; }
+}
+
+/* ---------- history hover actions ---------- */
+
+.history-item {
+	position: relative;
+}
+
+.history-actions {
+	display: none;
+	align-items: center;
+	gap: 2px;
+	flex-shrink: 0;
+}
+
+.history-item:hover .history-actions,
+.history-item.confirming .history-actions {
+	display: inline-flex;
+}
+
+.history-item:hover .history-item-time {
+	visibility: hidden;
+}
+
+.history-item.confirming .history-item-time {
+	visibility: hidden;
+}
+
+.history-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	font-size: 10px;
+	padding: 1px 5px;
+	border-radius: 5px;
+	color: var(--pa-dim);
+}
+
+.history-action:hover {
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+}
+
+.history-action.destructive {
+	color: var(--pa-error);
+}
+
+.history-action.destructive:hover {
+	background: color-mix(in srgb, transparent 85%, var(--pa-error) 15%);
+	color: var(--pa-error);
+}
+
+.history-item.confirming {
+	border-color: var(--pa-error);
+}
+
+/* ---------- mention chips ---------- */
+
+.mention-chip {
+	display: inline;
+	font: inherit;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.92em;
+	color: var(--pa-accent);
+	background: var(--pa-accent-dim);
+	border-radius: 4px;
+	padding: 0 3px;
+	cursor: pointer;
+}
+
+.mention-chip:hover {
+	text-decoration: underline;
+}

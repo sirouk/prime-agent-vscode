@@ -59,6 +59,83 @@
 				{ path: "/a/3.jsonl", cwd: "/Users/chrisk/airship", timestamp: new Date(now - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
 				{ path: "/a/4.jsonl", cwd: "/Users/chrisk/prime-agent", timestamp: new Date(now - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
 			] });
+		} else if (mode === "attachmenu") {
+			host({ type: "snapshot", messages: [], state: null, status: baseStatus, steerDefault: "steer" });
+			host({ type: "models", models: [
+				{ provider: "chutes", id: "moonshotai/Kimi-K3-TEE", contextWindow: 262144, reasoning: true, input: ["text"] },
+				{ provider: "openai", id: "gpt-5.2-codex", contextWindow: 400000, reasoning: true, input: ["text", "image"] },
+			] });
+			// Current model is text-only → the Image… item must render disabled.
+			host({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "moonshotai/Kimi-K3-TEE" } });
+			setTimeout(() => document.querySelector('.composer-rail .icon-btn[title^="Attach"]').dispatchEvent(new MouseEvent("click", { bubbles: true })), 150);
+		} else if (mode === "modelmenu2") {
+			host({ type: "snapshot", messages: [], state: null, status: baseStatus, steerDefault: "steer" });
+			host({ type: "models", models: [
+				{ provider: "chutes", id: "moonshotai/Kimi-K3-TEE", contextWindow: 262144, reasoning: true, input: ["text", "image"] },
+				{ provider: "chutes", id: "deepseek-ai/DeepSeek-V3.2", contextWindow: 131072, reasoning: false, input: ["text"] },
+				{ provider: "anthropic", id: "claude-sonnet-4-5", contextWindow: 200000, reasoning: true, input: ["text", "image"] },
+				{ provider: "openai", id: "gpt-5.2-codex", contextWindow: 400000, reasoning: true, input: ["text", "image"] },
+				{ provider: "chutes", id: "zai-org/GLM-4.7", contextWindow: 131072, reasoning: true, input: ["text"] },
+			] });
+			host({ type: "favorites", favorites: [
+				{ provider: "chutes", modelId: "moonshotai/Kimi-K3-TEE" },
+				{ provider: "anthropic", modelId: "claude-sonnet-4-5" },
+			] });
+			host({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" }, status: { ...baseStatus, modelProvider: "chutes", modelId: "moonshotai/Kimi-K3-TEE" }, steerDefault: "steer" });
+			setTimeout(() => {
+				document.querySelector(".rail-pill.model").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+				// The list is capped at 340px; scroll so the Thinking level section is in view.
+				setTimeout(() => {
+					const list = document.querySelector(".dropdown-list");
+					if (list) list.scrollTop = list.scrollHeight;
+				}, 80);
+			}, 150);
+		} else if (mode === "history2") {
+			host({ type: "snapshot", messages: [], state: null, status: baseStatus, steerDefault: "steer" });
+			host({ type: "showHistory" });
+			const now2 = Date.now();
+			host({ type: "history", sessions: [
+				{ id: "019fd749-3f2a", path: "/a/1.jsonl", cwd: "/Users/chrisk/prime-agent-vs-ext", timestamp: new Date(now2 - 3600e3).toISOString(), name: "vscode-extension", inWorkspace: true },
+				{ id: "019fd111-aaaa", path: "/a/2.jsonl", cwd: "/Users/chrisk/prime-agent-vs-ext", timestamp: new Date(now2 - 3*3600e3).toISOString(), name: "vscode-session", firstPrompt: "Add a VS Code extension that talks to the RPC mode", inWorkspace: true },
+				{ id: "019fd222-bbbb", path: "/a/3.jsonl", cwd: "/Users/chrisk/airship", timestamp: new Date(now2 - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
+				{ id: "019fd333-cccc", path: "/a/4.jsonl", cwd: "/Users/chrisk/prime-agent", timestamp: new Date(now2 - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
+			] });
+			// Pre-arm one item so the screenshot shows the inline Delete/cancel confirm state.
+			setTimeout(() => document.querySelectorAll(".history-item:not(.current) .history-actions .history-action")[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })), 150);
+		} else if (mode === "markdownnote") {
+			host({
+				type: "snapshot",
+				messages: [
+					{ role: "user", content: "Please review @src/foo/bar.ts and tighten the retry backoff in it." },
+					{
+						role: "assistant", model: "Kimi-K3-TEE", stopReason: "stop",
+						content: [
+							{ type: "text", text: "Opened `src/foo/bar.ts` — the backoff is linear right now. I'll switch it to exponential with jitter and cap it at 30s." },
+						],
+						usage: { totalTokens: 2040, cost: { total: 0.001 } },
+					},
+				],
+				state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" },
+				status: baseStatus,
+			});
+		} else if (mode === "retry") {
+			host({
+				type: "snapshot",
+				messages: [
+					{ role: "user", content: "Run the smoke suite and report failures." },
+					{
+						role: "assistant", model: "Kimi-K3-TEE", stopReason: "stop",
+						content: [
+							{ type: "text", text: "Starting the suite now; I'll stream results as they land." },
+						],
+						usage: { totalTokens: 1560, cost: { total: 0.001 } },
+					},
+				],
+				state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" },
+				status: { ...baseStatus, streaming: true, retrying: true },
+			});
+			host({ type: "event", event: { type: "agent_start" } });
+			host({ type: "event", event: { type: "auto_retry_start", attempt: 2, maxAttempts: 5, delayMs: 4000, errorMessage: "timeout" } });
 		} else {
 			host({
 				type: "snapshot",

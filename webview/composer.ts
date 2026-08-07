@@ -31,8 +31,10 @@ export class Composer {
 	private contextFill: HTMLElement;
 	private contextLabel: HTMLElement;
 	private modelBtn: HTMLButtonElement;
-	private thinkingBtn: HTMLButtonElement;
+	private attachMenu: Dropdown | null = null;
 	private autocompleteEl: HTMLElement;
+	private hintEl: HTMLElement | null = null;
+	private hintTimer: number | undefined;
 
 	private images: ImageAttachment[] = [];
 	private selections: SelectionAttachment[] = [];
@@ -44,6 +46,7 @@ export class Composer {
 	private currentModel: { provider?: string; modelId?: string } = {};
 	private currentThinking = "off";
 	private reasoning = true;
+	private vision = false;
 	private steerDefault: "steer" | "followUp" = "steer";
 	private modelMenu: Dropdown | null = null;
 	private thinkingMenu: Dropdown | null = null;
@@ -65,26 +68,18 @@ export class Composer {
 		this.textarea.placeholder = "Message Prime Agent…";
 
 		const rail = el("div", "composer-rail");
-		const fileBtn = iconButton("file", "Attach active file", 15);
-		const selBtn = iconButton("selection", "Attach selection (current editor)", 15);
-		const imgBtn = iconButton("image", "Attach image", 15);
-		fileBtn.addEventListener("click", () => this.deps.onAttachActiveFile());
-		selBtn.addEventListener("click", () => this.deps.onAttachSelection());
-		imgBtn.addEventListener("click", () => this.deps.onPickImage());
+		const attachBtn = iconButton("plus", "Attach @file, selection, image…", 15);
+		attachBtn.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.toggleAttachMenu(attachBtn);
+		});
 
 		this.modelBtn = document.createElement("button");
 		this.modelBtn.className = "rail-pill model";
-		this.modelBtn.title = "Choose model";
-		this.thinkingBtn = document.createElement("button");
-		this.thinkingBtn.className = "rail-pill subtle";
-		this.thinkingBtn.title = "Thinking level";
+		this.modelBtn.title = "Choose model · thinking level inside";
 		this.modelBtn.addEventListener("click", (event) => {
 			event.stopPropagation();
 			this.toggleModelMenu();
-		});
-		this.thinkingBtn.addEventListener("click", (event) => {
-			event.stopPropagation();
-			this.toggleThinkingMenu();
 		});
 
 		this.behaviorBtn = document.createElement("button");
@@ -111,7 +106,7 @@ export class Composer {
 		this.stopBtn.style.display = "none";
 		this.stopBtn.addEventListener("click", () => this.deps.onStop());
 
-		rail.append(fileBtn, selBtn, imgBtn, el("span", "rail-sep"), this.modelBtn, this.thinkingBtn, this.behaviorBtn, el("span", "spacer"), this.contextWrap, this.stopBtn, this.sendBtn);
+		rail.append(attachBtn, this.modelBtn, this.behaviorBtn, el("span", "spacer"), this.contextWrap, this.stopBtn, this.sendBtn);
 		card.append(this.textarea, rail);
 		this.root.append(this.chipsEl, card);
 
@@ -155,8 +150,8 @@ export class Composer {
 	}
 
 	setThinking(level: string): void {
-		this.currentThinking = level;
-		this.thinkingBtn.textContent = level === "off" ? "thinking off" : `thinking ${level}`;
+		// Daemon may report "max" for the top level; the UI list uses "xhigh".
+		this.currentThinking = level === "max" ? "xhigh" : level;
 	}
 
 	setObserving(observing: boolean): void {
@@ -172,16 +167,65 @@ export class Composer {
 		this.updateBehaviorLabel();
 	}
 
+	private currentModelInfo(): RpcModel | undefined {
+		return this.models.find((m) => m.provider === this.currentModel.provider && m.id === this.currentModel.modelId);
+	}
+
 	private updateReasoningState(): void {
-		const model = this.models.find((m) => m.provider === this.currentModel.provider && m.id === this.currentModel.modelId);
+		const model = this.currentModelInfo();
 		this.reasoning = model?.reasoning ?? true;
-		if (!this.reasoning) {
-			this.thinkingBtn.classList.add("disabled-pill");
-			this.thinkingBtn.title = "This model does not support thinking";
-		} else {
-			this.thinkingBtn.classList.remove("disabled-pill");
-			this.thinkingBtn.title = "Thinking level";
+		this.vision = (model?.input ?? []).includes("image");
+		this.modelBtn.title = `Choose model · thinking level inside${this.vision ? " (accepts images)" : " (text-only, image attach off)"}`;
+	}
+
+	private showHint(text: string): void {
+		if (!this.hintEl) {
+			this.hintEl = el("div", "composer-hint");
+			this.root.appendChild(this.hintEl);
 		}
+		this.hintEl.textContent = text;
+		this.hintEl.classList.add("visible");
+		window.clearTimeout(this.hintTimer);
+		this.hintTimer = window.setTimeout(() => this.hintEl?.classList.remove("visible"), 3500);
+	}
+
+	private toggleAttachMenu(anchor: HTMLButtonElement): void {
+		if (this.attachMenu?.isOpen()) {
+			this.attachMenu.hide();
+			return;
+		}
+		const items: DropdownItem[] = [
+			{
+				label: "Mention a file in chat",
+				sub: "Type @ then search the workspace index",
+				section: "Attach",
+				onSelect: () => {
+					this.insertTextAtCaret("@");
+					this.updateAutocomplete();
+				},
+			},
+			{ label: "Active editor file", sub: "Reference the file you're editing", onSelect: () => this.deps.onAttachActiveFile() },
+			{ label: "Editor selection", sub: "Attach the selected lines as context", onSelect: () => this.deps.onAttachSelection() },
+			{
+				label: "Image…",
+				sub: this.vision ? "Attach a png/jpg/webp screenshot or photo" : "Current model doesn't accept images",
+				disabled: !this.vision,
+				onSelect: () => this.deps.onPickImage(),
+			},
+		];
+		this.modelMenu?.hide();
+		this.thinkingMenu?.hide();
+		this.attachMenu = new Dropdown(anchor, {});
+		this.attachMenu.show(items);
+	}
+
+	private insertTextAtCaret(text: string): void {
+		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
+		const before = this.textarea.value.slice(0, caret);
+		this.textarea.value = `${before}${text}${this.textarea.value.slice(caret)}`;
+		this.textarea.selectionStart = this.textarea.selectionEnd = before.length + text.length;
+		this.autoGrow();
+		this.textarea.focus();
 	}
 
 	setStreaming(streaming: boolean): void {
@@ -252,6 +296,11 @@ export class Composer {
 	send(): void {
 		const text = this.textarea.value.trim();
 		if (!text && this.images.length === 0 && this.selections.length === 0) return;
+		if (this.images.length > 0 && !this.vision) {
+			this.showHint("Dropped images: current model is text-only. Switch to a vision model or remove the chips.");
+			this.images = [];
+			this.renderChips();
+		}
 		this.deps.onSend(text, this.images, this.selections);
 		this.textarea.value = "";
 		this.images = [];
@@ -327,10 +376,15 @@ export class Composer {
 		}
 		const favorites = this.models.filter((m) => this.isFavorite(m));
 		const rest = this.models.filter((m) => !this.isFavorite(m));
+		const imageBadge = (model: RpcModel): string | undefined => ((model.input ?? []).includes("image") ? "img" : undefined);
+		const rightFor = (model: RpcModel): string | undefined => {
+			const bits = [this.formatCtx(model.contextWindow), model.reasoning ? "T" : undefined, imageBadge(model)].filter(Boolean);
+			return bits.length ? bits.join(" · ") : undefined;
+		};
 		const makeItem = (model: RpcModel, section: string): DropdownItem => ({
 			label: this.modelLabelFor(model),
 			sub: model.name && model.name !== model.id ? model.name : undefined,
-			right: `${this.formatCtx(model.contextWindow) ?? ""}${model.reasoning ? " · T" : ""}`.replace(/^ /, "") || undefined,
+			right: rightFor(model),
 			section,
 			current: model.provider === this.currentModel.provider && model.id === this.currentModel.modelId,
 			accessory: this.starAccessory(model),
@@ -340,34 +394,22 @@ export class Composer {
 			...favorites.map((m) => makeItem(m, "Favorites")),
 			...rest.map((m) => makeItem(m, favorites.length > 0 ? "All models" : "Models")),
 		];
-		this.thinkingMenu?.hide();
-		this.modelMenu = new Dropdown(this.modelBtn, { placeholder: "Search models…", maxHeight: 320 });
-		this.modelMenu.show(items);
-	}
-
-	private toggleThinkingMenu(): void {
-		if (this.thinkingMenu?.isOpen()) {
-			this.thinkingMenu.hide();
-			return;
+		// Nested thinking levels for the current reasoning model (Codex-style).
+		if (this.reasoning) {
+			const levels = ["off", "minimal", "low", "medium", "high", "xhigh"];
+			for (const level of levels) {
+				items.push({
+					label: level,
+					sub: level === "xhigh" ? "codex-max only" : undefined,
+					section: "Thinking level",
+					current: level === this.currentThinking,
+					onSelect: () => this.deps.onSetThinking(level),
+				});
+			}
 		}
-		if (!this.reasoning) return;
-		const levels: Array<{ level: string; sub: string }> = [
-			{ level: "off", sub: "No extended thinking" },
-			{ level: "minimal", sub: "Shortest reasoning pass" },
-			{ level: "low", sub: "Light reasoning" },
-			{ level: "medium", sub: "Balanced reasoning" },
-			{ level: "high", sub: "Deep reasoning (slower)" },
-			{ level: "xhigh", sub: "Max reasoning — codex-max only" },
-		];
-		const items: DropdownItem[] = levels.map(({ level, sub }) => ({
-			label: level,
-			sub,
-			current: level === this.currentThinking,
-			onSelect: () => this.deps.onSetThinking(level),
-		}));
-		this.modelMenu?.hide();
-		this.thinkingMenu = new Dropdown(this.thinkingBtn, { header: "Thinking level" });
-		this.thinkingMenu.show(items);
+		this.attachMenu?.hide();
+		this.modelMenu = new Dropdown(this.modelBtn, { placeholder: "Search models…", maxHeight: 340 });
+		this.modelMenu.show(items);
 	}
 
 	private onKeyDown(event: KeyboardEvent): void {
@@ -450,6 +492,10 @@ export class Composer {
 		const imageFiles = Array.from(files).filter((f) => f.type.startsWith("image/"));
 		if (imageFiles.length === 0) return;
 		event.preventDefault();
+		if (!this.vision) {
+			this.showHint("Current model is text-only — switch to a vision model to attach images.");
+			return;
+		}
 		this.readImageFiles(imageFiles);
 	}
 
@@ -457,6 +503,10 @@ export class Composer {
 		event.preventDefault();
 		const files = event.dataTransfer?.files;
 		if (!files) return;
+		if (!this.vision) {
+			this.showHint("Current model is text-only — switch to a vision model to attach images.");
+			return;
+		}
 		this.readImageFiles(Array.from(files).filter((f) => f.type.startsWith("image/")));
 	}
 

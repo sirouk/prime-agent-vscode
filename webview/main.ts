@@ -52,8 +52,8 @@ function menuItem(label: string, iconName: Parameters<typeof icon>[0], action: (
 	return item;
 }
 menu.append(
-	menuItem("Compact context", "compact", () => post({ type: "compact" })),
-	menuItem("Export chat as HTML", "export", () => post({ type: "exportHtml" })),
+	menuItem("Compact context — runs automatically when context fills; run it now?", "compact", () => post({ type: "compact" })),
+	menuItem("Export chat…", "export", () => post({ type: "exportChat" })),
 	menuItem("Restart agent process", "refresh", () => {
 		transcript.renderSnapshot([]);
 		post({ type: "restart" });
@@ -133,6 +133,9 @@ const historyView = new HistoryView({
 	onResume: (path, sessionId) => {
 		showView("chat");
 		post({ type: "switchSession", path, sessionId });
+	},
+	onDelete: (path, sessionId) => {
+		post({ type: "deleteSession", path, sessionId });
 	},
 	onBack: () => showView("chat"),
 });
@@ -236,7 +239,14 @@ function addNotice(level: "info" | "warning" | "error", text: string): void {
 // Host message dispatch
 // ---------------------------------------------------------------------------
 
+const rxRing: string[] = [];
+(window as unknown as { __paRx?: string[] }).__paRx = rxRing;
+
 window.addEventListener("message", (messageEvent) => {
+	try {
+		const t = (messageEvent.data as { type?: string })?.type;
+		if (typeof t === "string" && rxRing.push(t) > 30) rxRing.shift();
+	} catch { /* ignore */ }
 	try {
 		dispatchHostMessage(messageEvent.data as HostToWebview);
 	} catch (err) {

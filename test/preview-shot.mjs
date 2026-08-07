@@ -1,23 +1,319 @@
 import { chromium } from "playwright";
 
-const browser = await chromium.launch();
+// Renders headless screenshots of media/preview.html per ?mode= and, for the
+// newer modes, runs DOM assertions against the live preview state.
+// Usage: node test/preview-shot.mjs [mode]   (no arg = all modes)
+
+const mk = (name, pass, detail = "") => ({ name, pass: !!pass, detail });
+
+// ----------------------------------------------------------------
+// Verifiers: return [{ name, pass, detail }]
+// ----------------------------------------------------------------
+
+async function verifyAttachmenu(page) {
+	const rail = ".composer-rail";
+	const dd = `${rail} .dropdown`;
+	const out = [];
+
+	const railBtns = await page.$$eval(`${rail} > .icon-btn`, (els) => els.map((e) => e.title));
+	out.push(mk("composer rail shows a single + attach button", railBtns.length === 1 && railBtns[0].startsWith("Attach"), JSON.stringify(railBtns)));
+
+	out.push(mk("attach dropdown opened", !!(await page.$(dd))));
+	const items = await page.$$eval(`${dd} .dropdown-item`, (els) =>
+		els.map((e) => ({
+			label: e.querySelector(".dropdown-text")?.textContent ?? "",
+			sub: e.querySelector(".dropdown-sub")?.textContent ?? "",
+			disabled: e.classList.contains("disabled"),
+		})),
+	);
+	out.push(
+		mk(
+			"items in spec order: Mention a file in chat / Active editor file / Editor selection / Image…",
+			JSON.stringify(items.map((i) => i.label)) === JSON.stringify(["Mention a file in chat", "Active editor file", "Editor selection", "Image…"]),
+			JSON.stringify(items),
+		),
+	);
+	const img = items[3] ?? {};
+	out.push(mk("Image… item is DISABLED (text-only model)", img.disabled === true, `disabled=${img.disabled} sub="${img.sub}"`));
+
+	const before = await page.evaluate(() => postedMessages.length);
+	await page.click(`${dd} .dropdown-item.disabled`);
+	await page.waitForTimeout(120);
+	const after = await page.evaluate(() => postedMessages.length);
+	const stillOpen = !!(await page.$(dd));
+	out.push(mk("clicking disabled Image… posts nothing and keeps menu open", before === after && stillOpen, `postedMessages ${before} -> ${after}, dropdown open=${stillOpen}`));
+
+	await page.click(`${dd} .dropdown-item:not(.disabled)`);
+	await page.waitForTimeout(120);
+	const posts = await page.evaluate(() => postedMessages.map((m) => m.type));
+	out.push(mk("'Mention a file in chat' click inserts @ into composer", (await page.$eval(".composer-card textarea", (e) => e.value)) === "@", `posts=${JSON.stringify(posts)}`));
+	return out;
+}
+
+async function verifyModelmenu2(page) {
+	const dd = ".rail-pill.model .dropdown";
+	const out = [];
+	out.push(mk("model dropdown opened via .rail-pill.model click", !!(await page.$(dd))));
+
+	const search = await page.$(`${dd} input.dropdown-search`);
+	out.push(mk("search box present with placeholder", (await search?.getAttribute("placeholder")) === "Search models…", `placeholder=${await search?.getAttribute("placeholder")}`));
+
+	// Walk the list, tracking the section header above each item.
+	const rows = await page.$$eval(`${dd} .dropdown-list > *`, (els) => {
+		let section = null;
+		return els.map((e) => {
+			if (e.classList.contains("dropdown-section")) {
+				section = e.textContent;
+				return { kind: "section", name: section };
+			}
+			return {
+				kind: "item",
+				section,
+				label: e.querySelector(".dropdown-text")?.textContent ?? "",
+				sub: e.querySelector(".dropdown-sub")?.textContent ?? null,
+				right: e.querySelector(".dropdown-right")?.textContent ?? null,
+				current: e.classList.contains("current"),
+				star: e.querySelector(".dropdown-star")?.classList.contains("active") ?? false,
+			};
+		});
+	});
+	const sections = rows.filter((r) => r.kind === "section").map((r) => r.name);
+	out.push(mk("sections in order: Favorites, All models, Thinking level", JSON.stringify(sections) === JSON.stringify(["Favorites", "All models", "Thinking level"]), JSON.stringify(sections)));
+
+	const items = rows.filter((r) => r.kind === "item");
+	const favs = items.filter((r) => r.section === "Favorites");
+	out.push(
+		mk(
+			"Favorites section: 2 starred items, current model first",
+			favs.length === 2 && favs.every((f) => f.star) && favs[0].label === "chutes/moonshotai/Kimi-K3-TEE" && favs[0].current,
+			JSON.stringify(favs),
+		),
+	);
+	const all = items.filter((r) => r.section === "All models");
+	out.push(mk("All models section: 3 remaining models", all.length === 3, JSON.stringify(all.map((a) => a.label))));
+
+	const thinking = items.filter((r) => r.section === "Thinking level");
+	out.push(
+		mk(
+			"Thinking level section has six levels off/minimal/low/medium/high/xhigh",
+			JSON.stringify(thinking.map((t) => t.label)) === JSON.stringify(["off", "minimal", "low", "medium", "high", "xhigh"]),
+			JSON.stringify(thinking.map((t) => `${t.label}${t.sub ? ` (${t.sub})` : ""}${t.current ? " [current]" : ""}`)),
+		),
+	);
+	const currentThinking = thinking.filter((t) => t.current);
+	// Daemon reports "max" for the top level; the UI normalizes it to "xhigh".
+	out.push(
+		mk(
+			"current thinking level 'max' normalized and checked in the dropdown",
+			currentThinking.length === 1 && currentThinking[0].label === "xhigh",
+			`status.thinkingLevel="max" -> marked-current items: ${JSON.stringify(currentThinking.map((t) => t.label))}`,
+		),
+	);
+
+	const withImg = items.filter((r) => r.section !== "Thinking level" && (r.right ?? "").includes("img")).map((r) => r.label);
+	const expectImg = ["chutes/moonshotai/Kimi-K3-TEE", "anthropic/claude-sonnet-4-5", "openai/gpt-5.2-codex"];
+	const textOnlyImgless = items.filter((r) => ["chutes/deepseek-ai/DeepSeek-V3.2", "chutes/zai-org/GLM-4.7"].includes(r.label)).every((r) => !(r.right ?? "").includes("img"));
+	out.push(mk("vision-capable models show 'img' badge, text-only models do not", JSON.stringify(withImg.sort()) === JSON.stringify(expectImg.sort()) && textOnlyImgless, `img badges on ${JSON.stringify(withImg)}`));
+	return out;
+}
+
+// Click the hidden delete (x) of a history item: reveal via hover, then click.
+async function armDelete(page, item) {
+	await item.hover();
+	await page.waitForTimeout(50);
+	const del = await item.$(".history-actions .history-action");
+	await del.click();
+	await page.waitForTimeout(80);
+}
+
+async function verifyHistory2(page) {
+	const out = [];
+	const summary = await page.$$eval(".history-item", (els) =>
+		els.map((e) => ({
+			name: e.querySelector(".history-item-name")?.textContent ?? "",
+			current: e.classList.contains("current"),
+			confirming: e.classList.contains("confirming"),
+			actionTitles: [...e.querySelectorAll(".history-actions .history-action")].map((b) => b.title),
+		})),
+	);
+	out.push(mk("renders 4 history items", summary.length === 4, JSON.stringify(summary.map((s) => s.name))));
+
+	const currents = summary.filter((s) => s.current);
+	out.push(mk("exactly one current item (status sessionId match)", currents.length === 1, JSON.stringify(currents)));
+	out.push(mk("current item: .history-actions present but NO delete button", currents.length === 1 && currents[0].actionTitles.length === 0, `actions=${JSON.stringify(currents[0]?.actionTitles)}`));
+
+	const nonCur = summary.filter((s) => !s.current);
+	// A confirming item legitimately swaps x for the inline confirm/cancel pair.
+	const hasDeleteOrConfirm = (s) =>
+		(!s.confirming && s.actionTitles.length === 1 && s.actionTitles[0].startsWith("Delete")) ||
+		(s.confirming && s.actionTitles.length === 2 && s.actionTitles[0] === "Confirm delete" && s.actionTitles[1] === "Cancel");
+	out.push(
+		mk(
+			"every non-current item has .history-actions with delete (x) button (or armed confirm pair)",
+			nonCur.length === 3 && nonCur.every(hasDeleteOrConfirm),
+			JSON.stringify(nonCur.map((s) => s.actionTitles)),
+		),
+	);
+	const hiddenDisplay = await page.$eval(".history-item:not(.current):not(.confirming) .history-actions", (e) => getComputedStyle(e).display);
+	out.push(mk("actions hidden without hover (CSS-only hover reveal)", hiddenDisplay === "none", `display=${hiddenDisplay}`));
+
+	// Arm a fresh item (first non-current = "vscode-session") and inspect the confirm state.
+	const items = await page.$$(".history-item:not(.current)");
+	const target = items[0];
+	const targetName = await target.$eval(".history-item-name", (e) => e.textContent);
+	await armDelete(page, target);
+	let state = await target.evaluate((e) => ({
+		confirming: e.classList.contains("confirming"),
+		buttons: [...e.querySelectorAll(".history-actions .history-action")].map((b) => ({ text: b.textContent.trim(), destructive: b.classList.contains("destructive"), title: b.title })),
+	}));
+	out.push(
+		mk(
+			"clicking x reveals inline confirm: destructive 'Delete' + cancel",
+			state.confirming && state.buttons.length === 2 && state.buttons[0].destructive && state.buttons[0].text === "Delete" && !state.buttons[1].destructive,
+			JSON.stringify(state),
+		),
+	);
+	out.push(mk("arming alone posts no deleteSession", !(await page.evaluate(() => postedMessages.some((m) => m.type === "deleteSession")))));
+
+	// Cancel restores the original item.
+	const cancelBtn = await target.$(".history-actions .history-action:not(.destructive)");
+	await cancelBtn.click();
+	await page.waitForTimeout(80);
+	let restored = await page.$$eval(".history-item:not(.current)", (els) =>
+		els.map((e) => ({ name: e.querySelector(".history-item-name")?.textContent ?? "", confirming: e.classList.contains("confirming"), actions: e.querySelectorAll(".history-actions .history-action").length })),
+	);
+	const first = restored.find((r) => r.name === targetName);
+	out.push(
+		mk(
+			"cancel restores original item (not confirming, single x button, name intact)",
+			!!first && !first.confirming && first.actions === 1,
+			JSON.stringify(first),
+		),
+	);
+	out.push(mk("cancel posts nothing", !(await page.evaluate(() => postedMessages.some((m) => m.type === "deleteSession")))));
+
+	// Re-arm, let the 6000ms disarm lapse: item must auto-restore.
+	let items2 = await page.$$(".history-item:not(.current)");
+	let subject = items2.find(async () => true) ?? items2[0];
+	// pick by name to be deterministic
+	for (const h of items2) {
+		const n = await h.$eval(".history-item-name", (e) => e.textContent);
+		if (n === targetName) { subject = h; break; }
+	}
+	await armDelete(page, subject);
+	const armedNow = await page.$$eval(".history-item", (els) => els.filter((e) => e.classList.contains("confirming")).length);
+	await page.waitForTimeout(6500);
+	const stillArmed = await page.$$eval(".history-item", (els) => els.filter((e) => e.classList.contains("confirming")).length);
+	out.push(mk("6000ms disarm auto-restores an untouched confirm", armedNow >= 1 && stillArmed === 0, `confirming ${armedNow} -> ${stillArmed} after 6.5s`));
+	out.push(mk("auto-disarm posted nothing", !(await page.evaluate(() => postedMessages.some((m) => m.type === "deleteSession")))));
+
+	// Confirm path posts deleteSession with the session path.
+	let items3 = await page.$$(".history-item:not(.current)");
+	let victim = items3[0];
+	for (const h of items3) {
+		const n = await h.$eval(".history-item-name", (e) => e.textContent);
+		if (n === targetName) { victim = h; break; }
+	}
+	await armDelete(page, victim);
+	const confirmBtn = await victim.$(".history-actions .history-action.destructive");
+	await confirmBtn.click();
+	await page.waitForTimeout(80);
+	const delPosts = await page.evaluate(() => postedMessages.filter((m) => m.type === "deleteSession"));
+	out.push(mk("confirming 'Delete' posts deleteSession for the session", delPosts.length === 1 && delPosts[0].path === "/a/2.jsonl", JSON.stringify(delPosts)));
+	return out;
+}
+
+async function verifyMarkdownnote(page) {
+	const out = [];
+	const chip = await page.$(".row-user .bubble-user .mention-chip");
+	out.push(mk("@src/foo/bar.ts rendered as a .mention-chip", !!chip));
+	if (chip) {
+		out.push(mk("chip is a <button> with label @src/foo/bar.ts", (await chip.evaluate((e) => e.tagName)) === "BUTTON" && (await chip.textContent()) === "@src/foo/bar.ts", `tag=${await chip.evaluate((e) => e.tagName)} text=${await chip.textContent()}`));
+		out.push(mk("chip title is 'Open src/foo/bar.ts'", (await chip.getAttribute("title")) === "Open src/foo/bar.ts", `title="${await chip.getAttribute("title")}"`));
+		const bubbleText = await page.$eval(".row-user .bubble-user .bubble-text", (e) => e.textContent);
+		out.push(mk("surrounding message text preserved around chip", bubbleText.includes("Please review") && bubbleText.includes("and tighten the retry backoff in it."), JSON.stringify(bubbleText)));
+		await chip.click();
+		await page.waitForTimeout(80);
+		const openPosts = await page.evaluate(() => postedMessages.filter((m) => m.type === "openFile"));
+		out.push(mk("chip click posts openFile for src/foo/bar.ts", openPosts.length === 1 && openPosts[0].path === "src/foo/bar.ts", JSON.stringify(openPosts)));
+	}
+	const assistant = await page.$eval(".row-assistant .bubble-text, .row-assistant", (e) => e.textContent).catch(() => "");
+	out.push(mk("assistant reply rendered below", assistant.includes("exponential") || assistant.includes("backoff"), assistant.slice(0, 60)));
+	return out;
+}
+
+async function verifyRetry(page) {
+	const out = [];
+	const row = await page.$(".retry-row");
+	out.push(mk("retry row rendered in transcript", !!row && (await row.isVisible())));
+	if (!row) return out;
+	const text = await row.$eval(".retry-text", (e) => e.textContent);
+	out.push(mk("retry text: attempt 2/5 with error 'timeout'", text === "Provider request failed — auto-retry 2/5 · timeout", JSON.stringify(text)));
+	out.push(mk("warning icon ⚠ present", (await row.$eval(".retry-icon", (e) => e.textContent)) === "⚠"));
+	const warnColor = await row.$eval(".retry-icon", (e) => getComputedStyle(e).color);
+	out.push(mk("warning styling: icon uses --pa-warn color", warnColor === "rgb(243, 188, 86)", `color=${warnColor}`));
+	// color-mix(60% transparent, 40% --pa-warn) may serialize as rgb() or color(srgb ...).
+	const border = await row.evaluate((e) => getComputedStyle(e).borderTopColor);
+	const warnTinted =
+		border.includes("243, 188, 86") ||
+		(() => {
+			const m = border.match(/color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)/);
+			return !!m && [243, 188, 86].every((v, i) => Math.abs(parseFloat(m[i + 1]) * 255 - v) < 1.5);
+		})();
+	out.push(mk("warning styling: row border is warn-tinted", warnTinted, `border=${border}`));
+	out.push(mk("not fatal styling", !(await row.evaluate((e) => e.classList.contains("fatal")))));
+	const inMessages = await row.evaluate((e) => !!e.closest(".messages") && e.parentElement.lastElementChild === e);
+	out.push(mk("row sits at the bottom of the .messages scroller", inMessages));
+	const live = await page.$eval(".live-label", (e) => e.textContent).catch(() => "");
+	out.push(mk("status strip shows retrying…", live === "retrying…", `live-label=${JSON.stringify(live)}`));
+	return out;
+}
+
+// ----------------------------------------------------------------
+// Mode registry
+// ----------------------------------------------------------------
+
+const MODES = {
+	chat: { file: "preview-chat.png", height: 760 },
+	welcome: { file: "preview-welcome.png", height: 560 },
+	modelmenu: { file: "preview-modelmenu.png", height: 560 },
+	history: { file: "preview-history.png", height: 560 },
+	attachmenu: { file: "preview-attachmenu.png", height: 480, verify: verifyAttachmenu },
+	modelmenu2: { file: "preview-modelmenu2.png", height: 660, verify: verifyModelmenu2 },
+	history2: { file: "preview-history2.png", height: 560, verify: verifyHistory2 },
+	markdownnote: { file: "preview-markdownnote.png", height: 420, verify: verifyMarkdownnote },
+	retry: { file: "preview-retry.png", height: 480, verify: verifyRetry },
+};
+
 const scenario = process.argv[2];
-for (const [mode, file, height] of scenario
-	? [[scenario, `preview-${scenario}.png`, scenario === "modelmenu" ? 560 : 760]]
-	: [
-			["chat", "preview-chat.png", 760],
-			["welcome", "preview-welcome.png", 560],
-			["modelmenu", "preview-modelmenu.png", 560],
-			["history", "preview-history.png", 560],
-		]) {
-	const page = await browser.newPage({ viewport: { width: 420, height } });
+if (scenario && !MODES[scenario]) {
+	console.error(`unknown mode "${scenario}". Known: ${Object.keys(MODES).join(", ")}`);
+	process.exit(1);
+}
+const entries = scenario ? [[scenario, MODES[scenario]]] : Object.entries(MODES);
+
+const browser = await chromium.launch();
+let failures = 0;
+for (const [mode, cfg] of entries) {
+	const page = await browser.newPage({ viewport: { width: 420, height: cfg.height } });
 	const errors = [];
 	page.on("pageerror", (e) => errors.push(String(e)));
 	await page.goto(`file://${process.cwd()}/media/preview.html?mode=${mode}`);
 	await page.waitForTimeout(700);
-	await page.screenshot({ path: `test/${file}` });
-	if (errors.length) console.log(`[${mode}] page errors:`, errors);
-	else console.log(`[${mode}] ok -> test/${file}`);
+	await page.screenshot({ path: `test/${cfg.file}` });
+	if (errors.length) {
+		failures += errors.length;
+		console.log(`[${mode}] PAGE ERRORS: ${errors.join("; ")}`);
+	} else {
+		console.log(`[${mode}] ok -> test/${cfg.file}`);
+	}
+	if (cfg.verify) {
+		for (const r of await cfg.verify(page)) {
+			if (!r.pass) failures++;
+			console.log(`  ${r.pass ? "PASS" : "FAIL"}  ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
+		}
+	}
 	await page.close();
 }
 await browser.close();
+process.exit(failures ? 1 : 0);

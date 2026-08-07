@@ -129,15 +129,22 @@ const scenarios = {
 		const steps = [];
 		await frame.locator(".rail-pill.model").click();
 		await page.waitForTimeout(500);
-		steps.push(ok("model menu items", (await frame.locator(".dropdown-item").count()) > 0));
+		const itemCount = await frame.locator(".dropdown-item").count();
+		steps.push(ok("model menu items", itemCount > 0, `${itemCount}`));
+		const sections = await frame.locator(".dropdown-section").allTextContents();
+		steps.push(ok("thinking section nested", sections.some((s) => s.includes("Thinking level")), sections.join("/") || "no sections"));
 		await frame.locator(".dropdown-star").first().click();
 		await page.waitForTimeout(400);
 		steps.push(ok("favorites section", (await frame.locator(".dropdown-section").allTextContents()).some((t) => t.includes("Favorites"))));
 		await page.keyboard.press("Escape");
 		await page.waitForTimeout(300);
-		await frame.locator(".rail-pill").filter({ hasText: "thinking" }).first().click();
+		// unified attach button opens menu with 4 items
+		await frame.locator(".composer-rail .icon-btn").first().click();
 		await page.waitForTimeout(400);
-		steps.push(ok("thinking levels", (await frame.locator(".dropdown-item").count()) >= 5));
+		const attachItems = [...new Set((await frame.locator(".dropdown-item").allTextContents()).map((t) => t.slice(0, 20)))];
+		steps.push(ok("attach menu items", attachItems.length === 4, attachItems.join("|")));
+		const imageItem = await frame.locator(".dropdown-item").filter({ hasText: /Image/ }).first().textContent().catch(() => "");
+		steps.push(ok("image attach gated", imageItem.includes("Image"), imageItem.slice(0, 60)));
 		await page.keyboard.press("Escape");
 
 		const ta = frame.locator(".composer-card textarea");
@@ -201,8 +208,8 @@ const scenarios = {
 		await ta.click();
 		await ta.fill("Count from 1 to 40 explaining each in one sentence. Use no tools.");
 		await page.keyboard.press("Enter");
-		await page.waitForTimeout(1500);
-		steps.push(ok("stop appears", await frame.locator(".send-btn.stop").isVisible().catch(() => false)));
+		const stopVisible = await frame.locator(".send-btn.stop").waitFor({ state: "visible", timeout: 20000 }).then(() => true).catch(() => false);
+		steps.push(ok("stop appears", stopVisible));
 		await frame.locator(".send-btn.stop").click();
 		await page.waitForTimeout(1500);
 		steps.push(ok("abort works", !(await frame.locator(".send-btn.stop").isVisible().catch(() => false))));
@@ -246,6 +253,16 @@ const server = http.createServer(async (req, res) => {
 				} catch {}
 			}
 			return send(200, { frames });
+		}
+		if (req.method === "GET" && url.pathname === "/eval") {
+			const expr = url.searchParams.get("expr") || "null";
+			if (!frame) return send(200, { value: null, error: "no frame" });
+			try {
+				const value = await frame.evaluate(expr);
+				return send(200, { value });
+			} catch (error) {
+				return send(200, { evalError: String(error) });
+			}
 		}
 		if (req.method === "GET" && url.pathname === "/state") {
 			if (!frame) return send(200, { frame: null });

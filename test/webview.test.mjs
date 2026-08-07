@@ -110,7 +110,8 @@ const dropdown = document.querySelector(".dropdown");
 check("model menu opens", !!dropdown);
 check("model menu has search", !!dropdown.querySelector(".dropdown-search"));
 check("favorites section present", [...document.querySelectorAll(".dropdown-section")].some((s) => s.textContent === "Favorites"));
-check("all model rows present", document.querySelectorAll(".dropdown-item").length === 3);
+check("model + nested thinking items present", document.querySelectorAll(".dropdown-item").length === 3 + 6,
+	`${document.querySelectorAll(".dropdown-item").length} items`);
 posted.length = 0;
 // toggle favorite on the gpt-5 row
 const gptRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("gpt-5"));
@@ -121,20 +122,32 @@ const glmRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.te
 glmRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("select posts setModel", posted.some((m) => m.type === "setModel" && m.modelId === "glm"));
 check("menu closed after select", !document.querySelector(".dropdown"));
-// non-reasoning model disables the thinking pill
+// non-reasoning model: model menu must not offer the Thinking section
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm", thinkingLevel: "off" } });
-check("thinking pill disabled for non-reasoning model", document.querySelector(".rail-pill.disabled-pill") !== null);
-
-// --- thinking menu ---
+modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check(
+	"no Thinking section for non-reasoning model",
+	![...document.querySelectorAll(".dropdown-section")].some((s) => s.textContent === "Thinking level"),
+);
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+// reasoning model: nested Thinking section with current level marked
 hostMessage({ type: "status", status: { ...baseStatus } });
-const thinkingBtn = [...document.querySelectorAll(".rail-pill.subtle")].find((b) => b.textContent.includes("thinking"));
-thinkingBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+hostMessage({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" }, status: baseStatus });
+modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const tDrop = document.querySelector(".dropdown");
-check("thinking menu opens", !!tDrop);
-check("thinking levels offered", tDrop.querySelectorAll(".dropdown-item").length === 6);
+check("thinking section nested in model menu", [...tDrop.querySelectorAll(".dropdown-section")].some((s) => s.textContent === "Thinking level"));
 posted.length = 0;
 [...tDrop.querySelectorAll(".dropdown-item")].find((r) => r.textContent.startsWith("high")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("select posts setThinkingLevel", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"));
+
+// --- unified attach menu (vision-gated image item on a text model) ---
+const attachBtn = [...document.querySelectorAll(".composer-rail .icon-btn")].find((b) => b.title.startsWith("Attach"));
+attachBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const attachMenu = document.querySelector(".dropdown");
+check("attach menu opens", !!attachMenu);
+const imageItem = [...attachMenu.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("Image"));
+check("image item disabled on text-only model", imageItem.className.includes("disabled"));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 
 // --- composer send ---
 posted.length = 0;
@@ -161,6 +174,93 @@ check("other session shows folder", [...document.querySelectorAll(".history-item
 posted.length = 0;
 document.querySelectorAll(".history-item")[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("resume switches session", posted.some((m) => m.type === "switchSession" && m.path === "/tmp/b.jsonl"));
+
+// --- paste image on a text-only model shows a composer hint ---
+// Current model is chutes/kimi with no "image" input modality (vision gate off).
+posted.length = 0;
+const pasteEvent = new window.Event("paste", { bubbles: true, cancelable: true });
+// happy-dom has no DataTransfer-backed ClipboardEvent; inject the shape onPaste reads.
+pasteEvent.clipboardData = { files: [{ type: "image/png", name: "shot.png" }] };
+textarea.dispatchEvent(pasteEvent);
+const pasteHint = document.querySelector(".composer-hint");
+check(
+	"paste image on text-only model shows hint",
+	!!pasteHint && pasteHint.classList.contains("visible") && pasteHint.textContent.includes("text-only"),
+	pasteHint?.textContent ?? "<no hint>",
+);
+check("paste did not post a prompt", !posted.some((m) => m.type === "prompt"));
+
+// --- send() with an attached image chip strips images and warns on a text-only model ---
+hostMessage({ type: "imagePicked", images: [{ data: "aGk=", mimeType: "image/png", name: "pic.png" }] });
+check("image chip rendered", document.querySelectorAll(".composer-chips .compose-chip.image").length === 1);
+posted.length = 0;
+textarea.value = "with image";
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const guardedPrompt = posted.find((m) => m.type === "prompt");
+check("send still posts prompt text", !!guardedPrompt && guardedPrompt.payload.text === "with image");
+check("images stripped on text-only send", !!guardedPrompt && guardedPrompt.payload.images.length === 0);
+check("send guard hint visible", pasteHint.classList.contains("visible") && pasteHint.textContent.includes("Dropped images"),
+	pasteHint.textContent);
+check("chips cleared after guarded send", document.querySelectorAll(".composer-chips .compose-chip").length === 0);
+check("optimistic bubble has no image strip", !document.querySelector(".bubble-images"));
+
+// --- @-mention chips in user bubbles ---
+hostMessage({
+	type: "snapshot",
+	messages: [
+		{ role: "user", content: "edit @src/a.ts now" },
+		{ role: "user", content: "mail name@domain.com or see https://x.io/@u/p end" },
+	],
+	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
+	status: baseStatus,
+});
+const chips = [...document.querySelectorAll(".mention-chip")];
+check("mention chip rendered for @path", chips.length === 1 && chips[0].textContent === "@src/a.ts", `${chips.length} chips`);
+check("email and URL do not become chips", document.querySelector(".messages").textContent.includes("name@domain.com"));
+posted.length = 0;
+chips[0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const openFileMsg = posted.find((m) => m.type === "openFile");
+check("chip click posts openFile", !!openFileMsg && openFileMsg.path === "src/a.ts", JSON.stringify(openFileMsg));
+
+// --- history delete: inline confirm posts deleteSession ---
+const historyBtnAgain = [...document.querySelectorAll(".icon-btn")].find((b) => b.title === "Sessions in this workspace");
+historyBtnAgain.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "sess-a", path: "/tmp/a.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "local chat", inWorkspace: true },
+		{ id: "sess-b", path: "/tmp/b.jsonl", cwd: "/other/proj", timestamp: new Date().toISOString(), firstPrompt: "work on proj", inWorkspace: false },
+	],
+});
+const delItem = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("local chat"));
+posted.length = 0;
+delItem.querySelector(".history-action").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("delete arms inline confirm", delItem.classList.contains("confirming"));
+const confirmBtn = delItem.querySelector(".history-action.destructive");
+check("confirm button labeled Delete", !!confirmBtn && confirmBtn.textContent.includes("Delete"));
+confirmBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const delMsg = posted.find((m) => m.type === "deleteSession");
+check(
+	"confirm posts deleteSession",
+	!!delMsg && delMsg.path === "/tmp/a.jsonl" && delMsg.sessionId === "sess-a",
+	JSON.stringify(delMsg),
+);
+check("confirm disarms item", !delItem.classList.contains("confirming"));
+check("no resume fired during delete", !posted.some((m) => m.type === "switchSession"));
+
+// --- history delete: cancel restores the item without posting ---
+const cancelItem = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("work on proj"));
+posted.length = 0;
+cancelItem.querySelector(".history-action").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("second item arms confirm", cancelItem.classList.contains("confirming"));
+const cancelBtn = [...cancelItem.querySelectorAll(".history-action")].find((b) => b.title === "Cancel");
+cancelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("cancel posts no deleteSession", !posted.some((m) => m.type === "deleteSession"));
+const restored = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("work on proj"));
+check(
+	"cancel restores item",
+	!!restored && restored !== cancelItem && !restored.classList.contains("confirming") && !!restored.querySelector(".history-action"),
+);
 
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

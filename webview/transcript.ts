@@ -318,6 +318,33 @@ export class Transcript {
 		}
 	}
 
+	private renderUserTextWithMentions(text: string): HTMLElement {
+		const container = el("div", "bubble-text");
+		// Chip only path-like mentions: must contain a "/" or look like a
+		// filename (single dotted extension, e.g. "src/a.ts", "README.md").
+		// Avoids chipping decorators/usernames (@Override, @pytest.mark.x, @user)
+		// and addresses (quotes pre-check keeps @corp.com out of "x"@example).
+		const mentionRe = /(^|[\s(`"'])@((?:[\w-]+\/)+[\w./-]*\w|[\w-]+\.[\w]{1,8})(?=$|[\s),.;:'"`]|$)/g;
+		let last = 0;
+		let match: RegExpExecArray | null;
+		while ((match = mentionRe.exec(text)) !== null) {
+			const start = match.index + match[1].length;
+			const path = match[2];
+			if (start > last) container.appendChild(document.createTextNode(text.slice(last, start)));
+			const chip = el("button", "mention-chip", `@${path}`);
+			chip.title = `Open ${path}`;
+			chip.addEventListener("click", (event) => {
+				event.stopPropagation();
+				this.deps.onOpenFile(path);
+			});
+			container.appendChild(chip);
+			last = start + path.length + 1;
+		}
+		if (last < text.length) container.appendChild(document.createTextNode(text.slice(last)));
+		if (last === 0) return container;
+		return container;
+	}
+
 	private buildUserRow(message: UserMessage): HTMLElement {
 		const row = el("div", "row row-user");
 		const plainText = this.userMessageText(message);
@@ -326,12 +353,12 @@ export class Transcript {
 		row.appendChild(actions);
 		const bubble = el("div", "bubble bubble-user");
 		if (typeof message.content === "string") {
-			bubble.appendChild(el("div", "bubble-text", message.content));
+			bubble.appendChild(this.renderUserTextWithMentions(message.content));
 		} else if (Array.isArray(message.content)) {
 			const textParts = message.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text);
 			const images = message.content.filter((p) => p.type === "image");
 			if (textParts.length > 0) {
-				bubble.appendChild(el("div", "bubble-text", textParts.join("\n").trim()));
+				bubble.appendChild(this.renderUserTextWithMentions(textParts.join("\n").trim()));
 			}
 			if (images.length > 0) {
 				const strip = el("div", "bubble-images");

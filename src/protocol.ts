@@ -113,6 +113,8 @@ export interface RpcModel {
 	name?: string;
 	contextWindow?: number;
 	reasoning?: boolean;
+	/** Input modalities, e.g. ["text"] or ["text","image"] (vision) */
+	input?: string[];
 }
 
 export interface RpcSessionState {
@@ -201,6 +203,7 @@ export type WebviewToHost =
 	| { type: "newSession" }
 	| { type: "compact"; instructions?: string }
 	| { type: "exportHtml" }
+	| { type: "exportChat" }
 	| { type: "restart" }
 	| { type: "requestState" }
 	| { type: "requestModels" }
@@ -210,6 +213,7 @@ export type WebviewToHost =
 	| { type: "setThinkingLevel"; level: string }
 	| { type: "switchSession"; path: string; sessionId?: string }
 	| { type: "stopObserving" }
+	| { type: "deleteSession"; path: string; sessionId: string }
 	| { type: "searchFiles"; query: string; requestId: number }
 	| { type: "openFile"; path: string; startLine?: number; endLine?: number }
 	| { type: "openDiff"; path: string }
