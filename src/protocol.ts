@@ -316,3 +316,37 @@ export type HostToWebview =
 	| { type: "observedClosed"; sessionId: string }
 	| { type: "editorText"; text: string }
 	| { type: "focusComposer" };
+
+// ---------------------------------------------------------------------------
+// Per-thread diff panel (host -> webview)
+// ---------------------------------------------------------------------------
+
+/** How the agent most recently changed the file: content tool call or shell. */
+export type ThreadDiffSource = "edit" | "write" | "shell";
+
+/** One stitched change block per tool event on a file. */
+export interface ThreadDiffHunk {
+	/** Removed lines (rendered with a red "-" gutter). */
+	removed: string[];
+	/** Added lines (rendered with a green "+" gutter). */
+	added: string[];
+	/** Optional gutter note rendered after the hunk (e.g. line-cap truncation). */
+	note?: string;
+}
+
+export interface ThreadDiffFile {
+	/** Workspace-relative path when resolvable, absolute otherwise. */
+	path: string;
+	/** Source of the most recent recorded change. */
+	viaSource: ThreadDiffSource;
+	/** Stitched change blocks, one per tool event, in event order. */
+	hunks: ThreadDiffHunk[];
+	/** Shell commands that referenced this path (bash tool calls carry no content). */
+	shellHints?: string[];
+}
+
+/** Cumulative per-thread diff state; `files` empty hides the panel. */
+export interface ThreadDiffsMessage {
+	type: "threadDiffs";
+	files: ThreadDiffFile[];
+}

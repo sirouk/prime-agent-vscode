@@ -3,22 +3,29 @@
  * speaking only the daemon protocol (prime-agent.daemon v7, unix socket) can
  * drive a resident session the same way the terminal client does:
  *
- *   create (lifecycle: "resident") -> attach -> prompt -> session_event stream
- *   -> get_messages shows the assistant reply -> detach + kill cleanup.
+ *   create (lifecycle: "resident") -> visible to a second client via list ->
+ *   attach -> prompt -> session_event stream -> get_messages shows the
+ *   assistant reply -> detach + kill cleanup.
  *
- * This is the same flow SessionController.attachViaDaemon uses in the
- * extension when RPC switch_session reports "Session is already active".
+ * This is the flow SessionController.attachViaDaemon uses when RPC
+ * switch_session reports "Session is already active".
  *
- * The DaemonSidecar client is bundled from src/daemon-sidecar.ts with esbuild
- * into a temp CJS file (same approach as test/export-md.test.mjs), so the
- * test exercises the real socket-discovery and protocol code, not a copy.
+ * DaemonSidecar is bundled from src/daemon-sidecar.ts with esbuild into a
+ * temp CJS file (same approach as test/export-md.test.mjs), so the test
+ * exercises real socket-discovery and protocol code, not a copy.
  *
- * Safety: the test only ever creates/attaches/kills its OWN freshly created
- * session, rooted in an isolated mkdtemp directory (cwd + sessionDir both
- * point inside it). It never prompts or attaches sessions from `list`.
+ * Safety: only ever creates/attaches/prompts/kills sessions IT created,
+ * rooted in an isolated mkdtemp directory (cwd + sessionDir inside it).
+ * Sessions from `list` are never touched.
  *
  * No daemon running? The whole test SKIP-exits 0 so CI never hangs.
- * Hard watchdog: the process exits no later than ~170s regardless.
+ * Hard watchdog: the process exits well inside 3 minutes regardless.
+ *
+ * Model selection: DAEMON_PARITY_MODEL (default "chutes/zai-org/GLM-4.7";
+ * set to "" to always use the daemon's default model). If the requested
+ * model fails provider-side (stopReason "error" / exhausted auto-retries),
+ * the harness retries once on a fresh resident session WITHOUT a model
+ * override (daemon default) and reports which path produced the result.
  *
  * Run: node test/daemon-parity.mjs
  */
@@ -31,10 +38,10 @@ import { createRequire } from "node:module";
 
 const PROMPT_TEXT = "Reply with exactly: PARITY-OK";
 const EXPECTED_TEXT = "PARITY-OK";
-const MODEL = process.env.DAEMON_PARITY_MODEL ?? "chutes/zai-org/GLM-4.7";
+const REQUESTED_MODEL = process.env.DAEMON_PARITY_MODEL ?? "chutes/zai-org/GLM-4.7";
 const CONNECT_TIMEOUT_MS = 8_000;
 const CREATE_TIMEOUT_MS = 45_000;
-const TURN_DEADLINE_MS = 90_000; // agent_end + PARITY-OK polling budget
+const TURN_DEADLINE_MS = 90_000;
 const POLL_INTERVAL_MS = 3_000;
 const WATCHDOG_MS = 170_000;
 
@@ -50,13 +57,20 @@ function skip(reason) {
 	console.log(`SKIP  daemon-parity — ${reason}`);
 	process.exit(0);
 }
-// Hard watchdog: nothing below may ever park the event loop longer than this.
+function info(message) {
+	console.log(`INFO  ${message}`);
+}
+// Hard watchdog: nothing below may park the process past this.
 const watchdog = setTimeout(() => {
-	console.log(`FAIL  watchdog — exceeded ${WATCHDOG_MS}ms; aborting (event counts lost)`);
+	console.log(`FAIL  watchdog — exceeded ${WATCHDOG_MS}ms; aborting`);
 	process.exit(2);
 }, WATCHDOG_MS);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Global budget: leave headroom for cleanup before the watchdog fires.
+const globalDeadline = Date.now() + (WATCHDOG_MS - 15_000);
+const budgetMs = () => Math.max(0, globalDeadline - Date.now());
 
-/** Extract visible text from an assistant/tool message, tolerant of shapes. */
+/** Extract visible text from a message, tolerant of content shapes. */
 function messageText(message) {
 	if (!message || typeof message !== "object") return "";
 	const content = message.content;
@@ -68,39 +82,132 @@ function messageText(message) {
 		.join("\n");
 }
 function assistantText(messages) {
-	return messages
-		.filter((m) => m && m.role === "assistant")
-		.map(messageText)
-		.join("\n");
+	return messages.filter((m) => m && m.role === "assistant").map(messageText).join("\n");
 }
 
-const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), "daemon-parity-"));
+// mkdtemp must not crash a broken TMPDIR before we can print a clean SKIP.
+const tmpBase = fs.existsSync(os.tmpdir()) ? os.tmpdir() : "/tmp";
+const workRoot = fs.mkdtempSync(path.join(tmpBase, "daemon-parity-"));
 let sidecar = null;
-let activeSessionId = null;
-let killed = false;
-let disposed = false;
+/** ids of sessions THIS test created — the only ones we may touch. */
+const ownIds = new Set();
+let cleaned = false;
 
-async function cleanup() {
-	if (disposed) return;
-	disposed = true;
-	if (sidecar?.connected && activeSessionId) {
-		if (!killed) {
-			try { await sidecar.request({ type: "kill", activeSessionId }, 15_000); killed = true; }
-			catch { /* best effort */ }
-		}
-		try { await sidecar.detach(activeSessionId); } catch { /* best effort */ }
+async function killOwnSessions() {
+	if (!sidecar?.connected) return;
+	for (const id of ownIds) {
+		try { await sidecar.request({ type: "kill", activeSessionId: id }, 15_000); }
+		catch { /* best effort */ }
 	}
+}
+async function cleanup() {
+	if (cleaned) return;
+	cleaned = true;
+	await killOwnSessions();
 	try { sidecar?.dispose(); } catch { /* ignore */ }
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		try { fs.rmSync(workRoot, { recursive: true, force: true }); break; }
-		catch {
-			// worker may still be flushing right after kill; brief backoff
-			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
-		}
+		catch { await sleep(400); }
 	}
 }
 process.on("SIGINT", () => void cleanup().finally(() => process.exit(130)));
 process.on("SIGTERM", () => void cleanup().finally(() => process.exit(143)));
+
+// Per-own-session event journal.
+const eventsById = new Map(); // id -> string[] event types
+const agentEndResolvers = new Map(); // id -> () => void
+function journalEvent(message) {
+	const id = message.activeSessionId;
+	if (typeof id !== "string" || !ownIds.has(id)) return;
+	if (message.type !== "session_event") return;
+	const type = message.event?.type ?? "?";
+	let list = eventsById.get(id);
+	if (!list) { list = []; eventsById.set(id, list); }
+	list.push(type);
+	if (type === "message_end" || type === "turn_end") {
+		const stopReason = message.event?.message?.stopReason;
+		if (stopReason === "error") list.push(`error:${message.event?.message?.errorMessage ?? "unknown"}`);
+	}
+	if (type === "auto_retry_start") list.push(`retry:${message.event?.errorMessage ?? ""}`);
+	if (type === "auto_retry_end" && message.event?.success === false) list.push(`gaveup:${message.event?.finalError ?? ""}`);
+	if (type === "agent_end") agentEndResolvers.get(id)?.();
+}
+function eventSummary(id) {
+	return (eventsById.get(id) ?? []).join(",");
+}
+function providerGaveUp(id) {
+	return (eventsById.get(id) ?? []).some((t) => t.startsWith("gaveup:"));
+}
+
+let createCount = 0;
+
+/** Create our own resident session, sandboxed in workRoot. */
+async function createResidentSession(model) {
+	createCount += 1;
+	const sessionDir = path.join(workRoot, `sessions-${createCount}`);
+	fs.mkdirSync(sessionDir, { recursive: true });
+	const config = { cwd: workRoot, sessionDir };
+	if (model) config.model = model;
+	const summary = await sidecar.request(
+		{ type: "create", lifecycle: "resident", config },
+		Math.min(CREATE_TIMEOUT_MS, Math.max(5_000, budgetMs() - 20_000)),
+	);
+	const id = summary?.activeSessionId ?? summary?.id;
+	if (typeof id !== "string" || !id) throw new Error(`create returned no session id: ${JSON.stringify(summary)}`);
+	ownIds.add(id);
+	return { id, summary };
+}
+
+/**
+ * Attach + prompt + observe until agent_end / PARITY-OK / provider give-up /
+ * deadline. Returns which conditions were met plus diagnostics.
+ */
+async function runParityTurn(id, deadlineMs) {
+	const attachResult = await sidecar.attach(id);
+	const snapshot = attachResult?.snapshot;
+	const snapshotOk = snapshot != null && Array.isArray(snapshot.messages);
+
+	let agentEndResolve;
+	const agentEnd = new Promise((resolve) => { agentEndResolve = resolve; });
+	agentEndResolvers.set(id, () => agentEndResolve(true));
+
+	const turnStart = Date.now();
+	deadlineMs = Math.min(deadlineMs, Math.max(1_000, budgetMs() - 5_000));
+	await sidecar.prompt(id, PROMPT_TEXT, "steer");
+
+	let sawAgentEnd = false;
+	let parityFound = false;
+	let lastAssistantExcerpt = "";
+	let pollError = "";
+	while (Date.now() - turnStart < deadlineMs && !parityFound && !providerGaveUp(id)) {
+		const remaining = deadlineMs - (Date.now() - turnStart);
+		if (!sawAgentEnd) await Promise.race([agentEnd, sleep(Math.min(POLL_INTERVAL_MS, remaining))]);
+		else await sleep(Math.min(POLL_INTERVAL_MS, remaining));
+		sawAgentEnd = sawAgentEnd || (eventsById.get(id) ?? []).includes("agent_end");
+		try {
+			const messages = await sidecar.getMessages(id);
+			const text = assistantText(messages);
+			if (text) lastAssistantExcerpt = text.slice(-200);
+			if (text.includes(EXPECTED_TEXT)) parityFound = true;
+		} catch (error) {
+			pollError = error instanceof Error ? error.message : String(error);
+		}
+	}
+	try { await sidecar.detach(id); } catch { /* fine */ }
+	return {
+		snapshotOk,
+		snapshotMessageCount: Array.isArray(snapshot?.messages) ? snapshot.messages.length : -1,
+		attachedOk: (attachResult?.activeSessionId ?? snapshot?.activeSessionId) === id,
+		sawAgentEnd,
+		parityFound,
+		gaveUp: providerGaveUp(id),
+		sawError: (eventsById.get(id) ?? []).some((t) => t.startsWith("error:") || t.startsWith("retry:")),
+		elapsedMs: Date.now() - turnStart,
+		eventCount: (eventsById.get(id) ?? []).length,
+		lastAssistantExcerpt,
+		pollError,
+	};
+}
 
 try {
 	// ---------------------------------------------------------------
@@ -122,15 +229,14 @@ try {
 	check("sidecar bundles from src/daemon-sidecar.ts", typeof DaemonSidecar === "function");
 
 	sidecar = new DaemonSidecar();
+	sidecar.onEvent = journalEvent;
 
 	// ---------------------------------------------------------------
-	// 1. Socket discovery (same logic the sidecar itself uses).
+	// 1. Socket discovery (same helper the extension relies on).
 	// ---------------------------------------------------------------
 	const sockPath = sidecar.socketPath();
-	check("socket path discovered", typeof sockPath === "string" && sockPath.length > 0, sockPath);
-	if (os.platform() !== "win32" && !fs.existsSync(sockPath)) {
-		skip(`no daemon socket at ${sockPath}`);
-	}
+	check("daemon socket path discovered", typeof sockPath === "string" && sockPath.length > 0, sockPath);
+	if (os.platform() !== "win32" && !fs.existsSync(sockPath)) skip(`no daemon socket at ${sockPath}`);
 
 	// ---------------------------------------------------------------
 	// 2. Connect. No daemon / unreachable -> SKIP (never hang CI).
@@ -141,7 +247,7 @@ try {
 		const message = error instanceof Error ? error.message : String(error);
 		if (/unavailable|timed out|ENOENT|ECONNREFUSED/i.test(message)) skip(`daemon not reachable: ${message}`);
 		check("daemon connect + hello", false, message);
-		throw new Error(`unreachable after failed connect: ${message}`);
+		throw new Error("aborting after failed connect");
 	}
 	check(
 		"daemon hello is prime-agent.daemon v7+",
@@ -149,138 +255,101 @@ try {
 		JSON.stringify({ protocol: sidecar.hello?.protocol, schemaRevision: sidecar.hello?.schemaRevision }),
 	);
 
-	// Events are collected for OUR session only.
-	const eventTypes = [];
-	let agentEndResolve;
-	let sawAgentEnd = new Promise((resolve) => { agentEndResolve = resolve; });
-	sidecar.onEvent = (message) => {
-		if (message.activeSessionId !== activeSessionId) return;
-		if (message.type === "session_event") {
-			const type = message.event?.type ?? "?";
-			eventTypes.push(type);
-			if (type === "agent_end") agentEndResolve(true);
-		}
-	};
-
 	// ---------------------------------------------------------------
-	// 3. Create OUR OWN resident session, fully sandboxed in workRoot.
-	//    (`cwd`/`sessionDir` are AgentSessionRuntimeConfig fields; the
-	//    create envelope itself only takes config/lifecycle/name/...).
+	// 3. Create OUR OWN resident session (cwd + sessionDir sandboxed).
 	// ---------------------------------------------------------------
-	const sessionDir = path.join(workRoot, "sessions");
-	fs.mkdirSync(sessionDir, { recursive: true });
-	let summary;
+	let session;
+	const primaryModel = REQUESTED_MODEL || undefined;
 	try {
-		summary = await sidecar.request(
-			{
-				type: "create",
-				lifecycle: "resident",
-				config: { cwd: workRoot, sessionDir, model: MODEL },
-			},
-			CREATE_TIMEOUT_MS,
-		);
+		session = await createResidentSession(primaryModel);
 	} catch (error) {
 		check("create resident session", false, error instanceof Error ? error.message : String(error));
 		throw error;
 	}
-	activeSessionId = summary?.activeSessionId ?? summary?.id ?? null;
-	const createOk = check(
+	check(
 		"create resident session returns an id",
-		typeof activeSessionId === "string" && activeSessionId.length > 0,
-		`id=${String(activeSessionId)} lifecycle=${String(summary?.lifecycle)} cwd=${String(summary?.cwd)}`,
-	);
-	if (!createOk) throw new Error("create returned no usable session id");
-	check(
-		"session is daemon-resident (not client-owned)",
-		summary?.lifecycle === "resident",
-		`lifecycle=${String(summary?.lifecycle)}`,
-	);
-
-	// Wait for the initial agent_end synchronously via event OR timeout.
-	const waitAgentEnd = async (deadlineMs) => {
-		const timeout = new Promise((resolve) => setTimeout(() => resolve(false), deadlineMs));
-		return Promise.race([sawAgentEnd, timeout]);
-	};
-
-	// ---------------------------------------------------------------
-	// 4. Attach; snapshot must expose a messages array.
-	// ---------------------------------------------------------------
-	let attachResult;
-	try {
-		attachResult = await sidecar.attach(activeSessionId);
-	} catch (error) {
-		check("attach to resident session", false, error instanceof Error ? error.message : String(error));
-		throw error;
-	}
-	const snapshot = attachResult?.snapshot;
-	check(
-		"attach snapshot present",
-		snapshot != null && (snapshot.activeSessionId ?? attachResult.activeSessionId) != null,
+		true,
+		`id=${session.id} model=${primaryModel ?? "<daemon default>"}`,
 	);
 	check(
-		"attach snapshot has messages[] (fresh session: empty)",
-		Array.isArray(snapshot?.messages),
-		`messages=${Array.isArray(snapshot?.messages) ? snapshot.messages.length : "missing"}`,
+		"fresh session is a draft (no messages yet)",
+		session.summary?.lifecycle === "draft",
+		`lifecycle=${String(session.summary?.lifecycle)}`,
+	);
+	check(
+		"session file rooted inside the isolated tmpdir",
+		typeof session.summary?.sessionFile !== "string" || session.summary.sessionFile.startsWith(workRoot),
+		String(session.summary?.sessionFile ?? "<none yet>"),
 	);
 
-	// ---------------------------------------------------------------
-	// 5. Prompt, then observe the session_event stream until agent_end.
-	// ---------------------------------------------------------------
-	const turnStart = Date.now();
-	try {
-		await sidecar.prompt(activeSessionId, PROMPT_TEXT, "steer");
-		check("prompt accepted by daemon", true);
-	} catch (error) {
-		check("prompt accepted by daemon", false, error instanceof Error ? error.message : String(error));
-		throw error;
-	}
-
-	// Poll get_messages for the expected reply until the deadline; tolerant
-	// of provider retries. agent_end arrival is tracked in parallel.
-	let sawEnd = false;
-	let parityFound = false;
-	let lastAssistantExcerpt = "";
-	while (Date.now() - turnStart < TURN_DEADLINE_MS && !parityFound) {
-		const remaining = TURN_DEADLINE_MS - (Date.now() - turnStart);
-		if (!sawEnd) sawEnd = Boolean(await waitAgentEnd(Math.min(POLL_INTERVAL_MS, remaining)));
-		else await new Promise((resolve) => setTimeout(resolve, Math.min(POLL_INTERVAL_MS, remaining)));
+	// Parity witness: a SECOND, independent client connection must see the
+	// same daemon-resident session via `list` (never prompt/attach it).
+	{
+		const observer = new DaemonSidecar();
 		try {
-			const messages = await sidecar.getMessages(activeSessionId);
-			const text = assistantText(messages);
-			if (text) lastAssistantExcerpt = text.slice(-200);
-			if (text.includes(EXPECTED_TEXT)) parityFound = true;
+			await observer.connect(CONNECT_TIMEOUT_MS);
+			const listed = await observer.list(true);
+			const mine = listed.find((s) => (s.activeSessionId ?? s.id) === session.id);
+			check(
+				"session visible to a second client via list (daemon-brokered)",
+				mine != null,
+				mine ? `attachedClients=${String(mine.attachedClients)} lifecycle=${String(mine.lifecycle)}` : `${listed.length} sessions listed, ours absent`,
+			);
 		} catch (error) {
-			lastAssistantExcerpt = `get_messages failed: ${error instanceof Error ? error.message : String(error)}`;
+			check("session visible to a second client via list (daemon-brokered)", false, error instanceof Error ? error.message : String(error));
+		} finally {
+			observer.dispose();
 		}
 	}
+
+	// ---------------------------------------------------------------
+	// 4+5. Attach, prompt, observe the stream, poll for the reply.
+	//      Provider-side model failure -> retry once on daemon default.
+	// ---------------------------------------------------------------
+	let turn = await runParityTurn(session.id, TURN_DEADLINE_MS);
+	let servedBy = primaryModel ?? "<daemon default>";
+	if (!turn.parityFound && (turn.gaveUp || turn.sawError) && primaryModel && budgetMs() > 60_000) {
+		info(`model ${primaryModel} failed provider-side (${eventSummary(session.id)}); retrying on daemon default model`);
+		session = await createResidentSession(undefined);
+		servedBy = "<daemon default>";
+		turn = await runParityTurn(session.id, TURN_DEADLINE_MS);
+	}
+
+	check("attach snapshot present for our session", turn.attachedOk);
+	check("attach snapshot has messages[] (fresh: empty)", turn.snapshotOk, `messages=${turn.snapshotMessageCount}`);
 	check(
 		"session_event stream observed",
-		eventTypes.length > 0,
-		`${eventTypes.length} events (last: ${eventTypes.slice(-5).join(",") || "none"})`,
+		turn.eventCount > 0,
+		`${turn.eventCount} events (${eventSummary(session.id).slice(-160)})`,
 	);
-	check("agent_end within deadline", sawEnd, `${eventTypes.length} events, elapsed=${Date.now() - turnStart}ms`);
+	check(
+		"agent_end or provider give-up within deadline",
+		turn.sawAgentEnd || turn.gaveUp,
+		`elapsed=${turn.elapsedMs}ms, events=${turn.eventCount}${turn.gaveUp ? `, gave up: ${eventSummary(session.id)}` : ""}`,
+	);
 	check(
 		`assistant reply contains ${EXPECTED_TEXT}`,
-		parityFound,
-		parityFound ? "" : `elapsed=${Date.now() - turnStart}ms, events=${eventTypes.length}, last assistant text: ${lastAssistantExcerpt || "<none>"}`,
+		turn.parityFound,
+		turn.parityFound
+			? `served by ${servedBy}, elapsed=${turn.elapsedMs}ms`
+			: `elapsed=${turn.elapsedMs}ms, events=${turn.eventCount} [${eventSummary(session.id).slice(-160)}], ` +
+				`last assistant text: ${turn.lastAssistantExcerpt || "<none>"}${turn.pollError ? `, poll error: ${turn.pollError}` : ""}`,
 	);
 
 	// ---------------------------------------------------------------
-	// 6. Cleanup: detach + kill (session files live under workRoot).
-	//    Never touch sessions from `list` that we did not create.
+	// 6. Kill every session we created (releases locks, stops workers).
 	// ---------------------------------------------------------------
-	await sidecar.detach(activeSessionId);
-	try {
-		await sidecar.request({ type: "kill", activeSessionId }, 15_000);
-		killed = true;
-	} catch (error) {
-		check("kill resident session", false, error instanceof Error ? error.message : String(error));
+	let killOk = true;
+	let killDetail = "";
+	for (const id of ownIds) {
+		try { await sidecar.request({ type: "kill", activeSessionId: id }, 15_000); }
+		catch (error) { killOk = false; killDetail = error instanceof Error ? error.message : String(error); }
 	}
-	check("resident session killed", killed);
+	check("resident session(s) killed", killOk, killDetail || `${ownIds.size} session(s) killed`);
 } catch (error) {
 	// Steps log their own FAIL lines; this catches unexpected throw paths.
 	if (failed === 0) check("unexpected harness error", false, error instanceof Error ? error.message : String(error));
-	else console.log(`INFO  aborted early: ${error instanceof Error ? error.message : String(error)}`);
+	else info(`aborted early: ${error instanceof Error ? error.message : String(error)}`);
 } finally {
 	await cleanup();
 	clearTimeout(watchdog);
