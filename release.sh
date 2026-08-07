@@ -158,23 +158,32 @@ gate_remote_sync() {
     fi
 }
 
-gate_version_consistency() {
+gate_tag_conformity() {
     local chosen="$1"
     local pkg_version section
     pkg_version="$(node -p 'require("./package.json").version' 2>/dev/null || true)"
     if [ -z "$pkg_version" ]; then fail "could not read package.json version"; fi
+    if [ "$pkg_version" != "${chosen#v}" ] && [ "${ALLOW_VERSION_BUMP:-1}" != "1" ]; then
+        fail "package.json version ($pkg_version) does not match the release tag ($chosen); bump it first"
+    fi
+    section="$(grep -cE "^## \[${chosen#v}\]" CHANGELOG.md 2>/dev/null || echo 0)"
+    if [ "$section" = "0" ] && ! grep -qE '^## \[Unreleased\]' CHANGELOG.md; then
+        fail "CHANGELOG.md has no [${chosen#v}] section and no [Unreleased] one either; write entries first"
+    fi
+}
+
+apply_release_changes() {
+    local chosen="$1"
+    local pkg_version section
+    pkg_version="$(node -p 'require("./package.json").version' 2>/dev/null || true)"
     if [ "$pkg_version" != "${chosen#v}" ]; then
-        if [ "${ALLOW_VERSION_BUMP:-1}" = "1" ]; then
-            log "bumping package.json version $pkg_version -> ${chosen#v} (release commit will include it)"
-            node -e "
+        log "bumping package.json version $pkg_version -> ${chosen#v}"
+        node -e "
 const fs = require('fs');
 const pj = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 pj.version = '${chosen#v}';
 fs.writeFileSync('package.json', JSON.stringify(pj, null, 2) + '\n');
 "
-        else
-            fail "package.json version ($pkg_version) does not match the release tag ($chosen); bump it first"
-        fi
     fi
     section="$(grep -cE "^## \[${chosen#v}\]" CHANGELOG.md 2>/dev/null || echo 0)"
     if [ "$section" = "0" ]; then
@@ -188,12 +197,9 @@ const out = src.replace(/## \[Unreleased\]([\s\S]*?)(?=^## \[|$)/m, (m, body) =>
 if (out === src) process.exit(2);
 fs.writeFileSync('CHANGELOG.md', out);
 " || fail "could not rewrite CHANGELOG.md for [${chosen#v}]"
-        else
-            fail "CHANGELOG.md has no [${chosen#v}] section and no [Unreleased] entries to fold in; write the entries first"
         fi
     fi
 }
-
 gate_tests() {
     log "running the full verification battery…"
     local failures=0
@@ -279,8 +285,10 @@ if tag_exists "$chosen_tag" "$git_remote"; then
     fail "tag already exists: $chosen_tag"
 fi
 
-gate_version_consistency "$chosen_tag"
+gate_tag_conformity "$chosen_tag"
 gate_tests
+
+apply_release_changes "$chosen_tag"
 
 # ---- package the vsix ----
 log "packaging…"
@@ -314,7 +322,7 @@ if ! confirm "Commit $chosen_tag, tag it, and publish a GitHub release?"; then
     fail "release cancelled"
 fi
 
-git add package.json CHANGELOG.md
+git add package.json CHANGELOG.md $(git ls-files --modified test/preview-*.png test/smoke.mjs test/smoke.mjs.map 2>/dev/null || true)
 git commit -m "$commit_title" >/dev/null || fail "release commit failed"
 git tag -a "$chosen_tag" -m "$commit_title"
 
