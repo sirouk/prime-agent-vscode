@@ -28,9 +28,15 @@ app.classList.add("chat-root");
 // ---------------------------------------------------------------------------
 
 const topbar = el("div", "topbar");
-const brand = el("div", "brand");
+const brand = el("div", "brand") as HTMLElement & { role?: string };
+brand.tabIndex = 0;
+brand.title = "Prime Agent — by Prime Intellect";
 brand.appendChild(butterfly(20));
 brand.appendChild(el("span", "brand-name", "Prime Agent"));
+brand.addEventListener("click", () => post({ type: "openExternal", url: "https://www.primeintellect.ai/blog/prime-agent#article-top" }));
+brand.addEventListener("keydown", (event) => {
+	if (event.key === "Enter" || event.key === " ") post({ type: "openExternal", url: "https://www.primeintellect.ai/blog/prime-agent#article-top" });
+});
 const sessionTitle = el("span", "session-title", "");
 topbar.append(brand, sessionTitle, el("span", "spacer"));
 
@@ -40,9 +46,10 @@ const menuBtn = iconButton("kebab", "Session actions", 16);
 topbar.append(newChatBtn, historyBtn, menuBtn);
 
 const menu = el("div", "menu");
-function menuItem(label: string, iconName: Parameters<typeof icon>[0], action: () => void): HTMLButtonElement {
+function menuItem(label: string, iconName: Parameters<typeof icon>[0], action: () => void, title?: string): HTMLButtonElement {
 	const item = document.createElement("button");
 	item.className = "menu-item";
+	if (title) item.title = title;
 	item.appendChild(icon(iconName, 13));
 	item.appendChild(el("span", "", label));
 	item.addEventListener("click", () => {
@@ -51,13 +58,20 @@ function menuItem(label: string, iconName: Parameters<typeof icon>[0], action: (
 	});
 	return item;
 }
+function menuSeparator(): HTMLElement {
+	const sep = el("div", "menu-sep");
+	sep.setAttribute("role", "separator");
+	return sep;
+}
 menu.append(
-	menuItem("Compact context — runs automatically when context fills; run it now?", "compact", () => post({ type: "compact" })),
+	menuItem("Compact context", "compact", () => post({ type: "compact" }), "Runs automatically when the context window fills up; run it now"),
 	menuItem("Export chat…", "export", () => post({ type: "exportChat" })),
 	menuItem("Restart agent process", "refresh", () => {
 		transcript.renderSnapshot([]);
 		post({ type: "restart" });
 	}),
+	menuSeparator(),
+	menuItem("Visit Prime Intellect", "spark", () => post({ type: "openExternal", url: "https://app.primeintellect.ai" }), "Prime Intellect dashboard — app.primeintellect.ai"),
 );
 menuBtn.addEventListener("click", (event) => {
 	event.stopPropagation();

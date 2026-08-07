@@ -426,7 +426,7 @@ export class Transcript {
 		// filename (single dotted extension, e.g. "src/a.ts", "README.md").
 		// Avoids chipping decorators/usernames (@Override, @pytest.mark.x, @user)
 		// and addresses (quotes pre-check keeps @corp.com out of "x"@example).
-		const mentionRe = /(^|[\s(`"'])@((?:[\w-]+\/)+[\w./-]*\w|[\w-]+\.[\w]{1,8})(?=$|[\s),.;:'"`]|$)/g;
+		const mentionRe = /(^|[\s(`"'])@((?:[\w-]+\/)+(?:[\w./-]*\w|)|[\w-]+\.[\w]{1,8})(?=$|[\s),.;:'"`\/]|$)/g;
 		let last = 0;
 		let match: RegExpExecArray | null;
 		while ((match = mentionRe.exec(text)) !== null) {
@@ -622,6 +622,7 @@ export class Transcript {
 		}
 		try {
 			const json = JSON.stringify(args);
+			if (!json || json === "{}") return "";
 			return json.length > 140 ? `${json.slice(0, 140)}…` : json;
 		} catch {
 			return "";

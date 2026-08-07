@@ -247,6 +247,47 @@ check("flyout switches to override state", flyout.querySelector(".threshold-titl
 flyout.closest(".context-meter")?.classList.remove("visible");
 document.body.click();
 
+// --- inline mentions: mirror styles typed tokens; folders accepted with trailing slash ---
+hostMessage({ type: "fileSearchResults", requestId: 0, files: [] }); // no-op staleness guard
+textarea.value = "";
+textarea.dispatchEvent(new window.InputEvent("input", { bubbles: true }));
+// typed token styles via mirror (mirror replaces textarea's visible text)
+textarea.value = "see @media/main.css and @webview/ please";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+const mms = document.querySelectorAll(".composer-mirror .mm");
+check("typed mentions styled in mirror", mms.length === 2 && mms[0].textContent === "@media/main.css" && mms[1].textContent === "@webview/");
+check("folder token styles with trailing slash", [...mms].some((m) => m.textContent.endsWith("/")));
+// typed text stays intact for send
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const sentPrompt = posted.find((m) => m.type === "prompt");
+check("send keeps inline @text intact", !!sentPrompt && sentPrompt.payload.text.includes("@media/main.css") && sentPrompt.payload.text.includes("@webview/"));
+
+// folder via the autocomplete: dir row gets trailing slash + dir class
+textarea.value = "@web";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+const req2 = posted.filter((m) => m.type === "searchFiles").at(-1);
+check("mention query posts searchFiles", !!req2 && req2.query === "web");
+posted.length = 0;
+hostMessage({
+	type: "fileSearchResults",
+	requestId: req2.requestId,
+	files: [
+		{ path: "webview", isDir: true },
+		{ path: "webview/main.ts", isDir: false },
+	],
+});
+const dirRow = [...document.querySelectorAll(".ac-item")].find((r) => r.textContent.includes("webview/"));
+check("folder row shows trailing slash + dir class", !!dirRow && dirRow.classList.contains("dir") && dirRow.querySelector(".ac-label").textContent === "webview/");
+posted.length = 0;
+dirRow.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true }));
+check("folder accepted with trailing slash", textarea.value.includes("@webview/"));
+check("mirror styles folder token", [...document.querySelectorAll(".composer-mirror .mm")].some((m) => m.textContent === "@webview/"));
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const prompt2 = posted.find((m) => m.type === "prompt");
+check("folder mention sent inline", !!prompt2 && prompt2.payload.text.includes("@webview/"));
+
 // --- paste image on a text-only model shows a composer hint ---
 // Current model is chutes/kimi with no "image" input modality (vision gate off).
 posted.length = 0;

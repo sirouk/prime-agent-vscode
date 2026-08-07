@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+- Terminal-session parity: sessions live in a terminal attach through the daemon sidecar (full writer, not just observer).
+- Subagents strip above the composer: lists active/finished subagents, browse into them, back-to-parent.
+- Thread diff panel: expandable hunks from edit/write/bash during this thread, per file, above the composer.
+- @-mentions are inline-styled in the composer (files AND folders with trailing `/`), chips in transcripts, folders reveal in Explorer.
+- Per-model brain popout for thinking levels; per-reply / per-thinking / per-tool copy buttons; fork from user messages.
+- Auto-compact threshold override per session behind the context meter's hover gear; sticky composer drafts; scroll-lock escape with jump-to-latest; selection preserved across collapse; boot splash during connect; stateful history with search; send gated to content.
+
 ## [0.0.1]
 
 - Initial public release.

@@ -34,33 +34,41 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
 ## Features
 
 - **Streaming chat** with markdown rendering, collapsible thinking blocks, and live tool-call
-  cards (ipython, edit, bash, ...) with input/result inspection and copy buttons.
+  cards (ipython renders preview code, bash shows a terminal card) with input/result
+  inspection and copy buttons.
 - **Prime Intellect accent**: deep-neutral surfaces with the signature green used sparingly —
   the butterfly mark, the send button, live indicators. Respects light and dark themes.
-- **Live sessions**: agent sessions stay resident after you close the view ("live" indicator +
-  session id in the status strip); reopen and the full transcript, tools, and usage rebuild.
+- **Live sessions & terminal parity**: sessions stay resident after you close the view; opening
+  a session that is *already live in a terminal* attaches through the daemon so both clients
+  see and steer the same stream (read-only observe when the daemon can't attach).
+- **Subagents**: collapsible strip above the composer lists the session's subagents with
+  activity pulse; browse inside any of them, back-to-parent returns.
+- **Thread diffs**: collapsible "Changes" panel above the composer stitches the hunks from
+  the agent's edit/write/bash calls for the current thread — per file, expandable, with
+  an Open-file shortcut. Files changed strip above the transcript remains coarse.
 - **Steer while working**: send messages while the agent runs; the *steer/queue* pill in the
   composer rail chooses mid-turn steering or end-of-run delivery. Stop button aborts the run.
-- **Editor context**: `+` attach menu — mention files (`@` with indexed autocomplete), attach
-  the active file or the current selection (`Cmd+Alt+K` / `Alt+K` sends the snippet as
-  context), or attach images on vision-capable models. Paste and drag-drop work too, and are
-  gently refused on text-only models. Mentions render as clickable chips in your messages.
-- **Composer rail**: one searchable model menu holds everything model-related — ★ favorites
-  (persisted), reasoning and vision (`img`) badges, context-window sizes, and the six thinking
-  levels nested at the bottom (auto-hidden for non-reasoning models). Next to it: the
-  steer/queue toggle (default configurable via `primeAgent.defaultStreamingBehavior`) and a
-  live context-window meter that warms up near the model's limit.
-- **Tool rendering built for agents**: edit calls render as red/green diff hunks with a
-  jump-to-file button; shell calls render as terminal cards with live streaming output.
-- **Session control**: in-webview history grouped by *This workspace* / *Other folders*
-  (prime-agent sessions resume from any directory); hover a session to delete it with a
-  one-tap inline confirm (trash-first with artifact cleanup, live and current sessions are
-  refused). Plus new session, manual compact, markdown export, and agent restart from the
-  `⋯` menu.
-- **Export**: save the chat as Markdown — with tool calls summarized as one-liners, thinking
-  as blockquotes, and no tool-output dumps (choose *without tool calls* for a clean transcript).
-- **Changes strip**: files the agent touched during the last run, one click to open or diff
-  against git HEAD.
+- **Editor context**: `+` attach menu — mention files and **folders** (`@` with indexed
+  autocomplete; folders carry a trailing `/`), attach the active file or the current selection
+  (`Cmd+Alt+K` / `Alt+K` sends the snippet as context), or attach images on vision-capable
+  models. Paste and drag-drop work too, and are gently refused on text-only models. Mentions
+  render inline-styled inside the composer and as clickable chips in your messages; folders
+  reveal in the Explorer.
+- **Composer rail**: searchable model menu holds ★ favorites (persisted), reasoning and vision
+  (`img`) badges, context-window sizes, and a **brain popout per model row** for the six
+  thinking levels. Next to it: the steer/queue toggle (default via
+  `primeAgent.defaultStreamingBehavior`) and a live context meter with a hover gear that
+  opens the per-session **auto-compact threshold** override (20–80%).
+- **Session control**: history grouped by *This workspace* / *Other folders* with client-side
+  search and smooth stateful refresh; hover a session to delete with a one-tap inline confirm
+  (trash-first, live/current sessions are refused); new session, compact, markdown export,
+  and agent restart from the *⋯* menu.
+- **Export & copy**: conversation markdown to clipboard or file with summarized tool calls;
+  per-reply, per-thinking, per-tool-call, and per-message copy buttons; **fork** the session
+  from any user message (mirrors `/fork`); per-message footers show estimated tokens.
+- **Composer care**: drafts detected per session survive reloads; selection preserves across
+  collapse/expansion of thinking and tool cards; streaming follows the bottom by default but
+  never fights your scrolling (jump-to-latest pill appears when you're reading up).
 
 ## Requirements
 
@@ -87,6 +95,9 @@ If `prime-agent` is not on `PATH`, set `primeAgent.command` to an absolute path,
 All under the `Prime Agent:` prefix, e.g. `Prime Agent: Focus Chat`, `New Session`,
 `Compact Context`, `Export Chat…`, `Resume Recent Session…`, `Restart Agent Process`,
 `Add Selection to Chat`, `Add Active File to Chat`, `Open Chat in Editor Tab`, `Stop Agent`.
+
+Header links: the butterfly / title opens the [Prime Agent blog post](https://www.primeintellect.ai/blog/prime-agent#article-top);
+the *⋯* menu links to [app.primeintellect.ai](https://app.primeintellect.ai).
 
 ## Development
 

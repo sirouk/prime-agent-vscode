@@ -2115,3 +2115,30 @@ body.vscode-light pre.term {
 	opacity: 0.55;
 	transition: opacity 0.15s ease;
 }
+
+/* ---------- folder rows in mention autocomplete ---------- */
+
+.ac-item.dir .ac-label {
+	color: var(--pa-accent);
+}
+
+.ac-item.dir .ac-label::before {
+	content: "▸ ";
+	color: var(--pa-dim);
+	font-size: 9px;
+}
+
+/* ---------- brand link + menu separator ---------- */
+
+.brand {
+	cursor: pointer;
+}
+
+.brand:hover .brand-name {
+	color: var(--pa-accent);
+}
+
+.menu-sep {
+	margin: 3px 6px;
+	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
+}

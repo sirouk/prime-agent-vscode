@@ -1215,13 +1215,46 @@ private async clearObservation(): Promise<void> {
 		const exclude = "**/{node_modules,.git,dist,out,.turbo,.next,coverage}/**";
 		try {
 			const uris = await vscode.workspace.findFiles(pattern, exclude, max);
-			const files = uris
-				.map((uri) => vscode.workspace.asRelativePath(uri, false))
-				.sort((a, b) => a.localeCompare(b));
-			this.broadcast({ type: "fileSearchResults", requestId, files });
+			const files = uris.map((uri) => vscode.workspace.asRelativePath(uri, false));
+			const dirs = await this.searchDirs(trimmed, Math.max(8, Math.floor(max / 4)));
+			const combined = [
+				...dirs.map((path) => ({ path, isDir: true })),
+				...files.map((path) => ({ path, isDir: false })),
+			].sort((a, b) => a.path.localeCompare(b.path));
+			this.broadcast({ type: "fileSearchResults", requestId, files: combined });
 		} catch {
 			this.broadcast({ type: "fileSearchResults", requestId, files: [] });
 		}
+	}
+
+	/** Lightweight directory listing for @-folder mentions. Pruned, capped, fuzzy. */
+	private async searchDirs(query: string, max: number): Promise<string[]> {
+		const folders = vscode.workspace.workspaceFolders ?? [];
+		const out: string[] = [];
+		const prune = new Set(["node_modules", ".git", "dist", "out", ".turbo", ".next", "coverage", ".vscode-test"]);
+		const needle = query.toLowerCase();
+		for (const folder of folders.slice(0, 2)) {
+			const visit = async (relDir: string, uri: vscode.Uri, depth: number): Promise<void> => {
+				if (out.length >= max || depth > 5) return;
+				let entries: [string, vscode.FileType][];
+				try {
+					entries = await vscode.workspace.fs.readDirectory(uri);
+				} catch {
+					return;
+				}
+				for (const [name, type] of entries) {
+					if (type !== vscode.FileType.Directory || name.startsWith(".") || prune.has(name)) continue;
+					const rel = relDir ? `${relDir}/${name}` : name;
+					if ((needle === "" || rel.toLowerCase().includes(needle)) && out.length < max) {
+						out.push(rel);
+					}
+					await visit(rel, vscode.Uri.joinPath(uri, name), depth + 1);
+					if (out.length >= max) return;
+				}
+			};
+			await visit("", folder.uri, 0);
+		}
+		return out;
 	}
 
 	async pickImages(requestId: number): Promise<void> {
@@ -1259,9 +1292,14 @@ private async clearObservation(): Promise<void> {
 	}
 
 	async openFile(relPath: string, startLine?: number, endLine?: number): Promise<void> {
-		const uri = this.resolveWorkspaceUri(relPath);
+		const uri = this.resolveWorkspaceUri(relPath.replace(/\/$/, ""));
 		if (!uri) return;
 		try {
+			const stat = await vscode.workspace.fs.stat(uri);
+			if (stat.type === vscode.FileType.Directory) {
+				await vscode.commands.executeCommand("revealInExplorer", uri);
+				return;
+			}
 			const doc = await vscode.workspace.openTextDocument(uri);
 			const editor = await vscode.window.showTextDocument(doc);
 			if (startLine !== undefined) {

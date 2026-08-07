@@ -56,7 +56,7 @@ export class Composer {
 	private modelMenu: Dropdown | null = null;
 	private thinkingMenu: Dropdown | null = null;
 
-	private acItems: Array<{ label: string; sub?: string; insert: string }> = [];
+	private acItems: Array<{ label: string; sub?: string; insert: string; dir?: boolean }> = [];
 	private acSelected = 0;
 	private acKind: "slash" | "mention" | null = null;
 	private acMentionStart = 0;
@@ -392,9 +392,14 @@ export class Composer {
 		this.textarea.focus();
 	}
 
-	onFileSearchResults(requestId: number, files: string[]): void {
+	onFileSearchResults(requestId: number, files: Array<{ path: string; isDir: boolean }> | string[]): void {
 		if (this.acKind !== "mention" || requestId !== this.acRequestId) return;
-		this.acItems = files.slice(0, 12).map((f) => ({ label: f, insert: f }));
+		this.acItems = files.slice(0, 12).map((f) => {
+			const item = typeof f === "string" ? { path: f, isDir: f.endsWith("/") } : f;
+			return item.isDir
+				? { label: `${item.path}/`, sub: "folder", insert: `${item.path}/`, dir: true }
+				: { label: item.path, insert: item.path };
+		});
 		this.acSelected = 0;
 		this.renderAutocomplete();
 	}
@@ -590,7 +595,7 @@ export class Composer {
 	private syncMirror(): void {
 		if (!this.mirror) return;
 		const text = this.textarea.value;
-		const mentionRe = /(^|[\s(`"'])@((?:[\w-]+\/)+[\w./-]*\w|[\w-]+\.[\w]{1,8})(?=$|[\s),.;:'"`]|$)/g;
+		const mentionRe = /(^|[\s(`"'])@((?:[\w-]+\/)+(?:[\w./-]*\w|)|[\w-]+\.[\w]{1,8})(?=$|[\s),.;:'"`\/]|$)/g;
 		const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 		let html = "";
 		let last = 0;
@@ -741,11 +746,9 @@ export class Composer {
 		if (mention) {
 			this.acKind = "mention";
 			this.acMentionStart = mention.start;
-			window.clearTimeout(this.mentionDebounce);
-			this.mentionDebounce = window.setTimeout(() => {
-				this.acRequestId = Date.now();
-				this.deps.onSearchFiles(mention.query, this.acRequestId);
-			}, 120);
+			// No debounce: per-keystroke freshness, staleness is guarded by the request id.
+			this.acRequestId = Date.now();
+			this.deps.onSearchFiles(mention.query, this.acRequestId);
 			return;
 		}
 		this.closeAutocomplete();
@@ -758,8 +761,13 @@ export class Composer {
 			return;
 		}
 		this.acItems.forEach((item, index) => {
-			const row = el("button", `ac-item${index === this.acSelected ? " selected" : ""}`);
-			row.appendChild(el("span", "ac-label", item.label));
+			const row = el("button", `ac-item${index === this.acSelected ? " selected" : ""}${item.dir ? " dir" : ""}`);
+			const label = el("span", "ac-label", item.label);
+			if (item.dir) {
+				label.classList.add("dir");
+				label.title = `folder: ${item.label}`;
+			}
+			row.appendChild(label);
 			if (item.sub) row.appendChild(el("span", "ac-sub", item.sub.slice(0, 80)));
 			row.addEventListener("mousedown", (event) => {
 				event.preventDefault();

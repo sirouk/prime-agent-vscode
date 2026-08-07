@@ -143,6 +143,11 @@ export interface SessionChild {
 	attachedClients?: number;
 }
 
+export interface FileSearchItem {
+	path: string;
+	isDir: boolean;
+}
+
 export interface RpcSlashCommand {
 	name: string;
 	description?: string;
@@ -307,7 +312,7 @@ export type HostToWebview =
 	| { type: "promptRejected"; error: string }
 	| { type: "notice"; level: "info" | "warning" | "error"; text: string }
 	| { type: "uiState"; statusText?: string; title?: string }
-	| { type: "fileSearchResults"; requestId: number; files: string[] }
+	| { type: "fileSearchResults"; requestId: number; files: FileSearchItem[] }
 	| { type: "imagePicked"; requestId: number; images: ImageAttachment[] }
 	| { type: "insertSelection"; selection: SelectionAttachment }
 	| { type: "insertMention"; path: string }
