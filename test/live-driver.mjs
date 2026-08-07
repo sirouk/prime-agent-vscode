@@ -21,7 +21,9 @@ const VSCODE = "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
 const WORKSPACE = os.homedir() + "/prime-agent-vs-ext";
 const PORT = 7321;
 const PATH = `${os.homedir()}/.hermes/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
-const testModel = process.env.E2E_MODEL ?? "chutes/zai-org/GLM-4.7:off";
+// Never handpick a model id here: chutes is a runtime-resolved provider and arbitrary
+// ids 404. Default = user's configured default; E2E_MODEL can still override.
+const testModel = process.env.E2E_MODEL ?? "";
 const profile = process.env.PA_E2E_PROFILE ?? fs.mkdtempSync(path.join(os.tmpdir(), "pa-live-profile-"));
 const hostLog = path.join(os.tmpdir(), `pa-live-host-${Date.now()}.log`);
 fs.writeFileSync(hostLog, "");
@@ -68,7 +70,12 @@ async function boot() {
 			`--extensionDevelopmentPath=${process.cwd()}`,
 			"--disable-workspace-trust", "--skip-welcome", "--no-sandbox",
 		],
-		env: { ...process.env, PATH, PRIME_AGENT_VSCODE_LOG: hostLog, PRIME_AGENT_ARGS: `--model ${testModel}` },
+		env: {
+			...process.env,
+			PATH,
+			PRIME_AGENT_VSCODE_LOG: hostLog,
+			PRIME_AGENT_ARGS: testModel ? `--model ${testModel}` : "",
+		},
 		timeout: 60_000,
 	});
 	page = await app.firstWindow();
@@ -372,5 +379,5 @@ try {
 	console.error("[driver] initial boot failed:", err);
 }
 server.listen(PORT, "127.0.0.1", () => {
-	console.log(`LIVE DRIVER READY on http://127.0.0.1:${PORT} model=${testModel} profile=${profile} hostLog=${hostLog}`);
+	console.log(`LIVE DRIVER READY on http://127.0.0.1:${PORT} model=${testModel || "(user default)"} profile=${profile} hostLog=${hostLog}`);
 });
