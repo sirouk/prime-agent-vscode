@@ -10,6 +10,29 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
 	return node;
 }
 
+export function copyToClipboard(text: string, onDone?: () => void): void {
+	const fallback = () => {
+		const ta = document.createElement("textarea");
+		ta.value = text;
+		ta.style.position = "fixed";
+		ta.style.opacity = "0";
+		document.body.appendChild(ta);
+		ta.select();
+		try {
+			document.execCommand("copy");
+		} catch {
+			// ignore
+		}
+		ta.remove();
+		onDone?.();
+	};
+	if (navigator.clipboard?.writeText) {
+		navigator.clipboard.writeText(text).then(() => onDone?.(), fallback);
+	} else {
+		fallback();
+	}
+}
+
 const ALLOWED_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 
 function sanitizeHref(href: string): string {
@@ -94,9 +117,23 @@ export function renderMarkdown(markdown: string, container: HTMLElement, onOpenL
 			const pre = el("pre");
 			const code = el("code");
 			if (lang) code.className = `language-${lang}`;
-			code.textContent = body.join("\n");
+			const codeText = body.join("\n");
+			code.textContent = codeText;
 			pre.appendChild(code);
-			container.appendChild(pre);
+			const wrapper = el("div", "codeblock");
+			const head = el("div", "codeblock-head");
+			head.appendChild(el("span", "codeblock-lang", lang || "code"));
+			const copyBtn = el("button", "codeblock-copy", "Copy");
+			copyBtn.addEventListener("click", (event) => {
+				event.stopPropagation();
+				copyToClipboard(codeText, () => {
+					copyBtn.textContent = "Copied";
+					setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
+				});
+			});
+			head.appendChild(copyBtn);
+			wrapper.append(head, pre);
+			container.appendChild(wrapper);
 			continue;
 		}
 

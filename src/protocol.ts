@@ -229,8 +229,14 @@ export interface StatusSnapshot {
 	thinkingLevel: string;
 	sessionName?: string;
 	sessionFile?: string;
+	sessionId?: string;
 	statsText: string;
 	statusText?: string;
+	usageTotal?: number;
+	costUsd?: number;
+	contextTokens?: number | null;
+	contextWindow?: number;
+	contextPercent?: number | null;
 }
 
 export interface RecentSession {
@@ -247,6 +253,7 @@ export type HostToWebview =
 	| { type: "models"; models: RpcModel[] }
 	| { type: "commands"; commands: RpcSlashCommand[] }
 	| { type: "history"; sessions: RecentSession[] }
+	| { type: "showHistory" }
 	| { type: "promptAccepted"; kind: "prompt" | "steer" | "followUp" }
 	| { type: "promptRejected"; error: string }
 	| { type: "notice"; level: "info" | "warning" | "error"; text: string }

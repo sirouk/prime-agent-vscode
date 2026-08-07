@@ -12,17 +12,21 @@ terminal client. The extension is a UI over the RPC protocol, not a reimplementa
 ## Features
 
 - **Streaming chat** with markdown rendering, collapsible thinking blocks, and live tool-call
-  cards (ipython, edit, bash, ...) with input/result inspection.
-- **Steer while working**: send messages while the agent runs; choose *Steer* (interrupt next
-  turn) or *Queue* (deliver when finished). Stop button aborts the run.
+  cards (ipython, edit, bash, ...) with input/result inspection and copy buttons.
+- **Prime Intellect accent**: deep-neutral surfaces with the signature green used sparingly —
+  the butterfly mark, the send button, live indicators. Respects light and dark themes.
+- **Live sessions**: agent sessions stay resident after you close the view ("live" indicator +
+  session id in the status strip); reopen and the full transcript, tools, and usage rebuild.
+- **Steer while working**: send messages while the agent runs; the *steer/queue* pill in the
+  composer rail chooses mid-turn steering or end-of-run delivery. Stop button aborts the run.
 - **Editor context**: `@` mentions with file autocomplete, attach the current selection with a
-  click or `Cmd+Alt+K` (the snippet is sent as context), paste or drop images into the composer.
-- **Session control**: new session, resume recent workspace sessions, manual compact, export
-  the chat as HTML, restart the agent process.
-- **Model + thinking controls**: pick from the models/configured providers exposed by the CLI.
-- **Changes bar**: files the agent touched during the last run, one click to open or diff
+  click or `Cmd+Alt+K`/`Alt+K` (the snippet is sent as context), paste or drop images.
+- **Composer rail**: model picker, thinking level, steering behavior, and a live context-window
+  meter that warms up as you approach the model's limit.
+- **Session control**: new session, in-webview history view for recent workspace sessions,
+  manual compact, export the chat as HTML, restart the agent process.
+- **Changes strip**: files the agent touched during the last run, one click to open or diff
   against git HEAD.
-- **History**: transcript and usage rebuild from the session after view reloads or restarts.
 
 ## Requirements
 

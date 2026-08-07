@@ -40,9 +40,9 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand("primeAgent.compact", () => void controller!.compact()),
 		vscode.commands.registerCommand("primeAgent.exportHtml", () => void controller!.exportHtml()),
 		vscode.commands.registerCommand("primeAgent.restart", () => void controller!.restart()),
-		vscode.commands.registerCommand("primeAgent.history", async () => {
-			await controller!.listHistory();
+		vscode.commands.registerCommand("primeAgent.history", () => {
 			reveal();
+			controller!.showHistoryView();
 		}),
 		vscode.commands.registerCommand("primeAgent.addSelectionToChat", () => {
 			const selection = controller!.getActiveSelection();

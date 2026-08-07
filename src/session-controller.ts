@@ -192,6 +192,10 @@ export class SessionController implements vscode.Disposable {
 				break;
 			case "session_action_update":
 				break;
+			case "session_info_changed":
+			case "thinking_level_changed":
+				void this.refreshStateAndStats();
+				break;
 		}
 		this.trackChangedFilesDone(event);
 		this.broadcast({ type: "event", event });
@@ -427,24 +431,14 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
+	showHistoryView(): void {
+		this.broadcast({ type: "showHistory" });
+		void this.listHistory();
+	}
+
 	async listHistory(): Promise<void> {
-		const sessions = await listRecentSessions(this.workspaceRoot);
-		if (sessions.length === 0) {
-			this.broadcast({ type: "notice", level: "info", text: "No previous sessions for this workspace." });
-			return;
-		}
-		const picked = await vscode.window.showQuickPick(
-			sessions.map((session: RecentSession) => ({
-				label: session.name || session.firstPrompt || "(untitled session)",
-				description: new Date(session.timestamp).toLocaleString(),
-				detail: session.path,
-				session,
-			})),
-			{ title: "Resume a Prime Agent session", matchOnDetail: true },
-		);
-		if (picked) {
-			await this.switchSession(picked.session.path);
-		}
+		const sessions = await listRecentSessions(this.workspaceRoot, 25);
+		this.broadcast({ type: "history", sessions });
 	}
 
 	async pickModelQuickPick(): Promise<void> {
@@ -556,6 +550,13 @@ export class SessionController implements vscode.Disposable {
 				cost?: number;
 				contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 			};
+			this.lastUsage = {
+				usageTotal: data.tokens?.total,
+				costUsd: data.cost,
+				contextTokens: data.contextUsage?.tokens ?? null,
+				contextWindow: data.contextUsage?.contextWindow,
+				contextPercent: data.contextUsage?.percent ?? null,
+			};
 			const parts: string[] = [];
 			if (data.tokens?.total != null) parts.push(`${formatNumber(data.tokens.total)} tokens`);
 			if (data.cost != null && data.cost > 0) parts.push(`$${data.cost.toFixed(4)}`);
@@ -565,6 +566,8 @@ export class SessionController implements vscode.Disposable {
 			return "";
 		}
 	}
+
+	private lastUsage: { usageTotal?: number; costUsd?: number; contextTokens?: number | null; contextWindow?: number; contextPercent?: number | null } = {};
 
 	private buildStatus(statsText = this.lastStatsText): StatusSnapshot {
 		const model = this.state?.model;
@@ -579,8 +582,10 @@ export class SessionController implements vscode.Disposable {
 			thinkingLevel: this.state?.thinkingLevel ?? "off",
 			sessionName: this.state?.sessionName,
 			sessionFile: this.state?.sessionFile,
+			sessionId: this.state?.sessionId,
 			statsText,
 			statusText: this.extensionStatusText,
+			...this.lastUsage,
 		};
 	}
 

@@ -69,7 +69,7 @@
       },
       {
         "command": "primeAgent.history",
-        "title": "Resume Recent Session\u2026",
+        "title": "Resume Recent Session…",
         "icon": "$(history)"
       },
       {
@@ -176,6 +176,7 @@
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.24.2",
+    "happy-dom": "^20.11.1",
     "typescript": "^5.9.2"
   }
 }
