@@ -331,6 +331,16 @@ if [ -n "$git_remote" ]; then
     git push "$git_remote" "$chosen_tag"
 fi
 
+# Optional marketplace publish: source the gitignored key and publish the same
+# vsix. Disabled when VSCE_PAT is empty or VSCE_PUBLISH=0.
+if [ -f .env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
+fi
+VSCE_PUBLISH="${VSCE_PUBLISH:-1}"
+
 if have gh; then
     notes="$(mktemp /tmp/release-notes-XXXXXX.txt)"
     awk -v ver="\\[${chosen#v}\\]" '
@@ -351,4 +361,14 @@ else
     warn "gh not found — tag + master pushed; create the release manually with: gh release create $chosen_tag $vsix"
 fi
 
-log "done. Next, if the marketplace publishes: vsce publish --packagePath $vsix"
+if [ -n "${VSCE_PAT:-}" ] && [ "$VSCE_PUBLISH" = "1" ]; then
+    log "publishing to the VS Code Marketplace…"
+    if VSCE_PAT="$VSCE_PAT" ./node_modules/.bin/vsce publish --packagePath "$vsix"; then
+        log "marketplace listing updated for ${chosen_tag}"
+    else
+        warn "marketplace publish failed — the GitHub release is shipped; re-run:"
+        warn "  VSCE_PAT=<pat> ./node_modules/.bin/vsce publish --packagePath $vsix"
+    fi
+else
+    log "done. Next, if the marketplace publishes: vsce publish --packagePath $vsix"
+fi

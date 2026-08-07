@@ -6,3 +6,5 @@ media/main.js.map
 *.vsix
 
 test/live-driver.log
+.env
+.env.local
