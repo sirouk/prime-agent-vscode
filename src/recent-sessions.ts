@@ -63,7 +63,45 @@ async function readHeader(filePath: string): Promise<{ header: SessionHeader; na
 		rl.close();
 		stream.destroy();
 	}
-	return { header, name, firstPrompt };
+	const tailName = await readTailName(filePath);
+	return { header, name: tailName ?? name, firstPrompt };
+}
+
+/**
+ * Session renames append `session_info` entries at the END of the file. The
+ * head scan caps at 60 lines, so late renames would be invisible — read the
+ * tail and let the latest entry win.
+ */
+async function readTailName(filePath: string): Promise<string | undefined> {
+	const CHUNK = 16_384;
+	let handle: fs.promises.FileHandle | null = null;
+	try {
+		handle = await fs.promises.open(filePath, "r");
+		const { size } = await handle.stat();
+		const start = Math.max(0, size - CHUNK);
+		const buffer = Buffer.alloc(size - start);
+		await handle.read(buffer, 0, buffer.length, start);
+		const tail = buffer.toString("utf8");
+		const lines = tail.split("\n").filter((l) => l.trim());
+		for (let i = lines.length - 1; i >= 0; i--) {
+			try {
+				const entry = JSON.parse(lines[i]) as Record<string, unknown>;
+				if (entry.type === "session_info" || entry.type === "session_name") {
+					const name = (entry.name ?? entry.sessionName) as string | undefined;
+					if (name && name.trim()) return name.trim();
+					// An empty name explicitly clears the title.
+					if (name !== undefined && !name.trim()) return undefined;
+				}
+			} catch {
+				// ignore malformed lines
+			}
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	} finally {
+		if (handle) await handle.close();
+	}
 }
 
 function extractUserText(content: unknown): string | undefined {
