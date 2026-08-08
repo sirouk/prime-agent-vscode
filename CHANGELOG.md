@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.7]
+
 - Scrolling no longer fights you during a reply. Auto-follow now sticks only while you are
   actually parked at the bottom; the moment you scroll up you hold your place and the new output
   piles up below, reachable with the jump-to-bottom arrow. Intent is read from the wheel/touch
