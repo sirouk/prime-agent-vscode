@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.8]
+
 - Long threads open instantly and stay light. Only the newest ~150 messages are built on open,
   with the exact number of earlier ones stated above them and a button to walk backwards a batch
   at a time — loading earlier messages leaves the row you were reading exactly where it was.
