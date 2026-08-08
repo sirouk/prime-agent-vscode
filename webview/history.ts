@@ -193,7 +193,6 @@ export class HistoryView {
 					run: () => this.deps.onArchive(session.path, session.id),
 				});
 			});
-			actions.appendChild(archive);
 			const rename = document.createElement("button");
 			rename.className = "history-action";
 			rename.title = "Rename session";
@@ -214,7 +213,10 @@ export class HistoryView {
 					run: () => this.deps.onDelete(session.path, session.id),
 				});
 			});
-			actions.append(rename, del);
+			// Order is the one the operator asked for — stop, rename, delete — with
+			// archive slotted next to delete as the non-destructive neighbour of the
+			// two retire actions. Delete stays last: the furthest from a stray click.
+			actions.append(rename, archive, del);
 		}
 		top.appendChild(actions);
 		item.appendChild(top);

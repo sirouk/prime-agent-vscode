@@ -104,7 +104,14 @@
 				{ id: "019fd333-cccc", path: "/a/4.jsonl", cwd: "/home/oss/prime-agent", timestamp: new Date(now2 - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
 			] });
 			// Pre-arm one item so the screenshot shows the inline Delete/cancel confirm state.
-			setTimeout(() => document.querySelectorAll(".history-item:not(.current) .history-actions .history-action")[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })), 150);
+			// Resolve the delete action by title, never by index: the row's action set
+			// grows (stop, archive) and a positional pick silently arms the wrong one.
+			setTimeout(() => {
+				const row = document.querySelector(".history-item:not(.current)");
+				const del = [...(row?.querySelectorAll(".history-actions .history-action") ?? [])]
+					.find((b) => (b.title ?? "").startsWith("Delete"));
+				del?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+			}, 150);
 		} else if (mode === "markdownnote") {
 			host({
 				type: "snapshot",
