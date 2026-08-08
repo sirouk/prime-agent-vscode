@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.6]
+
 - Release publishing runs end to end from CI again: the publish job now declares the `CI`
   environment, without which `secrets.VSCE_PAT` resolved to an empty string and every release
   stopped at the credential guard. 1.0.4 never reached the Marketplace for this reason

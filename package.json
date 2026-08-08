@@ -2,7 +2,7 @@
   "name": "prime-agent-vscode",
   "displayName": "Prime Agent",
   "description": "Chat with Prime Agent from VS Code. Streams from the Prime Agent RPC protocol with full tool-call visibility.",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
