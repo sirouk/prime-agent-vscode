@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.5]
+
 - History row actions are ordered stop, rename, archive, delete — archive sits beside delete as the non-destructive retire, and delete stays last, furthest from a stray click
 - The composer arms only once the agent has actually answered an RPC round-trip. A binary that
   spawns and then never replies (stale daemon socket, half-finished install, a build that does
