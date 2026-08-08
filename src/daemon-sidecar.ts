@@ -40,7 +40,47 @@ export interface SessionSummaryRef {
 	parentActiveSessionId?: string;
 	attachedClients?: number;
 	isStreaming?: boolean;
+	/** "live" | "draft" | "archived" — the CLI's roster shows only "live". */
 	lifecycle?: string;
+	/** > 0 marks a subagent; those belong under their parent, not in history. */
+	rlmDepth?: number;
+	messageCount?: number;
+	/** First user message, already truncated by the daemon. Our row subtitle. */
+	firstMessage?: string;
+	lastActivityAt?: string;
+	// The CLI calls a session "running" from a much wider set of signals than
+	// isStreaming (classifySessionRosterStatus). All of these ride on the same
+	// summary we already receive; declaring them keeps our verdict identical.
+	activity?: string;
+	isSessionActive?: boolean;
+	hasActiveHeartbeat?: boolean;
+	isCompacting?: boolean;
+	isBashRunning?: boolean;
+	hasRunningRlmChildren?: boolean;
+	unfinishedActionCount?: number;
+	/**
+	 * The assistant message currently being generated. Lives ONLY here — the
+	 * snapshot's `messages` is the committed transcript, so a client that reads
+	 * messages alone shows nothing at all while a turn is mid-flight.
+	 */
+	streamingMessage?: Record<string, unknown>;
+}
+
+/** A row of the daemon's saved-session catalog (`list_saved_sessions`). */
+export interface SavedSessionInfo {
+	path: string;
+	id: string;
+	cwd: string;
+	name?: string;
+	state?: { status?: string };
+	rlmDepth?: number;
+	created?: string;
+	modified?: string;
+	messageCount?: number;
+	firstMessage?: string;
+	/** Flattened conversation text, truncated by the daemon. The search corpus. */
+	allMessagesText?: string;
+	agentStatus?: { summary?: string };
 }
 
 export interface AttachSnapshot {
@@ -95,9 +135,28 @@ export class DaemonSidecar {
 		return path.join(os.tmpdir(), `prime-agent-${process.getuid?.() ?? "user"}`, "daemon.sock");
 	}
 
+	/**
+	 * Memoized handshake. Without this, a second caller arriving mid-connect
+	 * disposes the socket the first one is still awaiting and steals
+	 * `helloResolve` (one shared field), so the first await hangs until its
+	 * 10s timeout — which is how a history refresh raced by an agent_end used
+	 * to report "nothing is running" for every row.
+	 */
 	async connect(timeoutMs = 10_000): Promise<void> {
 		if (this.connected && this.hello) return;
+		if (this.connecting) return this.connecting;
+		this.connecting = this.doConnect(timeoutMs).finally(() => {
+			this.connecting = null;
+		});
+		return this.connecting;
+	}
+
+	private connecting: Promise<void> | null = null;
+
+	private async doConnect(timeoutMs: number): Promise<void> {
 		const sockPath = this.socketPath();
+		// Safe now that connect() is serialized: any socket still here is dead or
+		// abandoned by a timed-out handshake, never one a caller is waiting on.
 		if (this.socket) {
 			this.dispose();
 		}
@@ -222,6 +281,18 @@ export class DaemonSidecar {
 		return data.sessions ?? [];
 	}
 
+	/**
+	 * The saved-session catalog. This is the ONLY daemon command that carries
+	 * `allMessagesText` (daemon-mode.ts `list_saved_sessions`); `list` does not,
+	 * so a search over conversation bodies has to come from here. The daemon
+	 * streams progress rows while it works — those arrive on onEvent and are
+	 * ignored; the response carries the whole list.
+	 */
+	async listSavedSessions(cwd: string, scope: "current" | "all" = "all"): Promise<SavedSessionInfo[]> {
+		const data = await this.request<{ sessions?: SavedSessionInfo[] }>({ type: "list_saved_sessions", cwd, scope }, 60_000);
+		return data.sessions ?? [];
+	}
+
 	async attach(activeSessionId: string): Promise<AttachResult> {
 		return this.request<AttachResult>(
 			{ type: "attach", activeSessionId, capabilities: ["attach_snapshot", "event_sequence", "slim_attach"] },
@@ -237,8 +308,23 @@ export class DaemonSidecar {
 		}
 	}
 
-	async prompt(activeSessionId: string, text: string, streamingBehavior: "steer" | "followUp" = "steer"): Promise<void> {
-		await this.request({ type: "prompt", activeSessionId, message: text, streamingBehavior, queueIfBusy: true }, 20_000);
+	async prompt(
+		activeSessionId: string,
+		text: string,
+		streamingBehavior: "steer" | "followUp" = "steer",
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+	): Promise<void> {
+		await this.request(
+			{
+				type: "prompt",
+				activeSessionId,
+				message: text,
+				streamingBehavior,
+				queueIfBusy: true,
+				...(images?.length ? { images } : {}),
+			},
+			20_000,
+		);
 	}
 
 	async abort(activeSessionId: string): Promise<void> {
@@ -256,6 +342,10 @@ export class DaemonSidecar {
 
 	async getState(activeSessionId: string): Promise<Record<string, unknown>> {
 		return this.request<Record<string, unknown>>({ type: "get_state", activeSessionId }, 20_000);
+	}
+
+	async getSessionStats(activeSessionId: string): Promise<Record<string, unknown>> {
+		return this.request<Record<string, unknown>>({ type: "get_session_stats", activeSessionId }, 20_000);
 	}
 
 	dispose(): void {

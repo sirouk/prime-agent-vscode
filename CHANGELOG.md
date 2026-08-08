@@ -1,30 +1,108 @@
 # Changelog
 
+All notable changes to this extension are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+<!--
+Maintainers: keep entries under [Unreleased] as flat bullets starting on the line right after
+the blank one. release.sh promotes that heading into the new version section and only detects
+entries within two lines of it, so a `### Added` sub-heading makes a release ship unlabelled.
+After a cut, add the new version's compare link at the bottom and re-point [Unreleased].
+-->
+
 ## [Unreleased]
+
+- The composer arms only once the agent has actually answered an RPC round-trip. A binary that
+  spawns and then never replies (stale daemon socket, half-finished install, a build that does
+  not understand `--mode rpc`) no longer reads as connected, and a spawn failure no longer
+  latches "running" over a child that never existed
+- Prime Agent not reachable now says so: a dismissible card names the reason, links the upstream
+  quickstart and offers Retry. A spawn error raises it immediately instead of behind the 25s
+  watchdog, and dismissing it hides the recommendation, not the failure
+- Hiding the sidebar keeps its DOM: toggling the activity bar no longer reloads the webview and
+  blanks the transcript, the draft and the scroll position
+- Drafts are flushed before a session switch, so the last keystrokes stay with the session they
+  were typed in
+- Subagent strip separates live from finished: running/idle/finished status comes from the daemon's own roster classification (not `isStreaming` alone), and finished subagents sit in their own collapsed "Historical" group instead of padding the live count
+- Browsing into a subagent keeps it in the list and highlights it green; siblings and the "‹ parent" row stay reachable, and a browse that fails now leaves the strip and the current session exactly where they were
+- Going back to the parent (or stopping an observe) restores the strip instead of emptying it, and no longer re-announces the parent's existing subagents as freshly spawned
+- Subagent strip refresh is genuinely throttled (700 ms, one in flight) and skips repaints when the roster hasn't changed, so a 40-tool-call turn no longer triggers 40 disk-walking daemon list reads
+- "Changes" panel is built from prime-agent's own diff payloads and nothing else: it now covers
+  the thread *and* its subagents, rebuilds from the session's own history (so a resumed thread
+  or a return from a subagent keeps its rows), names the contributing subagent on each hunk, and
+  says out loud that shell and raw-Python rewrites publish no diff and therefore cannot appear
+- Shell runs read as shell: the CLI's only tool is `ipython`, so a `%%bash` cell now gets
+  terminal chrome, a shell section label and a shell fence when copied, instead of rendering and
+  pasting as Python. Collapsed cards use prime-agent's own cell-preview scorer, ported verbatim
+- Copying an assistant reply carries the whole reply — thinking and tool calls as markdown, in
+  reading order — and a copied tool call carries the call plus every captured output section
+- Selection survives collapsing or expanding a thinking block or tool card (captured on the way
+  in, rebuilt by position afterwards)
+- User-message footers show the estimated token count and the metered cost of the reply that
+  message opened
+- Rendering a session snapshot lands at the bottom, and the jump-to-latest pill resets with it
+- History searches the conversations themselves, not just the visible rows: matching sessions
+  come back with the snippet that matched, deduped by path, and "This workspace" keeps its own
+  quota so other folders can never crowd it out
+- History rows gained Archive — the CLI's non-destructive retire (transcript kept, session still
+  resumable, row leaves the list) — behind the same one-tap inline confirm as delete
+- Renaming a session that is live in another client works through the daemon instead of being
+  refused, and history rows resolve by session-file uuid so the row you are browsing is never
+  mistaken for someone else's
+- Reopening the sidebar replays the last history answer instead of flashing "Loading…"
+- The on-disk history fallback reads the tail of each session file, so renames and archives that
+  the daemon would have reported are still seen when the daemon is down
+- Attached (daemon-brokered) sessions are driven only through the daemon: model, thinking level,
+  abort, fork and compact all address the session on screen instead of our own idle background
+  session, and a failed Stop says so instead of leaving the operator clicking
+- The daemon handshake is memoized, so a second connect arriving mid-handshake no longer steals
+  the first one's socket and makes history report "nothing is running"
+- Thinking levels come from the selected model's own level map (the way the agent derives them),
+  are cleared on a model switch, and treat `max` as the distinct level it is — the picker never
+  offers a level the agent would silently swap
+- Command Palette export is `Prime Agent: Export Chat…` and opens the three-way picker
+  (Markdown with summarized tool calls, Markdown without them, HTML); it used to jump straight
+  to HTML
+- Packaging cannot leak the Marketplace token: `.env`, `release.sh`, `install.sh` and
+  `.github/` are excluded from the `.vsix`, and every release cut proves it with `vsce ls`
+- `install.sh` installs the `.vsix` for the exact version just built (not the newest by mtime)
+  and points at the Marketplace one-liner for people who do not need a source build
+- `npm run compile` also builds `dist/daemon-sidecar.cjs`, which the host e2e gate requires, so
+  a clean checkout can run the full battery
+- GitHub release publishing checks that the tag matches `package.json` and that `VSCE_PAT` is
+  present, instead of failing halfway through `vsce publish`
+- README rewritten to describe the shipped UI, lead with the Marketplace install, and state
+  plainly that this is a community build; LICENSE copyright corrected to the actual author with
+  the Prime Intellect trademark note kept separate
+
+## [1.0.4] - 2026-08-07
 
 - Attached-session event routing uses the daemon's canonical activeSessionId (streaming from CLI continues to flow through the extension thread — the uuid/active-window mismatch is gone)
 - Spawn cards seed only for currently-running subagents; historical ones stay in the collapsible strip (no resume spam)
+- release.sh publishes to the Marketplace from a gitignored `.env` (VSCE_PAT), guarded by token presence and the `VSCE_PUBLISH` flag
+- The compiled smoke bundle is generated by esbuild instead of committed, and no longer folded into release commits
 
+## [1.0.3] - 2026-08-07
+
+- Publisher is `sirouk` — the account that owns the Marketplace listing
+
+## [1.0.2] - 2026-08-07
 
 - Subagent spawn cards announce each new subagent inline in the transcript (ordered by start time), clickable to browse into it; the strip refresh stays cheap and realtime via traffic-throttled daemon reads
-
-
 - Attach keepalive: session keeps following across daemon restarts (seamless re-anchor, re-attach notice)
 - Running-state reads are consistent on every history visit (sidecar auto-reconnect; running strictly from isStreaming)
 
-
-- History rows show a subtle pulsing dot when a session is actively running, ordered hover actions: stop → rename → delete
-
-
-## [Unreleased]
+## [1.0.1] - 2026-08-07
 
 - Session names always surface from the end of the session file (renames anywhere show up immediately)
 - Session history search ranks hits: exact substring > token-set > subsequence, recency breaks ties
 - Model pill mid-truncates (chutes/…/Model) with the full name on hover; title edits and CLI-side renames propagate to attached sessions and refresh the history
 - Auto-compact flyout shows abbreviated token counts next to percentages (`94% · 246k`)
+- History rows show a subtle pulsing dot when a session is actively running, ordered hover actions: stop → rename → delete
 - release.sh strict gate: clean tree, master+remote alignment, tag consistency, full battery, then commit+tag+push+GitHub release
 
-## [1.0.0]
+## [1.0.0] - 2026-08-07
 
 - Session history: recent-descending within each bucket by true activity time (renames/forks resurface at the top with current dates)
 
@@ -35,9 +113,9 @@
 - Menus survive streaming responses (pill label span, guarded updates) — menu-open-during-stream regression covered live
 - ipython tool cards summarize the real first line (skips %%magics, shebangs, comments)
 
-- Brain is a rail pill now (right of the model pill): the thinking picker opens per model, filtered to what the model supports; model menus stay open while replies stream
+- Thinking levels live on a brain pill right of the model pill, filtered to what the selected model supports; model menus stay open while replies stream
 - Dual-client guarantee (CLI + extension): writer + viewer on the same resident session both see prompts and answers — covered by the headless parity suite (17 checks)
-- Context gauge is the opener for the auto-compact flyout (hover gear removed); reset is a circle-arrow icon
+- The context gauge itself opens the auto-compact flyout; reset is a circle-arrow icon
 - Kebab menu's "Visit Prime Intellect" uses the butterfly mark
 - Scroll-up affordance is a round down-arrow ("Jump to bottom" tooltip, always subtle)
 - User message footers (estimated tokens, copy, fork) sit under the bubble like the assistant usage line
@@ -46,8 +124,8 @@
 - Subagents strip above the composer: lists active/finished subagents, browse into them, back-to-parent.
 - Thread diff panel: expandable hunks from edit/write/bash during this thread, per file, above the composer.
 - @-mentions are inline-styled in the composer (files AND folders with trailing `/`), chips in transcripts, folders reveal in Explorer.
-- Per-model brain popout for thinking levels; per-reply / per-thinking / per-tool copy buttons; fork from user messages.
-- Auto-compact threshold override per session behind the context meter's hover gear; sticky composer drafts; scroll-lock escape with jump-to-latest; selection preserved across collapse; boot splash during connect; stateful history with search; send gated to content.
+- Per-reply / per-thinking / per-tool copy buttons; fork from user messages.
+- Auto-compact threshold override per session behind the context meter; sticky composer drafts; scroll-lock escape with jump-to-latest; selection preserved across collapse; boot splash during connect; stateful history with search; send gated to content.
 
 ## [0.0.1]
 
@@ -63,3 +141,10 @@
 - Markdown export with summarized tool calls; session compaction and agent restart controls.
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
+
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.3...v1.0.4
+[1.0.3]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/sirouk/prime-agent-vscode/releases/tag/v1.0.0

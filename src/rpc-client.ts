@@ -78,6 +78,11 @@ export class RpcClient extends EventEmitter {
 			this.emit("stderr", chunk);
 		});
 		this.process.on("error", (err) => {
+			// A spawn failure (ENOENT/EACCES) emits "error" + "close" and never
+			// "exit", so without this `running` latches true over a child that
+			// never existed — and every later write is silently swallowed by its
+			// destroyed stdin until the request times out.
+			this.process = null;
 			this.failAll(err);
 			this.emit("spawnError", err);
 		});

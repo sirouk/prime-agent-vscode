@@ -18,7 +18,10 @@
  * rooted in an isolated mkdtemp directory (cwd + sessionDir inside it).
  * Sessions from `list` are never touched.
  *
- * No daemon running? The whole test SKIP-exits 0 so CI never hangs.
+ * No daemon running? The whole test SKIP-exits 0 so CI never hangs — unless
+ * PA_REQUIRE_DAEMON=1 / --require-daemon, which turns the skip into a failure
+ * (npm run test:live passes the flag: a silently-unrun C9 gate is worse than
+ * no gate).
  * Hard watchdog: the process exits well inside 3 minutes regardless.
  *
  * Model selection: DAEMON_PARITY_MODEL (default "chutes/zai-org/GLM-4.7";
@@ -54,7 +57,15 @@ function check(name, condition, detail = "") {
 	return condition;
 }
 function skip(reason) {
-	console.log(`SKIP  daemon-parity — ${reason}`);
+	// Exit 0 on a skip makes an unrun suite indistinguishable from a pass inside
+	// an `&&` chain. Where C9 is supposed to be gated (release.sh, npm run
+	// test:live) PA_REQUIRE_DAEMON=1 turns "no daemon" into a red run instead.
+	if (process.env.PA_REQUIRE_DAEMON === "1" || process.argv.includes("--require-daemon")) {
+		console.log(`FAIL  daemon-parity SKIPPED — C9 (dual client / attach) UNVERIFIED: ${reason}`);
+		console.log("      Start the daemon (`prime-agent --mode daemon`) or unset PA_REQUIRE_DAEMON to allow the skip.");
+		process.exit(1);
+	}
+	console.log(`SKIP  daemon-parity — ${reason} (C9 UNVERIFIED; set PA_REQUIRE_DAEMON=1 to make this fatal)`);
 	process.exit(0);
 }
 function info(message) {

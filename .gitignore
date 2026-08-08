@@ -10,3 +10,5 @@ test/live-driver.log
 .env.local
 test/smoke.mjs
 test/smoke.mjs.map
+
+test/preview-*.png

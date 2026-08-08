@@ -77,6 +77,7 @@ export const icons = {
 	compact: ["M8 3.5h8M8 8h6M8 12.5h4M8 17h2.5", "M4 3.5v17M20 3.5v17"],
 	star: ["M12 3.8l2.6 5.3 5.8 1-4.2 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.2-4.2 5.8-1z"],
 	search: ["M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13z", "M21 21l-6-6"],
+	archive: ["M3.5 4.5h17V9h-17z", "M5.5 9v10.5h13V9", "M10 12.5h4"],
 } satisfies Record<string, string[]>;
 
 export type IconName = keyof typeof icons;

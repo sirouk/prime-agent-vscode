@@ -8,10 +8,16 @@ import type { RecentSession } from "../src/protocol.js";
 export interface HistoryDeps {
 	onResume: (path: string, sessionId: string) => void;
 	onDelete: (path: string, sessionId: string) => void;
+	onArchive: (path: string, sessionId: string) => void;
 	onRename: (path: string, sessionId: string, name: string) => void;
 	onStop: (path: string, sessionId: string) => void;
+	/** Ask the host to search the conversations themselves, not just these rows. */
+	onSearch: (query: string) => void;
 	onBack: () => void;
 }
+
+/** Host round-trip debounce: long enough to not search every keystroke, short enough to feel live. */
+const SEARCH_DEBOUNCE_MS = 220;
 
 export class HistoryView {
 	readonly root: HTMLElement;
@@ -26,7 +32,9 @@ export class HistoryView {
 		backBtn.appendChild(icon("back", 15));
 		backBtn.addEventListener("click", () => this.deps.onBack());
 		header.append(backBtn, el("span", "history-title", "Sessions in this workspace"));
-		// Search bar: client-side filter over the fetched list.
+		// Search bar. The local filter is the instant layer; the host searches the
+		// conversation bodies in parallel and hands back the extra rows with a
+		// snippet, so a phrase the operator only half-remembers still finds them.
 		this.searchEl = document.createElement("input");
 		this.searchEl.className = "history-search";
 		this.searchEl.placeholder = "Search sessions…";
@@ -34,6 +42,9 @@ export class HistoryView {
 		this.searchEl.addEventListener("input", () => {
 			this.query = this.searchEl.value;
 			this.render(this.lastSessions ?? [], this.currentId);
+			if (this.searchTimer !== undefined) clearTimeout(this.searchTimer);
+			const query = this.query;
+			this.searchTimer = setTimeout(() => this.deps.onSearch(query), SEARCH_DEBOUNCE_MS) as unknown as number;
 		});
 		this.headerEl = header;
 		this.listEl = el("div", "history-list");
@@ -45,6 +56,7 @@ export class HistoryView {
 	private lastSessions: RecentSession[] | null = null;
 	private query = "";
 	private fetching = false;
+	private searchTimer: number | undefined;
 
 	/** Keep the last render on screen while a fresh list arrives; mark subtly. */
 	showLoading(): void {
@@ -58,8 +70,11 @@ export class HistoryView {
 
 	render(sessions: RecentSession[], currentId?: string): void {
 		const needle = this.query.trim().toLowerCase();
+		// matchSnippet is the host's evidence that the conversation itself matched;
+		// without it in the haystack the local filter would drop the very rows the
+		// host just searched the transcripts to find.
 		const haystackFields = (s: RecentSession): string[] =>
-			[s.name, s.firstPrompt, s.cwd]
+			[s.name, s.firstPrompt, s.cwd, s.matchSnippet]
 				.filter((v): v is string => typeof v === "string" && v.length > 0)
 				.map((v) => v.toLowerCase());
 
@@ -82,37 +97,45 @@ export class HistoryView {
 			return pos >= Math.min(compactNeedle.length, 3) && pos === compactNeedle.length && compactNeedle.length > 0 ? 1 : 0;
 		};
 
-		const withRanks = sessions
-			.map((s) => ({ s, rank: rankOf(s) }))
-			.filter(({ rank }) => needle === "" || rank > 0);
-		withRanks.sort((a, b) => {
-			if (b.rank !== a.rank) return b.rank - a.rank;
-			const activityOf = (x: RecentSession): number =>
-				x.modifiedMs ?? (Number.isFinite(Date.parse(x.timestamp)) ? Date.parse(x.timestamp) : 0);
-			return activityOf(b.s) - activityOf(a.s);
-		});
-		const filtered = withRanks.map(({ s }) => s);
-		if (!needle) this.lastSessions = sessions;
+		// Dedupe by path: a host-side search appends rows the roster had capped
+		// away, and the operator must never see the same session twice.
+		const seen = new Set<string>();
+		const withRanks: Array<{ s: RecentSession; rank: number }> = [];
+		for (const s of sessions) {
+			if (seen.has(s.path)) continue;
+			seen.add(s.path);
+			const rank = rankOf(s);
+			if (needle !== "" && rank === 0) continue;
+			withRanks.push({ s, rank });
+		}
+		// Always keep the full list: the search box re-filters from `lastSessions`,
+		// so skipping this while a needle was active froze the list at whatever
+		// arrived before the operator started typing.
+		this.lastSessions = sessions;
 		this.currentId = currentId;
 		this.fetching = false;
 		this.root.classList.remove("refreshing");
 		this.listEl.textContent = "";
-		if (filtered.length === 0) {
+		if (withRanks.length === 0) {
 			this.listEl.appendChild(el("div", "history-empty", needle ? `No sessions match "${needle}".` : "No previous sessions found."));
 			return;
 		}
 		const activityOf = (s: RecentSession): number =>
 			s.modifiedMs ?? (Number.isFinite(Date.parse(s.timestamp)) ? Date.parse(s.timestamp) : 0);
-		const byActivityDesc = (a: RecentSession, b: RecentSession) => activityOf(b) - activityOf(a);
-		const inWorkspace = filtered.filter((s) => s.inWorkspace).sort(byActivityDesc);
-		const others = filtered.filter((s) => !s.inWorkspace).sort(byActivityDesc);
+		// Best hit first WITHIN each bucket, recency only as the tie-break — the
+		// ranks used to be computed and then thrown away by an unconditional
+		// re-sort on activity, so a name match lost to anything touched later.
+		const byRankThenActivity = (a: { s: RecentSession; rank: number }, b: { s: RecentSession; rank: number }) =>
+			b.rank - a.rank || activityOf(b.s) - activityOf(a.s);
+		const inWorkspace = withRanks.filter(({ s }) => s.inWorkspace).sort(byRankThenActivity);
+		const others = withRanks.filter(({ s }) => !s.inWorkspace).sort(byRankThenActivity);
 		if (inWorkspace.length > 0) {
 			this.listEl.appendChild(el("div", "history-group", "This workspace"));
-			for (const session of inWorkspace) this.listEl.appendChild(this.buildItem(session, false));
+			for (const { s } of inWorkspace) this.listEl.appendChild(this.buildItem(s, false));
 		}
 		if (others.length > 0) {
 			this.listEl.appendChild(el("div", "history-group", inWorkspace.length > 0 ? "Other folders" : "Sessions"));
-			for (const session of others) this.listEl.appendChild(this.buildItem(session, true));
+			for (const { s } of others) this.listEl.appendChild(this.buildItem(s, true));
 		}
 	}
 
@@ -134,8 +157,10 @@ export class HistoryView {
 				relativeTime(session.modifiedMs != null ? new Date(session.modifiedMs).toISOString() : session.timestamp),
 			),
 		);
-		// Running session: animated status dot next to its name.
-		if (session.running && !isCurrent) {
+		// Running session: animated status dot next to its name. Shown for the
+		// current session too — attaching to a live run must not make the run
+		// look finished on the next visit to history.
+		if (session.running) {
 			const run = el("span", "running-mark") as HTMLElement;
 			run.title = "Running right now";
 			run.appendChild(el("span", "running-dot"));
@@ -154,6 +179,21 @@ export class HistoryView {
 				});
 				actions.appendChild(stop);
 			}
+			// Archive is the CLI's non-destructive retire (kill + session_state
+			// archived): the transcript is kept, the row just leaves the list.
+			const archive = document.createElement("button");
+			archive.className = "history-action";
+			archive.title = "Archive session (keeps the transcript, removes it from this list)";
+			archive.appendChild(icon("archive", 11));
+			archive.addEventListener("click", (event) => {
+				event.stopPropagation();
+				this.armConfirm(item, session, actions, {
+					label: "Archive",
+					className: "history-action",
+					run: () => this.deps.onArchive(session.path, session.id),
+				});
+			});
+			actions.appendChild(archive);
 			const rename = document.createElement("button");
 			rename.className = "history-action";
 			rename.title = "Rename session";
@@ -168,14 +208,24 @@ export class HistoryView {
 			del.appendChild(icon("close", 11));
 			del.addEventListener("click", (event) => {
 				event.stopPropagation();
-				this.armDelete(item, session, actions, top);
+				this.armConfirm(item, session, actions, {
+					label: "Delete",
+					className: "history-action destructive",
+					run: () => this.deps.onDelete(session.path, session.id),
+				});
 			});
 			actions.append(rename, del);
 		}
 		top.appendChild(actions);
 		item.appendChild(top);
-		const sub = session.name && session.firstPrompt ? session.firstPrompt.slice(0, 110) : showFolder ? session.cwd : undefined;
-		if (sub) item.appendChild(el("div", "history-item-sub", sub));
+		// A row surfaced by a transcript hit shows the hit, so the operator can see
+		// why it matched instead of having to guess.
+		if (session.matchSnippet) {
+			item.appendChild(el("div", "history-item-sub match", session.matchSnippet.slice(0, 160)));
+		} else {
+			const sub = session.name && session.firstPrompt ? session.firstPrompt.slice(0, 110) : showFolder ? session.cwd : undefined;
+			if (sub) item.appendChild(el("div", "history-item-sub", sub));
+		}
 		if (!isCurrent) {
 			item.addEventListener("click", () => this.deps.onResume(session.path, session.id));
 		}
@@ -214,20 +264,25 @@ export class HistoryView {
 		input.select();
 	}
 
-	/** Inline one-tap confirm: swaps the subtle buttons for ✓ Delete / ✕ for a few seconds. */
-	private armDelete(item: HTMLElement, session: RecentSession, actions: HTMLElement, top: HTMLElement): void {
+	/** Inline one-tap confirm: swaps the subtle buttons for ✓ <label> / ✕ for a few seconds. */
+	private armConfirm(
+		item: HTMLElement,
+		session: RecentSession,
+		actions: HTMLElement,
+		action: { label: string; className: string; run: () => void },
+	): void {
 		if (item.classList.contains("confirming")) return;
 		item.classList.add("confirming");
 		actions.textContent = "";
 		const confirm = document.createElement("button");
-		confirm.className = "history-action destructive";
-		confirm.title = "Confirm delete";
+		confirm.className = action.className;
+		confirm.title = `Confirm ${action.label.toLowerCase()}`;
 		confirm.appendChild(icon("check", 12));
-		confirm.appendChild(document.createTextNode("Delete"));
+		confirm.appendChild(document.createTextNode(action.label));
 		confirm.addEventListener("click", (event) => {
 			event.stopPropagation();
 			item.classList.remove("confirming");
-			this.deps.onDelete(session.path, session.id);
+			action.run();
 		});
 		const cancel = document.createElement("button");
 		cancel.className = "history-action";

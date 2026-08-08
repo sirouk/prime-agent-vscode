@@ -52,7 +52,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 			enableScripts: true,
 			localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
 		};
-		view.webview.html = buildHtml(view.webview, this.extensionUri);
+		// Assign the document only when the webview has none. buildHtml() mints a
+		// fresh nonce every call, so re-assigning on every activity-bar toggle is
+		// always a different string and always reloads the webview — replaying the
+		// connecting splash and blanking the transcript, the composer and the
+		// operator's draft each time. Reading the property back also self-corrects
+		// if VS Code ever hands us a replaced, empty webview object.
+		if (!view.webview.html) {
+			view.webview.html = buildHtml(view.webview, this.extensionUri);
+		}
 		for (const d of this.receiveDisposables.splice(0)) d.dispose();
 		view.webview.onDidReceiveMessage(
 			(message: WebviewToHost) => {
@@ -195,6 +203,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 		case "stopSession":
 			await controller.stopSession(message.path, message.sessionId);
 			return;
+		case "archiveSession":
+			await controller.archiveSession(message.path, message.sessionId);
+			return;
 		case "backToParent":
 			await controller.backToParent();
 			return;
@@ -225,6 +236,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			return;
 		case "requestHistory":
 			await controller.listHistory();
+			return;
+		case "searchHistory":
+			await controller.searchHistory(message.query);
 			return;
 		case "setModel":
 			await controller.setModel(message.provider, message.modelId);

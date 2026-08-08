@@ -12,7 +12,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const VSCODE = "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
+// Same discovery as live-driver.mjs: a hardcoded path meant this whole gate
+// died on `ENOENT` for anyone whose VS Code is a Code/Insiders build.
+const _codeCandidates = [
+	"/Applications/Visual Studio Code.app/Contents/MacOS/Code",
+	"/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+	"/Applications/VS Code.app/Contents/MacOS/Code",
+	"/Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Code",
+];
+const VSCODE = process.env.E2E_CODE_BIN ?? _codeCandidates.find((c) => fs.existsSync(c));
+if (!VSCODE) {
+	console.error("no VS Code binary found — set E2E_CODE_BIN to the Electron/Code executable");
+	process.exit(1);
+}
 const WORKSPACE = process.env.E2E_WORKSPACE ?? os.homedir() + "/prime-agent-vs-ext";
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "pa-vscode-e2e-profile-"));
 const shotDir = path.resolve("test/e2e-shots");
@@ -20,13 +32,21 @@ fs.mkdirSync(shotDir, { recursive: true });
 
 let failed = 0;
 const checks = [];
+const skipped = [];
 function check(name, ok, detail = "") {
 	checks.push([name, ok]);
 	console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
 	if (!ok) failed += 1;
 }
+/** A path this run could not reach. Never silent: it is repeated in the tally. */
+function skip(name, why) {
+	skipped.push(`${name} — ${why}`);
+	console.log(`SKIP  ${name} — ${why}`);
+}
 
-const PATH = `${os.homedir()}/.hermes/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+// The extension host resolves `prime-agent` off this PATH; keep it to the
+// places a real install lands, not one author's toolchain.
+const PATH = `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${process.env.PATH ?? ""}`;
 const hostLog = path.join(os.tmpdir(), `pa-host-log-${Date.now()}.log`);
 fs.writeFileSync(hostLog, "");
 // Tests use a fast GLM model with thinking off so prompt round-trips don't
@@ -152,12 +172,27 @@ try {
 		await page.waitForTimeout(300);
 
 		// ---- 3. thinking menu ----
-		const thinkingBtn = frame.locator(".rail-pill").filter({ hasText: "thinking" }).first();
-		await thinkingBtn.click();
-		await page.waitForTimeout(400);
-		const thinkingItems = await frame.locator(".dropdown-item").count();
-		check("thinking menu lists levels", thinkingItems >= 5, `${thinkingItems}`);
-		await page.keyboard.press("Escape");
+		// Every step owns its failure: one dead locator used to burn 45s and take
+		// the prompt, resume, observe and abort steps down with it.
+		try {
+			// The brain pill is icon-only — hasText: "thinking" matched nothing.
+			const thinkingBtn = frame.locator(".rail-pill.brain").first();
+			await thinkingBtn.click();
+			await page.waitForTimeout(400);
+			// Only what the model declares: the level set is a property of the model,
+			// so assert membership rather than a fixed count.
+			const levelNames = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+			const thinkingItems = (await frame.locator(".dropdown-item").allTextContents()).map((t) => t.trim());
+			check(
+				"thinking menu lists only real levels",
+				thinkingItems.length > 0 && thinkingItems.every((t) => levelNames.some((l) => t.startsWith(l))),
+				thinkingItems.join("|"),
+			);
+			await page.keyboard.press("Escape");
+		} catch (err) {
+			check("thinking menu opens from the brain pill", false, String(err).slice(0, 120));
+			await page.keyboard.press("Escape").catch(() => {});
+		}
 
 		// ---- 4. prompt round-trip ----
 		try {
@@ -231,51 +266,61 @@ try {
 		}
 
 		// ---- 5. history: grouped, then resume ----
-		await frame.locator('button[title="Sessions in this workspace"]').click();
-		await page.waitForTimeout(1500);
-		const groupLabels = await frame.locator(".history-group").allTextContents();
-		check("history groups render", groupLabels.length >= 1, groupLabels.join("/"));
-		const itemCount = await frame.locator(".history-item").count();
-		check("history lists sessions", itemCount >= 1, `${itemCount} sessions`);
-		await shot("04-history");
-		if (itemCount >= 1) {
-			// Resume an inactive session (skip "(current)" items which are no-op).
-			const clickable = frame.locator(".history-item:not(.current)");
-			const clickableCount = await clickable.count();
-			check("history has non-current item", clickableCount >= 1, `${clickableCount}`);
-			const known = clickable.filter({ hasText: "Count from 1 to 50" }).first();
-			const knownVisible = await known.isVisible().catch(() => false);
-			if (knownVisible) {
-				await known.click();
-			} else {
-				await clickable.nth(1).click();
-			}
-			await page.waitForTimeout(6000);
-			const rows = await frame.locator(".messages .row").count();
-			const errNotices = await frame.locator(".notice.error").allTextContents();
-			check("resume switches into a transcript", rows > 0 && errNotices.length === 0, `rows=${rows} errors=${errNotices.join("|")}`);
-			await shot("05-resumed");
-
-			// Resume a session that is still live in a terminal daemon — the
-			// extension must fall back to read-only observe with a visible banner.
+		try {
 			await frame.locator('button[title="Sessions in this workspace"]').click();
-			await page.waitForTimeout(2000);
-			const liveItem = frame.locator(".history-item").filter({ hasText: "Study this" }).first();
-			const hasLiveItem = await liveItem.isVisible().catch(() => false);
-			if (hasLiveItem) {
-				await liveItem.click();
-				await page.waitForTimeout(7000);
-				const bannerVisible = await frame.locator(".observe-banner").isVisible().catch(() => false);
-				const obsRows = await frame.locator(".messages .row").count();
-				check("active session falls back to read-only observe", bannerVisible && obsRows > 0, `banner=${bannerVisible} rows=${obsRows}`);
-				await shot("06-observe");
-				// back to own session
-				await frame.locator(".observe-stop").click();
-				await page.waitForTimeout(4000);
-				check("stop watching returns to own session", !(await frame.locator(".observe-banner").isVisible().catch(() => false)));
-			} else {
-				console.log("  (no known live session to test the observe path against)");
+			await page.waitForTimeout(1500);
+			const groupLabels = await frame.locator(".history-group").allTextContents();
+			check("history groups render", groupLabels.length >= 1, groupLabels.join("/"));
+			const itemCount = await frame.locator(".history-item").count();
+			check("history lists sessions", itemCount >= 1, `${itemCount} sessions`);
+			await shot("04-history");
+			if (itemCount >= 1) {
+				// Resume an inactive session (skip "(current)" items which are no-op).
+				const clickable = frame.locator(".history-item:not(.current)");
+				const clickableCount = await clickable.count();
+				check("history has non-current item", clickableCount >= 1, `${clickableCount}`);
+				// Any non-current row proves the resume path; E2E_RESUME_MATCH only
+				// pins a specific thread when you are chasing one.
+				const resumeMatch = process.env.E2E_RESUME_MATCH ?? "";
+				const known = resumeMatch ? clickable.filter({ hasText: resumeMatch }).first() : null;
+				const knownVisible = known ? await known.isVisible().catch(() => false) : false;
+				if (knownVisible) {
+					await known.click();
+				} else {
+					await clickable.nth(Math.min(1, clickableCount - 1)).click();
+				}
+				await page.waitForTimeout(6000);
+				const rows = await frame.locator(".messages .row").count();
+				const errNotices = await frame.locator(".notice.error").allTextContents();
+				check("resume switches into a transcript", rows > 0 && errNotices.length === 0, `rows=${rows} errors=${errNotices.join("|")}`);
+				await shot("05-resumed");
+
+				// Resume a session that is still live in a terminal daemon — the
+				// extension must fall back to read-only observe with a visible banner.
+				await frame.locator('button[title="Sessions in this workspace"]').click();
+				await page.waitForTimeout(2000);
+				// The live row is whichever one carries the running mark — the old
+				// filter named a thread that only ever existed on one machine.
+				const liveRow = frame.locator(".history-item").filter({ has: frame.locator(".running-dot") }).first();
+				const hasLiveItem = await liveRow.isVisible().catch(() => false);
+				if (hasLiveItem) {
+					await liveRow.click();
+					await page.waitForTimeout(7000);
+					const bannerVisible = await frame.locator(".observe-banner").isVisible().catch(() => false);
+					const obsRows = await frame.locator(".messages .row").count();
+					check("active session falls back to read-only observe", bannerVisible && obsRows > 0, `banner=${bannerVisible} rows=${obsRows}`);
+					await shot("06-observe");
+					// back to own session
+					await frame.locator(".observe-stop").click();
+					await page.waitForTimeout(4000);
+					check("stop watching returns to own session", !(await frame.locator(".observe-banner").isVisible().catch(() => false)));
+				} else {
+					skip("C9 observe path", "no session is running in another client — start one in a terminal and rerun");
+				}
 			}
+		} catch (err) {
+			check("history + resume flow", false, String(err).slice(0, 120));
+			await shot("05-history-error").catch(() => {});
 		}
 
 		// ---- 6. stop button while streaming ----
@@ -298,6 +343,11 @@ try {
 			await shot("06-stop-error").catch(() => {});
 		}
 	}
+} catch (err) {
+	// `failed` only counts explicit check() calls, and process.exit() in the
+	// finally block runs before an exception can set a nonzero code — a broken
+	// locator used to skip half the suite and still report a green run.
+	check("e2e completed without throwing", false, String(err).slice(0, 200));
 } finally {
 	try {
 		console.log("host debug log:", fs.readFileSync(hostLog, "utf8").slice(-1200));
@@ -308,5 +358,7 @@ try {
 	fs.rmSync(profile, { recursive: true, force: true });
 	const passed = checks.filter(([, ok]) => ok).length;
 	console.log(`\n${passed}/${checks.length} real-shell checks passed`);
+	// Say it twice, at the end: an unverified journey must never read as a pass.
+	if (skipped.length > 0) console.log(`${skipped.length} journey(s) NOT VERIFIED:\n  - ${skipped.join("\n  - ")}`);
 	process.exit(failed > 0 ? 1 : 0);
 }

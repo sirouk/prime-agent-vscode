@@ -45,6 +45,16 @@ window.eval(code);
 check("sends ready on boot", posted.some((m) => m.type === "ready"));
 check("welcome screen visible", !!document.querySelector(".welcome"));
 
+// --- #34: the connect experience. Until the FIRST live status the splash is the
+// whole panel — that is what keeps the input box away from an operator whose
+// agent isn't answering yet. Held by reference: retiring removes the node.
+const splash = document.querySelector(".boot-splash");
+check("boot splash covers the panel before any status", !!splash && !splash.className.includes("gone"), splash?.className ?? "<none>");
+check("splash shows the Prime Agent mark and name",
+	!!splash?.querySelector('svg[viewBox="0 0 178 178"]') && document.querySelector(".boot-splash-name")?.textContent === "Prime Agent");
+check("splash says what it is waiting for", (document.querySelector(".boot-splash-sub")?.textContent ?? "").includes("connecting"),
+	document.querySelector(".boot-splash-sub")?.textContent ?? "<none>");
+
 const baseStatus = {
 	connected: true, streaming: false, compacting: false, retrying: false, restoring: false,
 	modelLabel: "chutes/kimi", thinkingLevel: "max", sessionName: "demo", sessionId: "019fd749-x",
@@ -63,12 +73,15 @@ hostMessage({
 				{ type: "thinking", thinking: "hmm" },
 				{ type: "text", text: "I will edit the file.\n\n- a\n- b\n\n```py\nprint(1)\n```" },
 				{ type: "toolCall", id: "tc1", name: "edit", arguments: { path: "src/app.ts", edits: [{ oldText: "const x = 1;", newText: "const x = 2;\nconst y = 3;" }] } },
-				{ type: "toolCall", id: "tc2", name: "bash", arguments: { command: "npm run build" } },
+				// Real shape: prime-agent's default active toolset is `ipython` alone, so a
+				// shell run arrives as a %%bash cell, never as a tool named `bash`.
+				{ type: "toolCall", id: "tc2", name: "ipython", arguments: { code: "%%bash\nset -euo pipefail\ncd /Users/chrisk/repo\nnpm run build" } },
+				{ type: "toolCall", id: "tc3", name: "ipython", arguments: { code: "import os\nimport time\nsubprocess.run([\"git\", \"status\"])" } },
 			],
-			usage: { totalTokens: 15, cost: { total: 0.01 } },
+			usage: { input: 4555, output: 348, totalTokens: 4903, cost: { input: 0.013665, output: 0.00522, total: 0.018885 } },
 		},
 		{ role: "toolResult", toolCallId: "tc1", toolName: "edit", content: [{ type: "text", text: "edited src/app.ts" }] },
-		{ role: "toolResult", toolCallId: "tc2", toolName: "bash", content: [{ type: "text", text: "done" }] },
+		{ role: "toolResult", toolCallId: "tc2", toolName: "ipython", content: [{ type: "text", text: "done" }] },
 		{ role: "assistant", model: "kimi", stopReason: "stop", content: [{ type: "text", text: "The answer is **4**." }] },
 	],
 	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
@@ -77,6 +90,7 @@ hostMessage({
 });
 
 const scroller = document.querySelector(".messages");
+check("boot splash retires on the first connected status", splash.className.includes("gone"), splash.className);
 check("welcome removed after snapshot", !document.querySelector(".welcome"));
 check("user bubble rendered", !!scroller.querySelector(".bubble-user"));
 check("assistant row has no avatar (full width)", !scroller.querySelector(".avatar svg") && !!scroller.querySelector(".row-assistant .row-body"));
@@ -90,6 +104,82 @@ check("bash term prompt rendered", [...scroller.querySelectorAll(".term-prompt")
 check("no busy done pill (dot conveys state)", [...scroller.querySelectorAll(".tool-pill")].every((p) => p.textContent !== "done"));
 check("usage line rendered", scroller.querySelectorAll(".usage-line").length >= 1);
 check("user footer with copy + fork", !!scroller.querySelector(".row-user .user-footer .uf-icon") && scroller.querySelectorAll(".row-user .user-footer .uf-icon").length === 2);
+
+// --- #56/#20: an ipython %%bash cell is a SHELL card, summarised by what actually ran ---
+const shellCard = [...scroller.querySelectorAll(".tool")].find((t) => t.dataset.toolKind === "shell");
+const pyCard = [...scroller.querySelectorAll(".tool")].find((t) => t.dataset.toolKind === "python");
+check("%%bash ipython cell is a shell card", !!shellCard && shellCard.dataset.toolName === "ipython",
+	[...scroller.querySelectorAll(".tool")].map((t) => `${t.dataset.toolName}/${t.dataset.toolKind}`).join("|"));
+check("shell summary shows the command, not the cd/set preamble",
+	shellCard?.querySelector(".tool-summary")?.textContent === "npm build",
+	shellCard?.querySelector(".tool-summary")?.textContent ?? "<none>");
+check("shell section labeled shell, not python",
+	shellCard?.querySelector(".tool-section-head span")?.textContent === "shell",
+	shellCard?.querySelector(".tool-section-head span")?.textContent ?? "<none>");
+check("shell input drops the %%bash magic line",
+	!shellCard?.querySelector(".tool-section:not(.tool-result) pre")?.textContent?.includes("%%bash"),
+	shellCard?.querySelector(".tool-section:not(.tool-result) pre")?.textContent ?? "<none>");
+check("plain python cell stays a python card, summarised by its real work",
+	!!pyCard && pyCard.querySelector(".tool-summary").textContent === "git status",
+	pyCard?.querySelector(".tool-summary")?.textContent ?? "<none>");
+
+// copy of a shell card fences as bash, without the decorative $ prompt
+let clipboard = "";
+Object.defineProperty(window.navigator, "clipboard", {
+	configurable: true,
+	get: () => ({ writeText: async (t) => { clipboard = t; } }),
+});
+shellCard.querySelector(".tool-copy-all").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await new Promise((r) => setTimeout(r, 0));
+check("shell copy uses a bash fence with the real script", clipboard.includes("```bash\nset -euo pipefail") && !clipboard.includes("$ "), JSON.stringify(clipboard));
+check("shell copy carries the output too", clipboard.includes("done"), JSON.stringify(clipboard));
+
+// #20: an edit card copies its diff, and its output exactly once
+const editCard = [...scroller.querySelectorAll(".tool")].find((t) => t.dataset.toolName === "edit");
+clipboard = "";
+editCard.querySelector(".tool-copy-all").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await new Promise((r) => setTimeout(r, 0));
+check("edit copy includes the path and the hunks", clipboard.includes("src/app.ts") && clipboard.includes("```diff") && clipboard.includes("-const x = 1;") && clipboard.includes("+const y = 3;"), JSON.stringify(clipboard));
+check("edit copy emits the output once, not twice", clipboard.split("edited src/app.ts").length - 1 === 1, JSON.stringify(clipboard));
+
+// --- #23: the user turn shows a price, honestly labeled as the reply's input cost ---
+const ufCost = scroller.querySelector(".row-user .user-footer .uf-cost");
+check("user footer shows the metered turn input price", !!ufCost && ufCost.textContent === "$0.0137 input", ufCost?.textContent ?? "<none>");
+check("price says it prices the reply's context, not the message", (ufCost?.title ?? "").includes("not each message"), ufCost?.title ?? "");
+check("token count stays an honest estimate", scroller.querySelector(".row-user .uf-tokens").textContent.includes("(est.)"));
+
+// --- #22: expanding a collapsed block keeps the selection and sweeps in what it revealed ---
+const thinking = scroller.querySelector("details.thinking");
+const summaryEl = thinking.querySelector("summary");
+const prose = scroller.querySelector(".row-assistant .md");
+const selRange = document.createRange();
+selRange.setStart(summaryEl.firstChild, 0);
+selRange.setEnd(prose.firstChild.firstChild ?? prose.firstChild, 1);
+const sel = window.getSelection();
+sel.removeAllRanges();
+sel.addRange(selRange);
+summaryEl.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true }));
+thinking.open = true;
+thinking.dispatchEvent(new window.Event("toggle", { bubbles: true }));
+const after = window.getSelection();
+check("selection spanning a collapsed block survives expanding it",
+	after.rangeCount === 1 && !after.getRangeAt(0).collapsed && after.getRangeAt(0).startContainer === summaryEl.firstChild,
+	`ranges=${after.rangeCount} collapsed=${after.rangeCount ? after.getRangeAt(0).collapsed : "n/a"}`);
+// ...and a selection that ENDED inside the collapsed block extends over the text
+// the expand just revealed, so the operator never re-selects (#22).
+thinking.open = false;
+const inner = document.createRange();
+inner.setStart(summaryEl.firstChild, 0);
+inner.setEnd(summaryEl.firstChild, 7);
+sel.removeAllRanges();
+sel.addRange(inner);
+summaryEl.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true }));
+thinking.open = true;
+thinking.dispatchEvent(new window.Event("toggle", { bubbles: true }));
+const swept = window.getSelection().getRangeAt(0);
+check("expanding sweeps the selection over the revealed thinking text",
+	thinking.querySelector(".thinking-body").contains(swept.endContainer),
+	`end=${swept.endContainer.nodeValue ?? swept.endContainer.nodeName}`);
 check("session title shown", document.querySelector(".session-title").textContent === "demo");
 check("live badge", document.querySelector(".live-label").textContent === "live");
 check("context meter labeled", document.querySelector(".context-label").textContent.includes("262k"));
@@ -132,15 +222,18 @@ modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const glmRowAcc = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("glm"));
 check("no brain accessory on model rows", glmRowAcc && !glmRowAcc.querySelector(".dropdown-brain"));
 document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-// reasoning model: brain pill opens the levels menu ("max" normalized & marked current)
-hostMessage({ type: "status", status: { ...baseStatus } });
-hostMessage({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" }, status: baseStatus });
+// reasoning model: the brain pill lists exactly what the model declares. Kimi K3 TEE's
+// real thinkingLevelMap maps every level to null except "max" — the host derives that
+// and the menu must show "max" as its own row and never invent "xhigh".
+const kimiLevels = { ...baseStatus, availableThinkingLevels: ["off", "minimal", "low", "medium", "high", "max"] };
+hostMessage({ type: "status", status: kimiLevels });
+hostMessage({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" }, status: kimiLevels });
 document.querySelector(".composer-rail .rail-pill.brain").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const tDrop = document.querySelector(".dropdown");
 check("thinking menu opens from brain pill", !!tDrop && (tDrop.querySelector(".dropdown-header")?.textContent ?? "").startsWith("Thinking —"));
 const tLevels = [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].map((r) => r.textContent.trim());
-check("all six levels listed", tLevels.some((l) => l.startsWith("xhigh")) && tLevels.some((l) => l.startsWith("off")));
-check("current level marked (max normalized)", [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].some((r) => r.className.includes("current") && r.textContent.startsWith("xhigh")));
+check("max listed as its own level, xhigh not invented", tLevels.some((l) => l.startsWith("max")) && !tLevels.some((l) => l.startsWith("xhigh")), JSON.stringify(tLevels));
+check("current level marked (max, unaliased)", [...(tDrop?.querySelectorAll(".dropdown-item") ?? [])].some((r) => r.className.includes("current") && r.textContent.startsWith("max")));
 posted.length = 0;
 [...tDrop.querySelectorAll(".dropdown-item")].find((r) => r.textContent.startsWith("high")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("select posts setThinkingLevel", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"));
@@ -149,6 +242,13 @@ hostMessage({ type: "status", status: { ...baseStatus, availableThinkingLevels: 
 document.querySelector(".composer-rail .rail-pill.brain").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const treatedLevels = [...(document.querySelector(".dropdown")?.querySelectorAll(".dropdown-item") ?? [])].map((r) => r.textContent.trim());
 check("available levels filter the picker", treatedLevels.length === 3 && treatedLevels.every((l) => ["off", "medium", "high"].some((a) => l.startsWith(a))), JSON.stringify(treatedLevels));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+// unknown model (no list from the host): fall back to the levels every reasoning model
+// takes — never xhigh/max, which exist only where the model declares them.
+hostMessage({ type: "status", status: { ...baseStatus, availableThinkingLevels: null } });
+document.querySelector(".composer-rail .rail-pill.brain").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const fallbackLevels = [...(document.querySelector(".dropdown")?.querySelectorAll(".dropdown-item") ?? [])].map((r) => r.textContent.trim());
+check("unknown model never offers xhigh/max", fallbackLevels.length === 5 && !fallbackLevels.some((l) => l.startsWith("xhigh") || l.startsWith("max")), JSON.stringify(fallbackLevels));
 document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 
 // --- unified attach menu (vision-gated image item on a text model) ---
@@ -226,27 +326,58 @@ check("active badge on streaming child", [...rows].some((r) => r.querySelector("
 posted.length = 0;
 [...rows].find((r) => r.textContent.includes("verify-threads")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("browse posts browseChild", posted.some((m) => m.type === "browseChild" && m.activeSessionId === "abcdef123450"));
-// host confirms the browse with a parent context: back-row appears and is clickable
+// host confirms the browse with a parent context: back-row appears and is clickable.
+// The viewed subagent stays in the list — leaving it out is what made the count
+// drop by one and left the green "viewing" highlight with nothing to land on.
 hostMessage({
 	type: "sessionChildren",
 	children: [],
 	parent: { id: "019fd749-root", activeSessionId: "019fd749main", name: "parent-agent" },
 	siblings: [
-		{ id: "019fdaa2-0001", activeSessionId: "abcdef123451", name: "audit-style", runtimeKind: "subagent", rlmDepth: 1, isStreaming: false, attachedClients: 1 },
+		{ id: "019fdaa1-0000", activeSessionId: "abcdef123450", name: "verify-threads", runtimeKind: "subagent", rlmDepth: 1, status: "running", isStreaming: true, attachedClients: 1 },
+		{ id: "019fdaa2-0001", activeSessionId: "abcdef123451", name: "audit-style", runtimeKind: "subagent", rlmDepth: 1, status: "idle", isStreaming: false, attachedClients: 1 },
 	],
 	viewedActiveSessionId: "abcdef123450",
 });
 const backRow = document.querySelector(".subagents-strip .subagents-back-row");
 check("back-row appears while viewing a child", !!backRow, document.querySelector(".subagents-strip")?.textContent?.slice(0, 60) ?? "");
-check("siblings section lists the other children", [...document.querySelectorAll(".subagents-list.siblings .subagent-row")].length === 1);
+check("sibling section keeps every child of the parent", [...document.querySelectorAll(".subagents-list.siblings .subagent-row")].length === 2);
+const viewingRow = document.querySelector(".subagent-row.viewing");
+check("viewed child is highlighted", !!viewingRow && viewingRow.textContent.includes("verify-threads"), viewingRow?.textContent ?? "none");
+check("count does not drop on entering a child", document.querySelector(".subagents-header").textContent.includes("Subagents (2)"), document.querySelector(".subagents-header").textContent);
+// historical (finished, non-resident) subagents: separate collapsed group, not counted as live
+hostMessage({
+	type: "sessionChildren",
+	children: [
+		{ id: "live-1", activeSessionId: "aaaa0001", name: "shell-adapter", runtimeKind: "subagent", rlmDepth: 1, status: "idle", isStreaming: false, attachedClients: 0 },
+		{ id: "done-1", activeSessionId: "019fd742-done1", name: "verify-vault", runtimeKind: "subagent", rlmDepth: 1, status: "inactive", isStreaming: false, attachedClients: 0 },
+		{ id: "done-2", activeSessionId: "019fd742-done2", name: "verify-shell", runtimeKind: "subagent", rlmDepth: 1, status: "inactive", isStreaming: false, attachedClients: 0 },
+	],
+	parent: { id: "019fd749-root", activeSessionId: "019fd749main", name: "parent-agent" },
+});
+check("header separates live from finished", document.querySelector(".subagents-header").textContent.includes("Subagents (1 live · 2 finished)"), document.querySelector(".subagents-header").textContent);
+check("live list holds only the resident subagent", document.querySelectorAll(".subagents-list:not(.historical) .subagent-row").length === 1);
+check("historical group is collapsed by default", !document.querySelector(".subagents-list.historical"));
+const histHead = document.querySelector(".subagents-subhead");
+check("historical group has its own toggle", !!histHead && histHead.textContent.includes("Historical (2)"), histHead?.textContent ?? "none");
+histHead.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("expanding historical reveals the finished rows", document.querySelectorAll(".subagents-list.historical .subagent-row").length === 2);
+check("finished rows read finished, not idle", [...document.querySelectorAll(".subagents-list.historical .subagent-badge")].every((b) => b.textContent === "finished"));
+histHead.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 posted.length = 0;
-backRow.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+document.querySelector(".subagents-strip .subagents-back-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("back-row click posts backToParent", posted.some((m) => m.type === "backToParent"));
 
-// --- boot splash: present on cold start, gone after first live status ---
-check("boot splash visible on cold start", !!document.querySelector(".boot-splash"));
+// --- #34: once connected the splash is done for good. A dropout mid-conversation
+// may only move the status strip — a butterfly fading back over a live transcript
+// is exactly what the operator ruled out.
 hostMessage({ type: "status", status: { ...baseStatus, connected: true, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
-check("boot splash dismissed once connected", [...document.querySelectorAll(".boot-splash")].length === 0 || [...document.querySelectorAll(".boot-splash")].every((s) => s.className.includes("gone")));
+hostMessage({ type: "status", status: { ...baseStatus, connected: false } });
+check("a later disconnect does not re-fade the splash",
+	splash.className.includes("gone") && ![...document.querySelectorAll(".boot-splash")].some((s) => !s.className.includes("gone")),
+	splash.className);
+check("the dropout is told in the status strip instead", document.querySelector(".live-label").textContent === "offline", document.querySelector(".live-label").textContent);
+hostMessage({ type: "status", status: { ...baseStatus, connected: true, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 
 // --- send button muted until content ---
 const sendBtn = document.querySelector(".composer-dock .send-btn:not(.stop)");
@@ -276,8 +407,45 @@ check("threshold flyout opens", !!flyout && flyout.className.includes("visible")
 hostMessage({ type: "status", status: { ...baseStatus, compactDefaultPercent: 94 } });
 check("flyout shows default state", flyout.querySelector(".threshold-title").textContent.includes("Agent auto-compact"), flyout.querySelector(".threshold-title").textContent);
 check("flyout value shows pct + tokens", flyout.querySelector(".threshold-value").textContent.includes("94% · 246k"), flyout.querySelector(".threshold-value").textContent);
+const tSlider = flyout.querySelector(".threshold-slider");
+check("slider reaches the agent default instead of clamping to 80", tSlider.max === "94" && tSlider.value === "94", `max=${tSlider.max} value=${tSlider.value}`);
+// #20: "max 80% reduction" is the floor — a slider that goes below 20% of the
+// original context length is offering a compaction the agent will not honour.
+check("slider floors at 20% of the original context", tSlider.min === "20" && tSlider.step === "5", `min=${tSlider.min} step=${tSlider.step}`);
+// #35: the tick marks the real threshold, and moves when the session overrides it.
+const tickDefault = meter.querySelector(".context-tick");
+check("threshold tick sits at the agent default", !!tickDefault && tickDefault.style.left === "94%" && !tickDefault.className.includes("override"),
+	`${tickDefault?.style.left ?? "<none>"} ${tickDefault?.className ?? ""}`);
+check("default tick says whose threshold it is", (tickDefault?.title ?? "").includes("default"), tickDefault?.title ?? "<none>");
 hostMessage({ type: "compactThreshold", percent: 55 });
 check("flyout switches to override state", flyout.querySelector(".threshold-title").textContent.includes("Force session auto-compact"), flyout.querySelector(".threshold-title").textContent);
+const tickOverride = meter.querySelector(".context-tick");
+check("tick moves to the override and marks itself as one",
+	tickOverride?.style.left === "55%" && tickOverride.className.includes("override"),
+	`${tickOverride?.style.left ?? "<none>"} ${tickOverride?.className ?? ""}`);
+// #49: nothing inside the popover may close it — a range drag ends in a click on the slider
+posted.length = 0;
+tSlider.value = "40";
+tSlider.dispatchEvent(new window.Event("input", { bubbles: true }));
+tSlider.dispatchEvent(new window.Event("change", { bubbles: true }));
+tSlider.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("slider drag posts the threshold and keeps the popover open",
+	posted.some((m) => m.type === "setCompactThreshold" && m.percent === 40) && flyout.className.includes("visible"),
+	`visible=${flyout.className}`);
+// #41/#49: the reset is the small circle-arrow, and it restores the agent level,
+// shows its percentage, and leaves the popover standing.
+const resetBtn = flyout.querySelector(".threshold-reset");
+check("reset is an icon control, not a wrapping word button", !!resetBtn?.querySelector("svg") && resetBtn.textContent === "", JSON.stringify(resetBtn?.textContent ?? "<none>"));
+posted.length = 0;
+resetBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("reset clears the session override", posted.some((m) => m.type === "setCompactThreshold" && m.percent === null), JSON.stringify(posted));
+check("reset restores the agent level and shows its percentage",
+	flyout.querySelector(".threshold-title").textContent.includes("Agent auto-compact") && flyout.querySelector(".threshold-value").textContent.includes("94%"),
+	`${flyout.querySelector(".threshold-title").textContent} / ${flyout.querySelector(".threshold-value").textContent}`);
+const tickReset = meter.querySelector(".context-tick");
+check("tick returns to the agent default", tickReset?.style.left === "94%" && !tickReset.className.includes("override"),
+	`${tickReset?.style.left ?? "<none>"} ${tickReset?.className ?? ""}`);
+check("reset keeps the popover open", flyout.className.includes("visible"), flyout.className);
 flyout.closest(".context-meter")?.classList.remove("visible");
 document.body.click();
 
@@ -323,6 +491,37 @@ hostMessage({
 const cards = document.querySelectorAll(".spawned-card");
 check("baseline seeds cards only for running children", cards.length === 1 && cards[0].textContent.includes("Subagent spawned — audit-live"), cards.length + " cards: " + [...cards].map((c) => c.textContent).join("|"));
 check("re-broadcast does not duplicate the spawn card", document.querySelectorAll(".spawned-card").length === 1);
+
+// --- spawn card placement: at the creation point in the run, not dumped at the bottom.
+// Message timestamps are epoch-ms numbers (the agent writes Date.now()), which is
+// what tags the rows the ordered insert compares against.
+const spawnT0 = Date.parse("2026-08-07T12:00:00Z");
+const spawnCreated = new Date(spawnT0 + 300_000).toISOString();
+hostMessage({
+	type: "snapshot",
+	messages: [
+		{ role: "user", content: "kick off the audit", timestamp: spawnT0 },
+		{ role: "assistant", model: "kimi", stopReason: "stop", content: [{ type: "text", text: "audit finished" }], timestamp: spawnT0 + 600_000 },
+	],
+	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "high" },
+	status: baseStatus,
+});
+hostMessage({
+	type: "sessionChildren",
+	children: [
+		{ id: "mid-sub", activeSessionId: "dddd4444", name: "mid-run", runtimeKind: "subagent", created: spawnCreated, status: "running", isStreaming: true, attachedClients: 0, rlmDepth: 1 },
+	],
+	spawned: [{ activeSessionId: "dddd4444", name: "mid-run", created: spawnCreated }],
+});
+const placed = [...document.querySelector(".messages").children];
+const cardIdx = placed.findIndex((n) => n.className.includes("spawned-card"));
+const userIdx = placed.findIndex((n) => n.className.includes("row-user"));
+const asstIdx = placed.findIndex((n) => n.className.includes("row-assistant"));
+check(
+	"spawn card sits between the messages that bracket its start time",
+	cardIdx > userIdx && cardIdx < asstIdx && userIdx >= 0 && asstIdx >= 0,
+	`user=${userIdx} card=${cardIdx} assistant=${asstIdx}`,
+);
 
 // --- history: running indicator + stop/rename/delete ordering ---
 hostMessage({
@@ -437,6 +636,54 @@ textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbl
 const prompt2 = posted.find((m) => m.type === "prompt");
 check("folder mention sent inline", !!prompt2 && prompt2.payload.text.includes("@webview/"));
 
+// --- mentions the pattern alone cannot recognise (#19: it must LOOK selected) ---
+posted.length = 0;
+textarea.value = "@LICE";
+textarea.selectionStart = textarea.selectionEnd = 5;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+const reqLic = posted.filter((m) => m.type === "searchFiles").at(-1);
+hostMessage({ type: "fileSearchResults", requestId: reqLic.requestId, files: [{ path: "LICENSE", isDir: false }] });
+[...document.querySelectorAll(".ac-item")][0].dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true }));
+check("extensionless mention pilled once accepted", [...document.querySelectorAll(".composer-mirror .mm")].some((m) => m.textContent === "@LICENSE"), textarea.value);
+textarea.value = "look at @.github/workflows/publish.yml now";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+check("dot-prefixed path styles", [...document.querySelectorAll(".composer-mirror .mm")].some((m) => m.textContent === "@.github/workflows/publish.yml"));
+textarea.value = "ping @bob about it";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+check("bare @word is never a mention", document.querySelectorAll(".composer-mirror .mm").length === 0);
+
+// --- a mention search with no matches must disarm the panel, not swallow Enter ---
+posted.length = 0;
+textarea.value = "explain @zzzmissing";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+const reqMiss = posted.filter((m) => m.type === "searchFiles").at(-1);
+hostMessage({ type: "fileSearchResults", requestId: reqMiss.requestId, files: [] });
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("zero-result mention does not swallow Enter", posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+
+// --- `+` -> "Mention a file in chat" mid-sentence: needs a separator or nothing opens ---
+textarea.value = "review the changes in";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+const plusBtn = [...document.querySelectorAll(".composer-rail .icon-btn")].find((b) => b.title.startsWith("Attach"));
+plusBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+[...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("Mention a file")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("+ mention inserts a separated @", textarea.value === "review the changes in @", JSON.stringify(textarea.value));
+check("+ mention opens the file search", posted.some((m) => m.type === "searchFiles"), JSON.stringify(posted.map((m) => m.type)));
+textarea.value = "";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+// --- sticky drafts are per thread: an empty payload CLEARS, it is not "no news" ---
+hostMessage({ type: "draft", text: "remember to check the retry path" });
+check("draft restored into the composer", textarea.value === "remember to check the retry path", textarea.value);
+hostMessage({ type: "draft", text: "" });
+check("empty draft clears the box so it can't follow into the next thread", textarea.value === "", textarea.value);
+
 // --- paste image on a text-only model shows a composer hint ---
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 posted.length = 0;
@@ -535,6 +782,143 @@ check(
 	"cancel restores item",
 	!!restored && restored !== cancelItem && !restored.classList.contains("confirming") && !!restored.querySelector(".history-action"),
 );
+
+// --- history: archive is a distinct, non-destructive action (CLI stop/deactivate) ---
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "arch-1", path: "/tmp/arch.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "finished experiment", inWorkspace: true },
+	],
+});
+const archRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("finished experiment"));
+const archBtn = [...archRow.querySelectorAll(".history-action")].find((b) => (b.title ?? "").startsWith("Archive"));
+check("history row offers archive alongside delete", !!archBtn);
+posted.length = 0;
+archBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("archive arms its own confirm", archRow.classList.contains("confirming"));
+const archConfirm = [...archRow.querySelectorAll(".history-action")].find((b) => b.textContent.includes("Archive"));
+check("archive confirm is not styled destructive", !archConfirm.classList.contains("destructive"));
+archConfirm.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("confirm posts archiveSession", posted.some((m) => m.type === "archiveSession" && m.sessionId === "arch-1"), JSON.stringify(posted));
+check("archive does not post deleteSession", !posted.some((m) => m.type === "deleteSession"));
+
+// --- history search reaches the host, and transcript hits rank and explain themselves ---
+posted.length = 0;
+document.querySelector(".history-search").value = "octopus";
+document.querySelector(".history-search").dispatchEvent(new window.Event("input", { bubbles: true }));
+await new Promise((resolve) => setTimeout(resolve, 400));
+check("typing asks the host to search the conversations", posted.some((m) => m.type === "searchHistory" && m.query === "octopus"), JSON.stringify(posted));
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "s-name", path: "/tmp/s-name.jsonl", cwd: "/ws", timestamp: new Date(Date.now() - 90_000).toISOString(), modifiedMs: Date.now() - 90_000, name: "octopus notes", inWorkspace: true },
+		{ id: "s-body", path: "/tmp/s-body.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), modifiedMs: Date.now(), name: "unrelated title", inWorkspace: true, matchSnippet: "…we talked about the octopus problem…" },
+		{ id: "s-body", path: "/tmp/s-body.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), modifiedMs: Date.now(), name: "unrelated title", inWorkspace: true, matchSnippet: "…we talked about the octopus problem…" },
+	],
+});
+const searchNames = [...document.querySelectorAll(".history-item .history-item-name")].map((n) => n.textContent);
+check("transcript-only hit survives the local filter", searchNames.includes("unrelated title"), searchNames.join("|"));
+check("duplicate rows from the host are collapsed by path", searchNames.length === 2, searchNames.join("|"));
+check("match snippet shown as the row subtitle", !!document.querySelector(".history-item-sub.match"));
+document.querySelector(".history-search").value = "";
+document.querySelector(".history-search").dispatchEvent(new window.Event("input", { bubbles: true }));
+
+// --- thread diffs: the Changes panel only ever asserts what it can show ---
+const tdPanel = document.querySelector(".td-panel");
+check("changes panel exists but stays hidden with no changes", !!tdPanel && !tdPanel.classList.contains("visible"));
+hostMessage({
+	type: "threadDiffs",
+	files: [
+		{ path: "src/a.ts", viaSource: "edit", hunks: [{ removed: ["old"], added: ["new"] }, { removed: [], added: ["x"], agent: "verify-vault" }] },
+		{ path: "src/b.ts", viaSource: "edit", hunks: [{ removed: [], added: ["only"], agent: "verify-vault" }] },
+		// A row with no hunks would claim a change with nothing behind it.
+		{ path: "src/ghost.ts", viaSource: "edit", hunks: [] },
+	],
+});
+check("panel appears once there are changes", tdPanel.classList.contains("visible"));
+check("hunkless row is dropped", document.querySelector(".td-header").textContent.includes("Changes (2)"), document.querySelector(".td-header").textContent);
+document.querySelector(".td-header").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const tdPaths = [...document.querySelectorAll(".td-path")].map((n) => n.textContent);
+check("expanded list shows the changed files", tdPaths.join("|") === "src/a.ts|src/b.ts", tdPaths.join("|"));
+check("subagent named on the row it edited", [...document.querySelectorAll(".td-file")][1].textContent.includes("verify-vault"));
+check("coverage footnote states what the panel cannot show", (document.querySelector(".td-foot")?.textContent ?? "").includes("changed-files strip"));
+[...document.querySelectorAll(".td-row")][0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const tdDetail = document.querySelector(".td-detail");
+check("hunk lines render red/green", tdDetail.querySelectorAll(".diff-line.del").length === 1 && tdDetail.querySelectorAll(".diff-line.add").length === 2);
+const byLabels = [...tdDetail.querySelectorAll(".td-by")].map((n) => n.textContent);
+check("a file two agents touched attributes every block", byLabels.join("|") === "this session|subagent verify-vault", byLabels.join("|"));
+
+// --- C12: the two links the operator asked for, and the butterfly on the entry ---
+posted.length = 0;
+const kebabBtn = [...document.querySelectorAll(".topbar .icon-btn")].find((b) => b.title === "Session actions");
+kebabBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const kebabMenu = document.querySelector(".menu.visible");
+check("kebab menu opens", !!kebabMenu);
+const kebabItems = [...kebabMenu.querySelectorAll(".menu-item")];
+const visitItem = kebabItems[kebabItems.length - 1];
+check("bottom kebab entry is Visit Prime Intellect", visitItem.textContent.trim() === "Visit Prime Intellect", kebabItems.map((i) => i.textContent.trim()).join("|"));
+// #44: the butterfly, not a generic link glyph — same mark as the brand.
+check("that entry wears the butterfly", !!visitItem.querySelector('svg[viewBox="0 0 178 178"]'));
+check("every kebab entry says what it does", kebabItems.every((i) => i.textContent.trim().length > 0));
+visitItem.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("visit opens the Prime Intellect dashboard", posted.some((m) => m.type === "openExternal" && m.url === "https://app.primeintellect.ai"), JSON.stringify(posted));
+check("choosing an entry closes the menu", !document.querySelector(".menu.visible"));
+posted.length = 0;
+document.querySelector(".topbar .brand").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("header mark opens the prime-agent write-up",
+	posted.some((m) => m.type === "openExternal" && m.url === "https://www.primeintellect.ai/blog/prime-agent#article-top"), JSON.stringify(posted));
+
+// --- #5/C10: steer vs queue while a run is live, and a Stop that really aborts ---
+const behaviorPill = document.querySelector(".composer-rail .rail-pill.behavior");
+const stopBtn = document.querySelector(".composer-dock .send-btn.stop");
+check("run controls stay hidden while idle", behaviorPill.style.display === "none" && stopBtn.style.display === "none",
+	`behavior=${behaviorPill.style.display} stop=${stopBtn.style.display}`);
+hostMessage({ type: "status", status: { ...baseStatus, streaming: true } });
+check("run controls appear while streaming", behaviorPill.style.display !== "none" && stopBtn.style.display !== "none",
+	`behavior=${behaviorPill.style.display} stop=${stopBtn.style.display}`);
+check("delivery starts at the configured default", behaviorPill.textContent === "steer", behaviorPill.textContent);
+behaviorPill.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("toggle flips to queue and explains the difference",
+	behaviorPill.textContent === "queue" && behaviorPill.title.includes("when the run ends"), `${behaviorPill.textContent} — ${behaviorPill.title}`);
+// The choice is only real if it rides along with the message.
+posted.length = 0;
+textarea.value = "and then run the tests";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const midRunPrompt = posted.find((m) => m.type === "prompt");
+check("a mid-run send carries the chosen delivery to the host", midRunPrompt?.payload?.streamingBehavior === "followUp",
+	JSON.stringify(midRunPrompt?.payload?.streamingBehavior ?? "<none>"));
+posted.length = 0;
+stopBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("stop posts abort", posted.some((m) => m.type === "abort"), JSON.stringify(posted));
+// #68: while observing, the run on screen belongs to another client — our Stop
+// would not reach it, so it must not be offered.
+hostMessage({ type: "status", status: { ...baseStatus, streaming: true, observingId: "other-1" } });
+check("stop is withdrawn while watching someone else's run", stopBtn.style.display === "none", stopBtn.style.display);
+hostMessage({ type: "status", status: { ...baseStatus, streaming: false } });
+check("run controls retire when the run ends", behaviorPill.style.display === "none" && stopBtn.style.display === "none",
+	`behavior=${behaviorPill.style.display} stop=${stopBtn.style.display}`);
+check("delivery falls back to the configured default between runs", behaviorPill.textContent === "steer", behaviorPill.textContent);
+
+// --- #45/#19/#53: the scroll lock and the jump-to-bottom pill ---
+// happy-dom does no layout, so every metric is 0 and the handler would always
+// conclude "already at the bottom". Stub the geometry to get a real scrollback.
+Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2000 });
+Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+scroller.scrollTop = 0;
+scroller.dispatchEvent(new window.Event("scroll"));
+const jumpBtn = scroller.querySelector(".jump-to-latest");
+check("jump-to-bottom appears once the reader scrolls away", !!jumpBtn && jumpBtn.className.includes("visible"), jumpBtn?.className ?? "<none>");
+check("jump button is a labeled down arrow", jumpBtn?.title === "Jump to bottom" && jumpBtn.getAttribute("aria-label") === "Jump to bottom" && jumpBtn.className.includes("down"),
+	`${jumpBtn?.title ?? "<none>"} / ${jumpBtn?.className ?? ""}`);
+hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "text", text: "still going" }] } } });
+hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "text", text: "still going and going" }] } } });
+check("streaming never yanks a scrolled-up reader back down", scroller.scrollTop === 0, String(scroller.scrollTop));
+jumpBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("jump returns to the latest and retires the pill", scroller.scrollTop === 2000 && !jumpBtn.className.includes("visible"),
+	`${scroller.scrollTop} / ${jumpBtn.className}`);
+hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "text", text: "still going and going and going" }] } } });
+check("auto-follow resumes after the jump", scroller.scrollTop === 2000, String(scroller.scrollTop));
 
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

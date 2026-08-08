@@ -17,6 +17,15 @@ body.vscode-high-contrast {
 	--pa-accent-dim: rgba(133, 237, 117, 0.13);
 	--pa-warn: #f3bc56;
 	--pa-error: #ff6b5e;
+	/* A bare var() with no fallback drops the WHOLE declaration when the name is
+	   undefined — an idle subagent dot with no border is invisible, not subtle.
+	   Every --pa-* name used anywhere must exist in this block AND the light one. */
+	--pa-faint: color-mix(in srgb, var(--pa-dim) 74%, #0f0f0f 26%);
+	--pa-raised: color-mix(in srgb, var(--vscode-sideBar-background, #0f0f0f) 84%, #ffffff 16%);
+	--pa-border-faint: color-mix(in srgb, transparent 60%, var(--pa-border) 40%);
+	--pa-accent-glow: color-mix(in srgb, var(--pa-accent) 55%, transparent);
+	--pa-shell-bg: #0b0e0b;
+	--pa-shell-fg: #d6d6d6;
 }
 
 body.vscode-light {
@@ -32,6 +41,16 @@ body.vscode-light {
 	--pa-accent-dim: rgba(31, 157, 68, 0.1);
 	--pa-warn: #a87915;
 	--pa-error: #d13415;
+	/* "Faint" on light means lighter, which kills contrast fast — fade toward white
+	   only enough to stay a legible step below --pa-dim (~3.5:1 on the surface). */
+	--pa-faint: color-mix(in srgb, var(--pa-dim) 85%, #ffffff 15%);
+	--pa-raised: color-mix(in srgb, #ffffff 90%, #0f0f0f 10%);
+	/* Light --pa-border is already pale; fading it 40% leaves no hairline at all,
+	   so the faint border derives from the strong step here instead. */
+	--pa-border-faint: color-mix(in srgb, transparent 45%, var(--pa-border-strong) 55%);
+	--pa-accent-glow: color-mix(in srgb, var(--pa-accent) 55%, transparent);
+	--pa-shell-bg: #ececec;
+	--pa-shell-fg: #1f1f1f;
 }
 
 body {
@@ -802,6 +821,15 @@ details.thinking .thinking-body {
 	white-space: nowrap;
 }
 
+/* A row found by searching the conversation shows the matching line instead. */
+.history-item-sub.match {
+	font-style: italic;
+	opacity: 0.9;
+	border-left: 2px solid color-mix(in srgb, transparent 55%, var(--pa-accent) 45%);
+	padding-left: 6px;
+	margin-top: 2px;
+}
+
 /* ---------- changed files ---------- */
 
 .changed-files {
@@ -957,13 +985,18 @@ details.thinking .thinking-body {
 	z-index: 1;
 }
 
+/* Decoration only. The textarea above lays these exact characters out in the
+   base font with no padding; a different font-family, font-size or padding here
+   gives them a different advance width, and the caret drifts away from the word
+   being typed — worse with every mention on the line. The ring stands in for
+   the padding because box-shadow costs no advance width. */
 .composer-mirror .mm {
 	color: var(--pa-accent);
 	background: var(--pa-accent-dim);
 	border-radius: 4px;
-	padding: 0 2px;
-	font-family: var(--vscode-editor-font-family, monospace);
-	font-size: 0.93em;
+	box-shadow: 0 0 0 2px var(--pa-accent-dim);
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
 }
 
 .composer-card textarea {
@@ -1163,11 +1196,20 @@ details.thinking .thinking-body {
 	flex-shrink: 0;
 }
 
+/* Connection state belongs in the bottom-right corner. Ordering it here rather
+   than in the markup keeps it first in the DOM, so assistive tech still hears
+   "offline" before the token counters. */
+.status-strip > .conn-dot,
+.status-strip > .live-label {
+	order: 1;
+}
+
 .conn-dot {
 	width: 7px;
 	height: 7px;
 	border-radius: 50%;
 	background: var(--pa-dim);
+	flex-shrink: 0;
 }
 
 .conn-dot.live {
@@ -1177,6 +1219,10 @@ details.thinking .thinking-body {
 .conn-dot.busy {
 	background: var(--pa-accent);
 	animation: pa-pulse 1.2s ease-in-out infinite;
+}
+
+.live-label {
+	white-space: nowrap;
 }
 
 .live-label.on {
@@ -1684,6 +1730,15 @@ body.vscode-light pre.term {
 	font-variant-numeric: tabular-nums;
 }
 
+/* Turn cost. Dimmer than the estimate beside it: it prices the reply's whole
+   input context, not the message, and must not read as this bubble's own bill. */
+.uf-cost {
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	color: var(--pa-dim);
+	opacity: 0.85;
+}
+
 .uf-icon {
 	display: inline-flex;
 	align-items: center;
@@ -1790,7 +1845,9 @@ body.vscode-light pre.term {
 	position: absolute;
 	right: 0;
 	bottom: calc(100% + 8px);
-	width: 210px;
+	width: 240px;
+	/* The sidebar can be dragged narrower than the flyout; never overflow it. */
+	max-width: calc(100vw - 16px);
 	padding: 9px 11px 10px;
 	background: var(--pa-surface-2, var(--vscode-editorWidget-background));
 	border: 1px solid var(--pa-border);
@@ -1818,13 +1875,19 @@ body.vscode-light pre.term {
 
 .threshold-slider {
 	flex: 1;
+	/* The slider, not the readout, gives up space when the panel is squeezed. */
+	min-width: 0;
 	accent-color: var(--pa-accent);
 	height: 14px;
 }
 
+/* Sized for the widest readout ("80% · 1.5M"); the 28px that fitted "94%" alone
+   broke the value across three lines once the token count was appended. */
 .threshold-value {
 	font-size: 10px;
-	width: 28px;
+	min-width: 62px;
+	flex-shrink: 0;
+	white-space: nowrap;
 	text-align: right;
 	font-variant-numeric: tabular-nums;
 }
@@ -1969,9 +2032,24 @@ body.vscode-light pre.term {
 	display: none;
 }
 
-/* shell call: terminal chrome — dark strip, green prompt, mono, slightly sunken */
-.tool[data-tool-name="bash"] .tool-body .tool-section:first-of-type pre.term {
+/* Keyed on the KIND, not the tool name: prime-agent runs every shell command as
+   an ipython cell whose first line is `%%bash`, so `[data-tool-name="bash"]`
+   matched nothing a real session ever produced. */
+
+/* Collapsed shell card: the body is display:none until .open, so the only cue
+   the operator gets while scanning is here — a prompt glyph before the command. */
+.tool[data-tool-kind="shell"] .tool-summary::before {
+	content: "$ ";
+	color: var(--pa-accent);
+	font-weight: 700;
+}
+
+/* shell call: terminal chrome — sunken strip, green prompt, mono.
+   This out-specifies `body.vscode-light pre.term`, so it must set color AND
+   background together — overriding only one leaves the command unreadable. */
+.tool[data-tool-kind="shell"] .tool-body .tool-section:first-of-type pre.term {
 	background: var(--pa-shell-bg, #0b0e0b);
+	color: var(--pa-shell-fg, #d6d6d6);
 	border: 1px solid var(--pa-border);
 	border-radius: 8px;
 	padding: 7px 9px;
@@ -1979,19 +2057,19 @@ body.vscode-light pre.term {
 	line-height: 1.5;
 }
 
-.tool[data-tool-name="bash"] .tool-section-label {
+.tool[data-tool-kind="shell"] .tool-section-label {
 	color: var(--pa-accent);
 	font-family: var(--vscode-editor-font-family, monospace);
 	font-size: 9.5px;
 }
 
-.tool[data-tool-name="bash"] .term-prompt {
+.tool[data-tool-kind="shell"] .term-prompt {
 	color: var(--pa-accent);
 	font-weight: 700;
 }
 
-/* ipython call: kernel vibe — subtle green left rule */
-.tool[data-tool-name="ipython"] .tool-section:first-of-type pre {
+/* python cell: kernel vibe — subtle green left rule */
+.tool[data-tool-kind="python"] .tool-section:first-of-type pre {
 	border-left: 2px solid var(--pa-accent-dim);
 	border-radius: 0 6px 6px 0;
 }
@@ -2212,6 +2290,36 @@ body.vscode-light pre.term {
 
 .subagents-list.siblings .subagent-row.viewing .subagent-name {
 	opacity: 1;
+}
+
+/* Finished, not resident: a filled but dim mark — neither the hollow ring of an
+   idle worker nor the glow of a running one. */
+.subagent-dot.done {
+	background: var(--pa-faint);
+	border: none;
+	box-shadow: none;
+	opacity: 0.55;
+}
+
+.subagents-subhead {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	text-align: left;
+	font-size: 9px;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	color: var(--pa-faint);
+	padding: 3px 12px 3px 16px;
+}
+
+.subagents-subhead:hover {
+	color: var(--pa-accent);
+}
+
+.subagents-list.historical .subagent-name {
+	opacity: 0.72;
 }
 
 /* ---------- brain rail pill (icon-centered, tight) ---------- */

@@ -39,7 +39,9 @@ export interface Usage {
 	cacheRead: number;
 	cacheWrite: number;
 	totalTokens: number;
-	cost?: { total: number };
+	// The agent sends the full per-category breakdown (ai/src/types.ts Usage);
+	// narrowing it to `total` hid the per-turn input price the user footer needs.
+	cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total: number };
 }
 
 export interface UserMessage {
@@ -59,6 +61,20 @@ export interface AssistantMessage {
 	timestamp?: number;
 }
 
+/**
+ * One file edit as prime-agent publishes it (core/kernel KernelDiffDisplay).
+ * The bundled `edit` skill emits these over `display_data`; the ipython tool
+ * forwards them on its result details. This is the ONLY structured change
+ * record the agent exposes — nothing else may be presented as a diff.
+ */
+export interface ToolDiffDetail {
+	path: string;
+	oldStr: string;
+	newStr: string;
+	/** 1-based line where `oldStr` began in the file. */
+	startLine?: number;
+}
+
 export interface ToolResultMessage {
 	role: "toolResult";
 	toolCallId: string;
@@ -66,6 +82,8 @@ export interface ToolResultMessage {
 	content: Array<TextContent | ImageContent>;
 	isError?: boolean;
 	timestamp?: number;
+	/** Tool-specific payload; ipython carries `diffs` for every edit-skill call. */
+	details?: { diffs?: ToolDiffDetail[]; [key: string]: unknown };
 }
 
 /** Messages can be extension-defined; only the known roles are rendered. */
@@ -115,6 +133,13 @@ export interface RpcModel {
 	reasoning?: boolean;
 	/** Input modalities, e.g. ["text"] or ["text","image"] (vision) */
 	input?: string[];
+	/**
+	 * Per-level provider mapping straight off the agent's Model object. `null`
+	 * means the level is unsupported; a missing "xhigh"/"max" key means the same.
+	 * This is the only honest source for the brain menu — the level list is a
+	 * property of the model, not a constant (Kimi K3 TEE supports "max" alone).
+	 */
+	thinkingLevelMap?: Record<string, string | null> | null;
 }
 
 export interface RpcSessionState {
@@ -141,6 +166,13 @@ export interface SessionChild {
 	rlmDepth?: number;
 	created?: string;
 	isStreaming?: boolean;
+	/**
+	 * Roster status, mirroring the CLI's classifySessionRosterStatus.
+	 * "inactive" means the daemon serves this one from its on-disk registry — it
+	 * finished and is not resident, which `isStreaming: false` alone cannot say
+	 * (a resident subagent between turns reports exactly the same bit).
+	 */
+	status?: "running" | "idle" | "inactive";
 	attachedClients?: number;
 }
 
@@ -227,6 +259,7 @@ export type WebviewToHost =
 	| { type: "requestModels" }
 	| { type: "requestCommands" }
 	| { type: "requestHistory" }
+	| { type: "searchHistory"; query: string }
 	| { type: "setModel"; provider: string; modelId: string }
 	| { type: "setThinkingLevel"; level: string }
 	| { type: "switchSession"; path: string; sessionId?: string }
@@ -249,6 +282,7 @@ export type WebviewToHost =
 	| { type: "renameSession"; name: string }
 	| { type: "renameHistorySession"; path: string; sessionId: string; name: string }
 	| { type: "stopSession"; path: string; sessionId: string }
+	| { type: "archiveSession"; path: string; sessionId: string }
 	| { type: "draftChanged"; text: string }
 	| { type: "setCompactThreshold"; percent: number | null }
 	| { type: "openExternal"; url: string };
@@ -298,6 +332,13 @@ export interface RecentSession {
 	name?: string;
 	firstPrompt?: string;
 	inWorkspace: boolean;
+	/**
+	 * Excerpt of the conversation that matched the current search, from the
+	 * daemon's `allMessagesText`. Present only on rows a host-side search found
+	 * by message body — it is both the evidence for the hit and what makes the
+	 * row rank in the webview's own filter, which cannot see the transcript.
+	 */
+	matchSnippet?: string;
 }
 
 export type HostToWebview =
@@ -339,10 +380,17 @@ export type HostToWebview =
 // Per-thread diff panel (host -> webview)
 // ---------------------------------------------------------------------------
 
-/** How the agent most recently changed the file: content tool call or shell. */
-export type ThreadDiffSource = "edit" | "write" | "shell";
+/**
+ * How the change was captured. Practically always `edit`: prime-agent registers
+ * exactly one tool (`ipython`) and the hunks come from the diff payloads its
+ * bundled `edit` skill publishes. `write` only appears when an extension
+ * registers a tool of that name. There is deliberately no `shell` source — a
+ * shell command carries no before/after content, so claiming it changed a file
+ * would be a guess.
+ */
+export type ThreadDiffSource = "edit" | "write";
 
-/** One stitched change block per tool event on a file. */
+/** One stitched change block per recorded edit on a file. */
 export interface ThreadDiffHunk {
 	/** Removed lines (rendered with a red "-" gutter). */
 	removed: string[];
@@ -350,6 +398,8 @@ export interface ThreadDiffHunk {
 	added: string[];
 	/** Optional gutter note rendered after the hunk (e.g. line-cap truncation). */
 	note?: string;
+	/** Subagent that made this change; absent means the viewed session's own agent. */
+	agent?: string;
 }
 
 export interface ThreadDiffFile {
@@ -357,10 +407,8 @@ export interface ThreadDiffFile {
 	path: string;
 	/** Source of the most recent recorded change. */
 	viaSource: ThreadDiffSource;
-	/** Stitched change blocks, one per tool event, in event order. */
+	/** Stitched change blocks, one per recorded edit, in event order. */
 	hunks: ThreadDiffHunk[];
-	/** Shell commands that referenced this path (bash tool calls carry no content). */
-	shellHints?: string[];
 }
 
 /** Cumulative per-thread diff state; `files` empty hides the panel. */

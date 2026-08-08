@@ -23,7 +23,15 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(controller, output);
 
 	const provider = new ChatViewProvider(context.extensionUri, controller);
-	context.subscriptions.push(vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider));
+	// Keep the sidebar's DOM alive while it is hidden: without this an activity-bar
+	// toggle tears the webview down and the operator's transcript, draft and scroll
+	// position come back only after a fresh round-trip — the flash they asked us to
+	// remove. The editor-tab panel already does the same.
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, provider, {
+			webviewOptions: { retainContextWhenHidden: true },
+		}),
+	);
 	context.subscriptions.push(provider);
 
 	context.subscriptions.push(
@@ -48,7 +56,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand("primeAgent.newSession", () => void controller!.newSession()),
 		vscode.commands.registerCommand("primeAgent.abort", () => void controller!.abort()),
 		vscode.commands.registerCommand("primeAgent.compact", () => void controller!.compact()),
-		vscode.commands.registerCommand("primeAgent.exportHtml", () => void controller!.exportHtml()),
+		vscode.commands.registerCommand("primeAgent.exportChat", () => void controller!.exportChat()),
 		vscode.commands.registerCommand("primeAgent.restart", () => void controller!.restart()),
 		vscode.commands.registerCommand("primeAgent.history", () => {
 			reveal();

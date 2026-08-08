@@ -12,5 +12,14 @@ tsconfig.json
 media/*.map
 media/preview.html
 
+# Maintainer-only. .env holds the Marketplace PAT: vsce globs with dot:true and
+# never reads .gitignore, so without these lines the token ships to every user.
+.env
+.env.*
+release.sh
+install.sh
+.github/**
+
 dist/*.map
 dist/controller.cjs
+dist/daemon-sidecar.cjs

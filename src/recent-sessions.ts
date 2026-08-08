@@ -1,8 +1,13 @@
 /**
- * Scans ~/.prime/agent/sessions for persisted sessions belonging to the current
- * workspace. Session files are JSONL with a `type: "session"` header containing
- * the cwd, so the current workspace's history can be listed cheaply without
- * asking the daemon.
+ * On-disk fallback catalog. Session files are JSONL with a `type: "session"`
+ * header containing the cwd, so history can be listed without the daemon.
+ *
+ * This is the FALLBACK only: SessionController prefers the daemon's own
+ * `list all` catalog, which has already read every file end to end and knows
+ * each session's current name, message count and lifecycle exactly. A file scan
+ * cannot afford that (see TAIL_BYTES), so it approximates — and the two must
+ * agree on which sessions count as history, or the list changes shape depending
+ * on whether the daemon happened to answer.
  */
 
 import * as fs from "node:fs";
@@ -12,7 +17,16 @@ import * as readline from "node:readline";
 import { realpathSync } from "node:fs";
 import type { RecentSession } from "./protocol.js";
 
+/** Files whose heads we are willing to open on one refresh, newest-mtime first. */
 const MAX_SCAN = 400;
+/**
+ * How far back we look for late `session_info` (rename) and `session_state`
+ * (archive) entries. Both are appended at the then-current end of file, so a
+ * rename buried under more than this much later traffic is invisible here — the
+ * daemon catalog is the only exact source for those, which is why it is tried
+ * first.
+ */
+const TAIL_BYTES = 128 * 1024;
 
 function sessionsDir(): string {
 	return path.join(os.homedir(), ".prime", "agent", "sessions");
@@ -24,13 +38,27 @@ interface SessionHeader {
 	id?: string;
 }
 
-async function readHeader(filePath: string): Promise<{ header: SessionHeader; name?: string; firstPrompt?: string }> {
+interface SessionRow {
+	header: SessionHeader;
+	name?: string;
+	firstPrompt?: string;
+	/** False only when we reached EOF without seeing a message — i.e. a real draft. */
+	hasMessage: boolean;
+	archived: boolean;
+}
+
+async function readSessionRow(filePath: string): Promise<SessionRow> {
 	const stream = fs.createReadStream(filePath, { encoding: "utf8" });
 	const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 	let header: SessionHeader = {};
 	let name: string | undefined;
 	let firstPrompt: string | undefined;
+	let hasMessage = false;
 	let lines = 0;
+	// A draft is a session with no message at all; those files are a handful of
+	// lines long, so "we read to EOF and saw none" is exact. Hitting the head cap
+	// first means the file is big enough that we must not call it empty.
+	let cappedEarly = false;
 	try {
 		for await (const line of rl) {
 			lines += 1;
@@ -42,16 +70,20 @@ async function readHeader(filePath: string): Promise<{ header: SessionHeader; na
 				}
 				continue;
 			}
-			if (lines > 60 || (name && firstPrompt)) break;
+			if (lines > 60 || (name && firstPrompt && hasMessage)) {
+				cappedEarly = true;
+				break;
+			}
 			try {
 				const entry = JSON.parse(line) as Record<string, unknown>;
 				if (!name && (entry.type === "session_name" || entry.type === "session_info")) {
 					const candidate = (entry.name ?? entry.sessionName) as string | undefined;
 					if (candidate) name = candidate;
 				}
-				if (!firstPrompt && entry.type === "message") {
+				if (entry.type === "message") {
+					hasMessage = true;
 					const message = entry.message as { role?: string; content?: unknown } | undefined;
-					if (message?.role === "user") {
+					if (!firstPrompt && message?.role === "user") {
 						firstPrompt = extractUserText(message.content);
 					}
 				}
@@ -63,42 +95,60 @@ async function readHeader(filePath: string): Promise<{ header: SessionHeader; na
 		rl.close();
 		stream.destroy();
 	}
-	const tailName = await readTailName(filePath);
-	return { header, name: tailName ?? name, firstPrompt };
+	const tail = await readTail(filePath);
+	return {
+		header,
+		name: tail.name ?? name,
+		firstPrompt,
+		hasMessage: hasMessage || cappedEarly,
+		archived: tail.archived,
+	};
 }
 
 /**
- * Session renames append `session_info` entries at the END of the file. The
- * head scan caps at 60 lines, so late renames would be invisible — read the
- * tail and let the latest entry win.
+ * Renames and lifecycle transitions append entries at the END of the file, so
+ * the head scan never sees them. Read the tail and let the latest entry win.
  */
-async function readTailName(filePath: string): Promise<string | undefined> {
-	const CHUNK = 16_384;
+async function readTail(filePath: string): Promise<{ name?: string; archived: boolean }> {
 	let handle: fs.promises.FileHandle | null = null;
 	try {
 		handle = await fs.promises.open(filePath, "r");
 		const { size } = await handle.stat();
-		const start = Math.max(0, size - CHUNK);
+		const start = Math.max(0, size - TAIL_BYTES);
 		const buffer = Buffer.alloc(size - start);
 		await handle.read(buffer, 0, buffer.length, start);
-		const tail = buffer.toString("utf8");
-		const lines = tail.split("\n").filter((l) => l.trim());
+		const lines = buffer.toString("utf8").split("\n");
+		let name: string | undefined;
+		let nameResolved = false;
+		let archived: boolean | undefined;
 		for (let i = lines.length - 1; i >= 0; i--) {
+			const line = lines[i];
+			// Cheap gate: the tail is mostly multi-KB message rows and parsing them
+			// all would cost more than the read did.
+			if (!line.includes('"session_info"') && !line.includes('"session_name"') && !line.includes('"session_state"')) continue;
+			let entry: Record<string, unknown>;
 			try {
-				const entry = JSON.parse(lines[i]) as Record<string, unknown>;
-				if (entry.type === "session_info" || entry.type === "session_name") {
-					const name = (entry.name ?? entry.sessionName) as string | undefined;
-					if (name && name.trim()) return name.trim();
-					// An empty name explicitly clears the title.
-					if (name !== undefined && !name.trim()) return undefined;
-				}
+				entry = JSON.parse(line) as Record<string, unknown>;
 			} catch {
-				// ignore malformed lines
+				continue; // the first line of the window is usually truncated
 			}
+			if (!nameResolved && (entry.type === "session_info" || entry.type === "session_name")) {
+				const candidate = (entry.name ?? entry.sessionName) as string | undefined;
+				// An empty name explicitly clears the title.
+				if (candidate !== undefined) {
+					name = candidate.trim() || undefined;
+					nameResolved = true;
+				}
+			}
+			if (archived === undefined && entry.type === "session_state") {
+				const status = (entry.state as { status?: string } | undefined)?.status;
+				if (status) archived = status === "archived" || status === "crash";
+			}
+			if (nameResolved && archived !== undefined) break;
 		}
-		return undefined;
+		return { name, archived: archived === true };
 	} catch {
-		return undefined;
+		return { archived: false };
 	} finally {
 		if (handle) await handle.close();
 	}
@@ -119,23 +169,35 @@ function extractUserText(content: unknown): string | undefined {
 	return undefined;
 }
 
+export interface RecentSessionsOptions {
+	/** Rows kept for the current workspace. Filled independently so it can't be starved. */
+	workspaceLimit?: number;
+	/** Rows kept for every other folder combined. */
+	otherLimit?: number;
+	/** Sessions directory override — the CLI calls the same knob `sessionDir`. */
+	sessionsDir?: string;
+}
+
 /**
- * List recent sessions, newest first. Sessions matching the workspace root are
- * flagged `inWorkspace`; all others are included too — prime-agent sessions are
- * resumable from any cwd, and the group header makes the distinction visible.
+ * List recent sessions, newest first, workspace bucket first. The two buckets
+ * have SEPARATE quotas and are filled in the same pass: a single global cap
+ * applied before bucketing let 20-odd throwaway sessions from other folders
+ * push this workspace's own history off the list entirely.
+ *
+ * Zero-message drafts and archived sessions are omitted, matching the CLI's
+ * inactiveLifecycleForSession/shouldShowAgentsViewSession.
  */
-export async function listRecentSessions(workspaceRoot: string, limit = 40): Promise<RecentSession[]> {
-	const dir = sessionsDir();
+export async function listRecentSessions(workspaceRoot: string, options: RecentSessionsOptions = {}): Promise<RecentSession[]> {
+	const workspaceLimit = options.workspaceLimit ?? 60;
+	const otherLimit = options.otherLimit ?? 25;
+	const dir = options.sessionsDir ?? sessionsDir();
 	let entries: fs.Dirent[];
 	try {
 		entries = await fs.promises.readdir(dir, { withFileTypes: true });
 	} catch {
 		return [];
 	}
-	const files = entries
-		.filter((e) => e.isFile() && e.name.endsWith(".jsonl"))
-		.map((e) => path.join(dir, e.name))
-		.slice(0, MAX_SCAN);
+	const files = entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => path.join(dir, e.name));
 
 	const withMtime = await Promise.all(
 		files.map(async (file) => {
@@ -148,35 +210,41 @@ export async function listRecentSessions(workspaceRoot: string, limit = 40): Pro
 		}),
 	);
 
+	// Cap AFTER sorting: slicing in readdir order picked an arbitrary subset of a
+	// large store and then called it "recent".
 	const sorted = withMtime
 		.filter((x): x is { file: string; mtime: number } => x !== null)
 		.sort((a, b) => b.mtime - a.mtime)
-		.slice(0, 80);
+		.slice(0, MAX_SCAN);
 
-	const normalizedRoot = normalizePath(workspaceRoot);
-	const results: RecentSession[] = [];
+	const normalizedRoot = normalizeFsPath(workspaceRoot);
+	const inWorkspaceRows: RecentSession[] = [];
+	const otherRows: RecentSession[] = [];
 	for (const { file, mtime } of sorted) {
-		if (results.length >= limit) break;
-		const { header, name, firstPrompt } = await readHeader(file);
-		if (!header.cwd) continue;
-		const inWorkspace = normalizePath(header.cwd) === normalizedRoot;
-		results.push({
+		if (inWorkspaceRows.length >= workspaceLimit && otherRows.length >= otherLimit) break;
+		const row = await readSessionRow(file);
+		if (!row.header.cwd) continue;
+		if (!row.hasMessage || row.archived) continue;
+		const inWorkspace = normalizeFsPath(row.header.cwd) === normalizedRoot;
+		const bucket = inWorkspace ? inWorkspaceRows : otherRows;
+		if (bucket.length >= (inWorkspace ? workspaceLimit : otherLimit)) continue;
+		bucket.push({
 			id: path.basename(file, ".jsonl"),
 			path: file,
-			cwd: header.cwd,
-			timestamp: header.timestamp ?? new Date().toISOString(),
+			cwd: row.header.cwd,
+			timestamp: row.header.timestamp ?? new Date().toISOString(),
 			modifiedMs: mtime,
-			name,
-			firstPrompt,
+			name: row.name,
+			firstPrompt: row.firstPrompt,
 			inWorkspace,
 		});
 	}
-	// Workspace sessions first, then everything else, both newest-first.
-	results.sort((a, b) => Number(b.inWorkspace) - Number(a.inWorkspace));
-	return results;
+	// Both buckets inherit the mtime-descending scan order.
+	return [...inWorkspaceRows, ...otherRows];
 }
 
-function normalizePath(p: string): string {
+/** Case/symlink-normalized absolute path, so cwd comparisons survive /var vs /private/var. */
+export function normalizeFsPath(p: string): string {
 	let resolved = path.resolve(p);
 	try {
 		resolved = realpathSync.native(resolved);

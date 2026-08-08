@@ -1,7 +1,12 @@
 /**
  * Per-thread diff panel: a collapsible strip floating above the composer
- * (sibling of the subagents strip) listing the files the agent changed in the
- * current thread via edit/write/bash tool calls.
+ * (sibling of the subagents strip) listing the files the agent edited in the
+ * current thread — its own edits and its subagents'.
+ *
+ * Every hunk here is prime-agent's own diff payload; nothing is reconstructed
+ * from the filesystem. That also bounds what the panel can honestly claim: a
+ * file the agent rewrote from a shell command or a raw Python cell publishes no
+ * diff, so it never appears here — hence the coverage footnote.
  *
  * The host accumulates hunks (session-controller) and pushes the full
  * cumulative state on every `threadDiffs` message, so this view is a pure
@@ -48,7 +53,7 @@ export class ThreadDiffsPanel {
 			counts.append(el("span", "add", `+${totals.added}`), el("span", "del", `−${totals.removed}`));
 			header.appendChild(counts);
 		}
-		header.title = "Files Prime Agent changed in this thread — click to expand";
+		header.title = "Files Prime Agent edited in this thread — click to expand";
 		header.addEventListener("click", () => {
 			this.expanded = !this.expanded;
 			this.render();
@@ -58,6 +63,12 @@ export class ThreadDiffsPanel {
 
 		const list = el("div", "td-list");
 		for (const file of this.files) list.appendChild(this.renderFile(file));
+		// Say what this list is NOT: the agent also changes files from shell and
+		// Python cells, which publish no diff. Without this the operator reads a
+		// short list as "that is everything" and trusts it wrongly.
+		list.appendChild(
+			el("div", "td-foot", "Hunks come from the agent's edit tool. Files it rewrote from a shell or Python cell show only in the changed-files strip."),
+		);
 		root.appendChild(list);
 	}
 
@@ -65,12 +76,21 @@ export class ThreadDiffsPanel {
 		const wrap = el("div", "td-file");
 		const open = this.openPaths.has(file.path);
 		const row = el("button", "td-row") as HTMLButtonElement;
-		row.title = `${file.path} — click to ${open ? "hide" : "show"} changes`;
+		const agents = distinctAgents(file);
+		const authors = file.hunks.some((hunk) => !hunk.agent) ? ["this session", ...agents] : agents;
+		row.title =
+			agents.length > 0
+				? `${file.path} — edited by ${authors.join(", ")}; click to ${open ? "hide" : "show"} changes`
+				: `${file.path} — click to ${open ? "hide" : "show"} changes`;
 		row.append(
 			el("span", "td-row-caret", open ? "▾" : "▸"),
 			el("span", `td-via ${file.viaSource}`, file.viaSource),
 			el("span", "td-path", file.path),
 		);
+		// Attribution belongs on the collapsed row too: a file a subagent rewrote
+		// must not read as the main agent's work at a glance.
+		for (const agent of agents.slice(0, 2)) row.appendChild(el("span", "td-agent", agent));
+		if (agents.length > 2) row.appendChild(el("span", "td-agent", `+${agents.length - 2}`));
 
 		const counts = countLines([file]);
 		if (counts.added > 0 || counts.removed > 0) {
@@ -97,25 +117,37 @@ export class ThreadDiffsPanel {
 
 	private renderDetail(file: ThreadDiffFile): HTMLElement {
 		const detail = el("div", "td-detail");
+		// Once a subagent has touched this file, EVERY block has to name its
+		// author — an unlabelled hunk sitting under a subagent chip would read as
+		// that subagent's work.
+		const attributed = file.hunks.some((hunk) => hunk.agent);
+		let lastLabel: string | null = null;
 		let rendered = 0;
 		for (const hunk of file.hunks) {
 			if (rendered > 0) detail.appendChild(el("div", "td-gap", "…"));
+			if (attributed) {
+				const label = hunk.agent ? `subagent ${hunk.agent}` : "this session";
+				if (label !== lastLabel) {
+					detail.appendChild(el("div", "td-by", label));
+					lastLabel = label;
+				}
+			}
 			for (const line of hunk.removed) detail.appendChild(diffLine("del", "−", line));
 			for (const line of hunk.added) detail.appendChild(diffLine("add", "+", line));
 			if (hunk.note) detail.appendChild(el("div", "td-note", hunk.note));
 			rendered += 1;
 		}
-		for (const hint of file.shellHints ?? []) {
-			const row = el("div", "td-shell");
-			row.appendChild(document.createTextNode("touched via shell command: "));
-			row.appendChild(el("code", "td-shell-cmd", hint));
-			detail.appendChild(row);
-		}
-		if (rendered === 0 && (file.shellHints ?? []).length === 0) {
-			detail.appendChild(el("div", "td-empty", "changed — no captured content"));
-		}
 		return detail;
 	}
+}
+
+/** Distinct subagent names contributing to a file, in first-seen order. */
+function distinctAgents(file: ThreadDiffFile): string[] {
+	const seen: string[] = [];
+	for (const hunk of file.hunks) {
+		if (hunk.agent && !seen.includes(hunk.agent)) seen.push(hunk.agent);
+	}
+	return seen;
 }
 
 /** A single red/green line, visually identical to transcript edit hunks. */
@@ -149,13 +181,10 @@ function sanitizeThreadDiffFiles(input: unknown): ThreadDiffFile[] {
 		const path = typeof entry.path === "string" ? entry.path : "";
 		if (!path) continue;
 		const hunks = sanitizeHunks(entry.hunks);
-		const hints = Array.isArray(entry.shellHints)
-			? entry.shellHints.filter((hint): hint is string => typeof hint === "string" && hint.length > 0)
-			: [];
-		if (hunks.length === 0 && hints.length === 0) continue;
-		const viaSource =
-			entry.viaSource === "edit" || entry.viaSource === "write" || entry.viaSource === "shell" ? entry.viaSource : "shell";
-		files.push({ path, viaSource, hunks, ...(hints.length > 0 ? { shellHints: hints } : {}) });
+		// A row with no hunks would assert "changed" with nothing to back it.
+		if (hunks.length === 0) continue;
+		const viaSource = entry.viaSource === "write" ? "write" : "edit";
+		files.push({ path, viaSource, hunks });
 	}
 	return files;
 }
@@ -169,7 +198,8 @@ function sanitizeHunks(input: unknown): ThreadDiffHunk[] {
 		const removed = sanitizeLineArray(entry.removed);
 		const added = sanitizeLineArray(entry.added);
 		const note = typeof entry.note === "string" && entry.note.length > 0 ? entry.note : undefined;
-		hunks.push({ removed, added, ...(note ? { note } : {}) });
+		const agent = typeof entry.agent === "string" && entry.agent.length > 0 ? entry.agent : undefined;
+		hunks.push({ removed, added, ...(note ? { note } : {}), ...(agent ? { agent } : {}) });
 	}
 	return hunks;
 }

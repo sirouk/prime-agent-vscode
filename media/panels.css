@@ -100,9 +100,18 @@
 	border-color: var(--pa-accent-dim);
 }
 
-.td-via.shell {
-	color: var(--pa-warn);
-	border-color: color-mix(in srgb, currentColor 70%, var(--pa-warn) 30%);
+/* Subagent attribution chip on the collapsed row. */
+.td-agent {
+	font-size: 8.5px;
+	max-width: 90px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	border: 1px solid var(--pa-border);
+	border-radius: 7px;
+	padding: 0 5px;
+	color: var(--pa-dim);
+	flex-shrink: 0;
 }
 
 .td-path {
@@ -163,27 +172,23 @@
 	padding: 1px 8px;
 }
 
-.td-shell {
-	font-size: 10px;
+/* Author label above a hunk group; only rendered on files a subagent touched. */
+.td-by {
+	font-size: 9px;
 	color: var(--pa-dim);
-	padding: 3px 8px;
-	line-height: 1.45;
+	padding: 2px 8px;
+	background: color-mix(in srgb, transparent 70%, var(--pa-raised, var(--pa-surface)) 30%);
+	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
 }
 
-.td-shell + .td-shell {
-	border-top: 1px dashed var(--pa-border-faint, var(--pa-border));
+.td-detail > .td-by:first-child {
+	border-top: none;
 }
 
-.td-shell-cmd {
-	font-family: var(--vscode-editor-font-family, monospace);
-	font-size: 10px;
-	color: var(--pa-warn);
-	white-space: pre-wrap;
-	word-break: break-all;
-}
-
-.td-empty {
-	font-size: 10px;
-	color: var(--pa-dim);
-	padding: 4px 8px;
+/* Coverage footnote: what this list cannot show. */
+.td-foot {
+	font-size: 9.5px;
+	line-height: 1.4;
+	color: var(--pa-faint, var(--pa-dim));
+	padding: 5px 8px 2px;
 }

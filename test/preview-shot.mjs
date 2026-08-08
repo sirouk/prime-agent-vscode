@@ -101,7 +101,7 @@ async function verifyModelmenu2(page) {
 	// Model rows carry NO brain accessory anymore — the brain lives on the rail as its own pill.
 	const brains = await page.evaluate(() => document.querySelectorAll(".dropdown-item .dropdown-brain").length);
 	out.push(mk("no per-row brain accessory (brain is a rail pill)", brains === 0, `${brains} brains in rows`));
-	// Open the rail brain pill -> the thinking menu with six levels for the current model.
+	// Open the rail brain pill -> the levels the CURRENT model declares, nothing else.
 	await page.evaluate(() => {
 		document.querySelector(".rail-pill.brain")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 	});
@@ -116,21 +116,23 @@ async function verifyModelmenu2(page) {
 	});
 	out.push(mk("brain rail pill opens the thinking menu", menuInfo.header.startsWith("Thinking —"), menuInfo.header));
 	const levelNames = menuInfo.levels.map((l) => l.label.split(" ")[0].split("\n")[0]);
-	out.push(mk("six levels including xhigh", levelNames.includes("off") && levelNames.includes("xhigh"), JSON.stringify(levelNames)));
+	// Kimi K3 TEE really supports "max" and nothing else. Offering the old six
+	// meant every other row was a level clampThinkingLevel would silently swap.
+	out.push(mk("only the levels the model declares are offered", JSON.stringify(levelNames) === JSON.stringify(["max"]), JSON.stringify(levelNames)));
 	out.push(
 		mk(
-			"current thinking level marked (max normalized)",
-			menuInfo.levels.filter((l) => l.current).length === 1 && menuInfo.levels.some((l) => l.current && l.label.startsWith("xhigh")),
+			"current thinking level marked (max, not aliased to xhigh)",
+			menuInfo.levels.filter((l) => l.current).length === 1 && menuInfo.levels.some((l) => l.current && l.label.startsWith("max")),
 			JSON.stringify(menuInfo.levels.filter((l) => l.current)),
 		),
 	);
 	await page.evaluate(() => {
 		const dd = document.querySelector(".dropdown");
-		const row = [...(dd?.querySelectorAll(".dropdown-item") ?? [])].find((r) => (r.querySelector(".dropdown-text")?.textContent ?? r.textContent ?? "").trim().startsWith("high"));
+		const row = [...(dd?.querySelectorAll(".dropdown-item") ?? [])].find((r) => (r.querySelector(".dropdown-text")?.textContent ?? r.textContent ?? "").trim().startsWith("max"));
 		row?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 	});
 	const thinkPosts = await page.evaluate(() => postedMessages.filter((m) => m.type === "setThinkingLevel").map((m) => m.level));
-	out.push(mk("selecting high posts setThinkingLevel", thinkPosts.includes("high"), JSON.stringify(thinkPosts)));
+	out.push(mk("selecting a level posts setThinkingLevel", thinkPosts.includes("max"), JSON.stringify(thinkPosts)));
 
 	const withImg = rows
 		.filter((r) => r.kind === "item" && (r.right ?? "").includes("img"))
@@ -306,12 +308,58 @@ async function verifyRetry(page) {
 	return out;
 }
 
+/**
+ * The composer draws its text twice: a transparent textarea that owns the caret
+ * over a mirror div that owns the styling. Any property on `.mm` that changes
+ * the advance width of the mention's characters — font-family, font-size,
+ * padding — drifts the caret away from the word being typed, and the drift
+ * compounds per mention. Real Chromium metrics, so this is measurable.
+ */
+async function verifyCaretParity(page) {
+	const out = [];
+	const metrics = await page.evaluate(() => {
+		const mirror = document.querySelector(".composer-mirror");
+		if (!mirror) return null;
+		const probe = document.createElement("div");
+		probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;left:-9999px;top:0";
+		const sample = "@src/session-controller.ts";
+		const plain = document.createElement("span");
+		plain.textContent = sample;
+		const styled = document.createElement("span");
+		styled.className = "mm";
+		styled.textContent = sample;
+		probe.append(plain, styled);
+		mirror.appendChild(probe);
+		const plainBox = plain.getBoundingClientRect();
+		const styledBox = styled.getBoundingClientRect();
+		probe.remove();
+		return { plain: plainBox.width, styled: styledBox.width, plainH: plainBox.height, styledH: styledBox.height };
+	});
+	out.push(mk("composer mirror found", !!metrics));
+	if (!metrics) return out;
+	out.push(
+		mk(
+			"mention span keeps the plain-text advance width (caret parity)",
+			Math.abs(metrics.styled - metrics.plain) < 0.5,
+			JSON.stringify(metrics),
+		),
+	);
+	out.push(
+		mk(
+			"mention span keeps the plain-text line box height",
+			Math.abs(metrics.styledH - metrics.plainH) < 0.5,
+			JSON.stringify(metrics),
+		),
+	);
+	return out;
+}
+
 // ----------------------------------------------------------------
 // Mode registry
 // ----------------------------------------------------------------
 
 const MODES = {
-	chat: { file: "preview-chat.png", height: 760 },
+	chat: { file: "preview-chat.png", height: 760, verify: verifyCaretParity },
 	welcome: { file: "preview-welcome.png", height: 560 },
 	modelmenu: { file: "preview-modelmenu.png", height: 560 },
 	history: { file: "preview-history.png", height: 560 },

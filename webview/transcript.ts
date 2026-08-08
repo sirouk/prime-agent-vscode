@@ -2,8 +2,61 @@
  * Transcript: message rendering and the live agent-event state machine.
  */
 
+import { parseIpythonBashCell, previewBashCommand, previewIpythonCode } from "./code-preview.js";
 import { butterfly, el, icon } from "./dom.js";
 import { copyToClipboard, renderMarkdown } from "./markdown.js";
+
+/**
+ * How a tool call should be presented.
+ *
+ * The trap: prime-agent's default active toolset is `ipython` alone
+ * (sdk.ts `initialActiveToolNames ?? ["ipython"]`, and the extension never
+ * passes `--tools`), so a shell run arrives as an ipython cell whose first line
+ * is `%%bash` — never as a tool literally named `bash`. Keying the terminal
+ * chrome, the section label and the copy fence on the tool name meant every
+ * real shell run rendered, and pasted, as Python.
+ */
+interface ToolView {
+	/** Drives the chrome and the fence: "shell" | "python" | the tool's own name. */
+	kind: string;
+	/** Section header above the call. */
+	label: string;
+	/** Markdown fence language ("" = plain fence). */
+	lang: string;
+	/** The call itself, with the `%%bash` magic line stripped off a shell cell. */
+	input: string;
+}
+
+/** A selection boundary as a child-index path from the transcript scroller. */
+interface SelectionPoint {
+	path: number[];
+	offset: number;
+}
+
+function isExpanded(block: HTMLElement): boolean {
+	return block instanceof HTMLDetailsElement ? block.open : block.classList.contains("open");
+}
+
+function lastTextNode(root: HTMLElement): Text | null {
+	const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	let last: Text | null = null;
+	let node: Node | null;
+	while ((node = walker.nextNode())) last = node as Text;
+	return last;
+}
+
+function toolView(name: string, args: Record<string, unknown>): ToolView {
+	const code = args?.code;
+	if (name === "ipython" && typeof code === "string") {
+		const cell = parseIpythonBashCell(code);
+		if (cell) return { kind: "shell", label: "shell", lang: "bash", input: cell.body.replace(/\n+$/, "") };
+		return { kind: "python", label: "python", lang: "python", input: code };
+	}
+	const command = args?.command;
+	if (typeof command === "string") return { kind: "shell", label: "shell", lang: "bash", input: command };
+	if (typeof code === "string") return { kind: name, label: "input", lang: "", input: code };
+	return { kind: name, label: "input", lang: "", input: JSON.stringify(args, null, 2) };
+}
 
 function buildContent(
 	text: string,
@@ -47,13 +100,14 @@ export class Transcript {
 	private toolBlocks = new Map<string, ToolBlock>();
 	private streamingBubble: HTMLElement | null = null;
 	private optimisticText: string | null = null;
-	private optimisticAt = 0;
 	private retryRow: HTMLElement | null = null;
 	private workingRow: HTMLElement | null = null;
 	private workingStartedAt = 0;
 	private workingTimer: number | undefined;
 	private streaming = false;
 	private hasContent = false;
+	/** Latest user footer still waiting for the reply that prices its turn. */
+	private pendingUserFooter: HTMLElement | null = null;
 	private welcome: HTMLElement | null = null;
 	private changedFilesBar: HTMLElement;
 
@@ -109,76 +163,109 @@ export class Transcript {
 
 	private stickToBottomUnused = false;
 	private jumpBtn: HTMLElement | null = null;
-	/** Selections saved on collapse, key = the collapsible element (details / .tool root). */
-	private savedSelections = new WeakMap<HTMLElement, string>();
-
 	/**
-	 * Capture the user's text selection inside a collapsible block before it is
-	 * hidden, so expanding can restore it (and extend it to cover the content
-	 * that was hidden while collapsed).
+	 * The selection as it stood the instant before a collapsible was toggled.
+	 *
+	 * Captured on the way IN (mousedown, capture phase) — by the time the block
+	 * has toggled the browser has already collapsed the live selection, and a
+	 * block that starts collapsed never gets a capture at all if you only save
+	 * on the way out. Stored as child-index paths relative to the scroller, not
+	 * as text: the same range has to be rebuilt after the DOM state changes, and
+	 * a text anchor cannot express a selection that starts outside the block.
 	 */
+	private pendingSelection:
+		| { start: SelectionPoint; end: SelectionPoint; block: HTMLElement; wasExpanded: boolean }
+		| null = null;
+
+	/** Child-index path from the scroller down to a node, plus the offset in it. */
+	private capturePoint(node: Node, offset: number): SelectionPoint | null {
+		const path: number[] = [];
+		let current: Node | null = node;
+		while (current && current !== this.scroller) {
+			const parent: Node | null = current.parentNode;
+			if (!parent) return null;
+			path.unshift(Array.prototype.indexOf.call(parent.childNodes, current));
+			current = parent;
+		}
+		return current === this.scroller ? { path, offset } : null;
+	}
+
+	private resolvePoint(point: SelectionPoint): { node: Node; offset: number } | null {
+		let node: Node = this.scroller;
+		for (const index of point.path) {
+			const next = node.childNodes[index];
+			if (!next) return null;
+			node = next;
+		}
+		return { node, offset: Math.min(point.offset, node.nodeType === Node.TEXT_NODE ? (node as Text).data.length : node.childNodes.length) };
+	}
+
 	private captureSelection(block: HTMLElement): void {
+		this.pendingSelection = null;
 		const sel = window.getSelection();
 		if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
 		const range = sel.getRangeAt(0);
-		if (!block.contains(range.commonAncestorContainer)) return;
-		this.savedSelections.set(block, range.toString());
+		// No `block.contains` guard: the selection #22 describes is dragged
+		// across the collapsed block AND the prose around it, so its common
+		// ancestor is the transcript, not the block.
+		const start = this.capturePoint(range.startContainer, range.startOffset);
+		const end = this.capturePoint(range.endContainer, range.endOffset);
+		if (!start || !end) return;
+		this.pendingSelection = { start, end, block, wasExpanded: isExpanded(block) };
 	}
 
-	private restoreSelection(block: HTMLElement): void {
-		const saved = this.savedSelections.get(block);
-		if (!saved || !saved.trim()) return;
-		this.savedSelections.delete(block);
-		const anchor = saved.slice(0, 60).trimStart();
-		const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-		let startNode: Text | null = null;
-		let startOffset = 0;
-		let endNode: Text | null = null;
-		let endOffset = 0;
-		let acc = "";
-		let node: Text | null;
-		while ((node = walker.nextNode() as Text | null)) {
-			const content = node.data ?? "";
-			if (!startNode) {
-				const at = (acc + content).indexOf(anchor);
-				if (at >= 0) {
-					const local = Math.min(content.length, Math.max(0, at - acc.length));
-					startNode = node;
-					startOffset = local;
-				}
-			}
-			endNode = node;
-			endOffset = content.length;
-			acc += content;
+	/**
+	 * Put the selection back over the toggled block. Expanding never removes
+	 * nodes (details keeps its children, .tool-body is only display:none), so
+	 * the captured paths still resolve and the revealed text falls inside a
+	 * range that already spanned the block. When the selection ended *inside*
+	 * the block, sweep the end forward over what was just revealed — that is
+	 * the "include it so they don't have to select again" half of the ask.
+	 */
+	private restoreSelection(): void {
+		const pending = this.pendingSelection;
+		this.pendingSelection = null;
+		if (!pending) return;
+		const start = this.resolvePoint(pending.start);
+		let end = this.resolvePoint(pending.end);
+		if (!start || !end) return;
+		// Only on an actual expand — a click that toggled nothing (the card's own
+		// copy button) must not silently grow what the operator had selected.
+		if (pending.block.contains(end.node) && isExpanded(pending.block) && !pending.wasExpanded) {
+			const last = lastTextNode(pending.block);
+			if (last) end = { node: last, offset: last.data.length };
 		}
-		if (!startNode || !endNode) return;
 		const range = document.createRange();
-		range.setStart(startNode, startOffset);
-		range.setEnd(endNode, endOffset);
+		try {
+			range.setStart(start.node, start.offset);
+			range.setEnd(end.node, end.offset);
+		} catch {
+			return; // stale paths (re-render between capture and toggle)
+		}
+		if (range.collapsed) return;
 		const sel = window.getSelection();
 		sel?.removeAllRanges();
 		sel?.addRange(range);
-		block.scrollIntoView({ block: "nearest" });
 	}
 
 	private wireSelectionPreserve(): void {
-		// <details> thinking blocks
-		this.scroller.addEventListener("toggle", (event) => {
-			const d = event.target as HTMLDetailsElement;
-			if (!(d instanceof HTMLDetailsElement)) return;
-			if (d.open) this.restoreSelection(d);
-			else this.captureSelection(d);
-		}, true);
-		// .tool cards (class-based toggle)
-		this.scroller.addEventListener("click", (event) => {
-			const header = (event.target as HTMLElement).closest(".tool-header");
-			const root = header?.closest(".tool") as HTMLElement | null;
-			if (!header || !root) return;
-			if (root.classList.contains("open")) {
-				this.captureSelection(root);
-			} else {
-				setTimeout(() => this.restoreSelection(root), 0);
+		// Snapshot before the browser's default mousedown handling collapses it.
+		this.scroller.addEventListener("mousedown", (event) => {
+			const target = event.target as HTMLElement | null;
+			const toggler = target?.closest(".tool-header, details.thinking > summary") as HTMLElement | null;
+			if (!toggler) {
+				this.pendingSelection = null; // a click elsewhere is a new selection, not a restore
+				return;
 			}
+			const block = (toggler.closest(".tool") ?? toggler.closest("details.thinking")) as HTMLElement | null;
+			if (block) this.captureSelection(block);
+		}, true);
+		// <details> thinking blocks toggle asynchronously.
+		this.scroller.addEventListener("toggle", () => this.restoreSelection(), true);
+		// .tool cards toggle a class in their own click handler; run after it.
+		this.scroller.addEventListener("click", (event) => {
+			if (!(event.target as HTMLElement | null)?.closest(".tool-header")) return;
+			setTimeout(() => this.restoreSelection(), 0);
 		}, true);
 	}
 
@@ -279,17 +366,42 @@ export class Transcript {
 		this.toolBlocks.clear();
 		this.streamingBubble = null;
 		this.welcome = null;
+		// Both point at nodes in the scroller we just emptied.
+		this.pendingUserFooter = null;
+		this.pendingSelection = null;
+		// Run state belongs to the session we just left. Inheriting it paints a
+		// brand-new session as "running" with a Stop button no agent_end can clear,
+		// and stopWorking() also kills the 1s timer whose row we just deleted.
+		this.streaming = false;
+		this.stopWorking();
+		this.optimisticText = null;
+		// The jump pill lived inside the scroller we just emptied; keeping the
+		// detached node would leave the operator with no way back to the bottom
+		// for the rest of the session.
+		this.jumpBtn = null;
 		this.hasContent = messages.length > 0;
 		for (const message of messages) {
 			this.renderMessage(message, false);
 		}
 		if (!this.hasContent) this.showWelcome();
-		this.scrollToBottom();
+		// A freshly opened session always lands on the latest message, whatever
+		// the scroll position was in the session we came from.
+		this.forceScrollToBottom();
 	}
 
 	// ---------------------------------------------------------------
 	// Live events
 	// ---------------------------------------------------------------
+
+	/** Create the live bubble for a turn whose message_start we never received. */
+	private adoptStreamingBubble(message: AssistantMessage): void {
+		if (this.streamingBubble) return;
+		this.dismissWelcome();
+		this.stopWorking();
+		this.streamingBubble = this.buildAssistantRow(message, true);
+		this.scroller.appendChild(this.streamingBubble);
+		this.hasContent = true;
+	}
 
 	handleEvent(event: AgentEvent): void {
 		switch (event.type) {
@@ -320,16 +432,22 @@ export class Transcript {
 			}
 			case "message_update": {
 				const message = event.message as AssistantMessage;
-				if (message.role === "assistant" && this.streamingBubble) {
-					this.fillAssistantRow(this.streamingBubble, message, true);
-				}
+				if (message.role !== "assistant") break;
+				// An update with no bubble means we joined the turn after its
+				// message_start (attach mid-flight, or a catch-up after a resync).
+				// Dropping it froze the transcript for the rest of the turn.
+				this.adoptStreamingBubble(message);
+				if (this.streamingBubble) this.fillAssistantRow(this.streamingBubble, message, true);
 				break;
 			}
 			case "message_end": {
 				const message = event.message;
-				if (message.role === "assistant" && this.streamingBubble) {
-					this.fillAssistantRow(this.streamingBubble, message as AssistantMessage, false);
-					this.streamingBubble = null;
+				if (message.role === "assistant") {
+					this.adoptStreamingBubble(message as AssistantMessage);
+					if (this.streamingBubble) {
+						this.fillAssistantRow(this.streamingBubble, message as AssistantMessage, false);
+						this.streamingBubble = null;
+					}
 				}
 				if (this.streaming) this.startWorking();
 				break;
@@ -452,15 +570,41 @@ export class Transcript {
 		this.scroller.appendChild(this.buildUserRow({ role: "user", content } as UserMessage));
 		this.hasContent = true;
 		this.optimisticText = text;
-		this.optimisticAt = Date.now();
-		this.scrollToBottom();
+		// The operator just hit send — that is an explicit intent to follow along.
+		this.forceScrollToBottom();
+		this.updateJumpButton();
+	}
+
+	/** Forget the pending optimistic echo (rejected prompt, session change). */
+	clearOptimistic(): void {
+		this.optimisticText = null;
+	}
+
+	/**
+	 * Does this delivered user message echo the bubble we already drew?
+	 *
+	 * No wall clock: a steered or queued message is only injected at the next turn
+	 * boundary, which on a long tool call is minutes away — any timeout here shows
+	 * the operator their own message twice. The echo is consumed on the first
+	 * match instead.
+	 */
+	private matchesOptimistic(delivered: string): boolean {
+		const typed = this.optimisticText;
+		if (typed === null) return false;
+		if (delivered === typed) return true;
+		// The host appends editor selections to the prompt (composeMessageText:
+		// `<attachment …>` blocks, or a ` (path lines a-b)` reference), so the
+		// delivered text is never byte-identical — but the typed text stays its prefix.
+		if (typed.length === 0 || !delivered.startsWith(typed)) return false;
+		const appended = delivered.slice(typed.length);
+		return appended.startsWith("\n\n<attachment ") || appended.startsWith(" (");
 	}
 
 	private renderMessage(message: AgentMessage, isPartial: boolean): void {
 		const role = message.role;
 		if (role === "user") {
 			const text = this.userMessageText(message as UserMessage);
-			if (this.optimisticText !== null && text === this.optimisticText && Date.now() - this.optimisticAt < 20_000) {
+			if (this.matchesOptimistic(text)) {
 				this.optimisticText = null;
 				return; // already rendered optimistically
 			}
@@ -502,13 +646,23 @@ export class Transcript {
 		return container;
 	}
 
-	private messageTimestamp(message: AgentMessage): string | null {
-		const ts = (message as unknown as { timestamp?: string }).timestamp;
-		return typeof ts === "string" && ts.length > 0 ? ts : null;
+	/**
+	 * Epoch ms for a message. The agent writes `timestamp: Date.now()` — a number,
+	 * never an ISO string. Reading it as a string left every row untagged, which
+	 * silently turned the spawn card's ordered insert into "append at the bottom".
+	 */
+	private messageTimestamp(message: AgentMessage): number | null {
+		const ts = (message as unknown as { timestamp?: number | string }).timestamp;
+		if (typeof ts === "number" && Number.isFinite(ts)) return ts;
+		if (typeof ts === "string" && ts.length > 0) {
+			const parsed = Date.parse(ts);
+			return Number.isFinite(parsed) ? parsed : null;
+		}
+		return null;
 	}
 
-	private markRowTimestamp(row: HTMLElement, ts: string | null): void {
-		if (ts) row.dataset.ts = String(Date.parse(ts) || "");
+	private markRowTimestamp(row: HTMLElement, ts: number | null): void {
+		if (ts != null) row.dataset.ts = String(ts);
 	}
 
 	private buildUserRow(message: UserMessage): HTMLElement {
@@ -541,14 +695,16 @@ export class Transcript {
 		return row;
 	}
 
-	/** Footer under a user bubble: estimated token count, copy, and fork-from-here. */
+	/** Footer under a user bubble: token estimate, turn cost, copy, fork-from-here. */
 	private buildUserFooter(row: HTMLElement, text: string): HTMLElement {
 		const footer = el("div", "user-footer");
 		const est = Math.max(1, Math.round(text.length / 4));
 		const estLabel = est >= 1000 ? `~${(est / 1000).toFixed(1)}k tokens (est.)` : `~${est} tokens (est.)`;
 		const tokensEl = el("span", "uf-tokens", estLabel);
-		tokensEl.title = "Estimated from message length (~4 chars/token). Cost is tracked on assistant replies.";
+		tokensEl.title = "Estimated from message length (~4 chars/token). Only replies are metered.";
 		footer.appendChild(tokensEl);
+		// The price lands when the reply that consumed this message arrives.
+		this.pendingUserFooter = footer;
 		const copyBtn = el("button", "uf-icon") as HTMLButtonElement;
 		copyBtn.title = "Copy message";
 		copyBtn.appendChild(icon("copy", 11));
@@ -567,6 +723,25 @@ export class Transcript {
 		});
 		footer.append(copyBtn, forkBtn);
 		return footer;
+	}
+
+	/**
+	 * Price the user's turn — #23 asked for the cost of their own message.
+	 *
+	 * prime-agent meters per reply, never per message: `usage.input` is the whole
+	 * context the reply was billed for, not the words the operator typed. So the
+	 * footer states exactly that instead of pinning a whole-context figure on the
+	 * bubble and letting it read as "your message cost this".
+	 */
+	private priceUserTurn(usage: AssistantMessage["usage"]): void {
+		const footer = this.pendingUserFooter;
+		const cost = usage?.cost?.input;
+		if (!footer || cost == null || !usage) return;
+		this.pendingUserFooter = null;
+		if (footer.querySelector(".uf-cost")) return;
+		const costEl = el("span", "uf-cost", `$${cost.toFixed(4)} input`);
+		costEl.title = `Metered input cost of the reply this message opened: ${formatNumber(usage.input)} context tokens for $${cost.toFixed(4)}. prime-agent prices the whole context per reply, not each message.`;
+		footer.querySelector(".uf-tokens")?.after(costEl);
 	}
 
 	private buildAssistantRow(message: AssistantMessage, isPartial: boolean): HTMLElement {
@@ -588,12 +763,37 @@ export class Transcript {
 		return "";
 	}
 
+	/** Reply text only — what renders as prose in the bubble. */
 	private assistantAllText(message: AssistantMessage): string {
 		return (message.content ?? [])
 			.filter((p) => p.type === "text")
 			.map((p) => (p as { text: string }).text)
 			.join("\n\n")
 			.trim();
+	}
+
+	/**
+	 * Everything the reply carried, in reading order, as markdown: thinking as a
+	 * blockquote, prose as-is, tool calls as fenced blocks. The copy button says
+	 * "text + thinking", so it has to actually carry both.
+	 */
+	private assistantCopyMarkdown(message: AssistantMessage): string {
+		const parts: string[] = [];
+		for (const part of message.content ?? []) {
+			if (part.type === "text") {
+				if (part.text.trim()) parts.push(part.text.trim());
+			} else if (part.type === "thinking") {
+				const thinking = (part as { thinking: string }).thinking?.trim();
+				if (thinking) {
+					parts.push(`> **Thought process**\n${thinking.split("\n").map((l) => `> ${l}`).join("\n")}`);
+				}
+			} else if (part.type === "toolCall") {
+				const call = part as { name: string; arguments?: Record<string, unknown> };
+				const view = toolView(call.name, call.arguments ?? {});
+				parts.push(`⚙ **${call.name}**\n\`\`\`${view.lang || "json"}\n${view.input}\n\`\`\``);
+			}
+		}
+		return parts.join("\n\n").trim();
 	}
 
 	private fillAssistantRow(row: HTMLElement, message: AssistantMessage, isPartial: boolean): void {
@@ -614,6 +814,7 @@ export class Transcript {
 			}
 		}
 		if (!isPartial) {
+			this.priceUserTurn(message.usage);
 			const meta = this.usageLine(message as AssistantMessage);
 			if (meta) {
 				body.appendChild(meta);
@@ -662,7 +863,7 @@ export class Transcript {
 		copyBtn.appendChild(icon("copy", 11));
 		copyBtn.addEventListener("click", (event) => {
 			event.stopPropagation();
-			copyToClipboard(this.assistantAllText(message));
+			copyToClipboard(this.assistantCopyMarkdown(message) || this.assistantAllText(message));
 		});
 		line.appendChild(copyBtn);
 		return line;
@@ -679,6 +880,16 @@ export class Transcript {
 	// ---------------------------------------------------------------
 
 	private toolSummary(name: string, args: Record<string, unknown>): string {
+		// Reuse prime-agent's own scorer so the collapsed card names the command
+		// that actually ran. A first-non-magic-line pick reads the setup instead:
+		// a `%%bash` + `cd …` + `npm run build` cell summarised as the `cd`.
+		const preview =
+			name === "ipython" && typeof args?.code === "string"
+				? previewIpythonCode(args.code).text
+				: name === "bash" && typeof args?.command === "string"
+					? previewBashCommand(args.command).text
+					: "";
+		if (preview) return preview; // already ellipsised at 64 chars by the scorer
 		for (const key of ["code", "command", "path", "file", "prompt", "query", "url"]) {
 			const value = args?.[key];
 			if (typeof value === "string" && value.trim()) {
@@ -734,11 +945,10 @@ export class Transcript {
 		});
 
 		const inputSection = el("div", "tool-section");
-		const codeish = (args?.code ?? args?.command) as string | undefined;
-		const inputText = typeof codeish === "string" ? codeish : JSON.stringify(args, null, 2);
-		const inputLabel = name === "ipython" ? "python" : name === "bash" ? "shell" : "input";
+		const view = toolView(name, args);
+		const inputText = view.input;
 		const inputHead = el("div", "tool-section-head");
-		inputHead.appendChild(el("span", "", inputLabel));
+		inputHead.appendChild(el("span", "", view.label));
 		inputHead.appendChild(this.makeCopyButton(inputText));
 		inputSection.appendChild(inputHead);
 
@@ -746,7 +956,7 @@ export class Transcript {
 			this.buildEditSections(args, inputHead, inputSection);
 		} else {
 			const pre = el("pre");
-			if (name === "bash") {
+			if (view.kind === "shell") {
 				pre.className = "term";
 				pre.textContent = "";
 				for (const [index, line] of inputText.split("\n").entries()) {
@@ -787,6 +997,9 @@ export class Transcript {
 			state: "running",
 		};
 		root.dataset.toolName = name;
+		// The chrome keys off the kind, not the name — see toolView.
+		root.dataset.toolKind = view.kind;
+		root.dataset.toolLang = view.lang;
 		this.toolBlocks.set(id, block);
 		return block;
 	}
@@ -797,10 +1010,29 @@ export class Transcript {
 		if (!block) return "";
 		const name = (block.root as HTMLElement & { dataset: DOMStringMap }).dataset.toolName ?? "tool";
 		const parts: string[] = [`⚙ ${name}`];
-		const inputPre = block.body.querySelector(".tool-section pre");
-		if (inputPre?.textContent?.trim()) {
-			const lang = name === "ipython" ? "python" : name === "bash" ? "shell" : "";
-			parts.push(`\`\`\`${lang ? lang : ""}\n${inputPre.textContent.trim()}\n\`\`\``);
+		const edits = block.body.querySelector(".tool-edits");
+		if (edits) {
+			// An edit card renders hunks, not a <pre>. Without this branch the
+			// selector below found the *result* pre and pasted the output as the
+			// call — the diff the operator was looking at never made the clipboard.
+			const path = block.body.querySelector(".tool-path")?.textContent?.trim();
+			const hunks = Array.from(edits.querySelectorAll(".diff-line"))
+				.map((line) => `${line.querySelector(".diff-sign")?.textContent ?? ""}${line.querySelector(".diff-text")?.textContent ?? ""}`)
+				.join("\n");
+			if (path) parts.push(path);
+			if (hunks.trim()) parts.push(`\`\`\`diff\n${hunks}\n\`\`\``);
+		}
+		// Scoped away from `.tool-result`: it also holds a <pre>, and an unscoped
+		// selector matched it first on any card whose call is not a <pre>.
+		const inputPre = block.body.querySelector(".tool-section:not(.tool-result) pre");
+		if (inputPre) {
+			// A terminal block carries a decorative "$ " prompt span; pasting that
+			// into a shell breaks the command, so read the line spans instead.
+			const lines = inputPre.querySelectorAll(".term-line");
+			const text = (
+				lines.length > 0 ? Array.from(lines).map((line) => line.textContent ?? "").join("\n") : (inputPre.textContent ?? "")
+			).trim();
+			if (text) parts.push(`\`\`\`${block.root.dataset.toolLang ?? ""}\n${text}\n\`\`\``);
 		}
 		block.body.querySelectorAll(".tool-result pre").forEach((pre) => {
 			const t = (pre.textContent ?? "").trim();
@@ -880,7 +1112,7 @@ export class Transcript {
 		const section = el("div", `tool-section tool-result${isError ? " error" : ""}`);
 		section.appendChild(el("div", "tool-section-label", label));
 		const pre = el("pre");
-		if (block.root.dataset.toolName === "bash") pre.className = "term";
+		if (block.root.dataset.toolKind === "shell") pre.className = "term";
 		section.appendChild(pre);
 		block.body.appendChild(section);
 		block.resultSection = section;

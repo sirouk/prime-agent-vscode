@@ -38,6 +38,8 @@ async function waitFor(predicate, timeoutMs, label) {
 const received = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ownIds = new Set();
+/** Every jsonl this harness caused to exist, so the finally block can undo it. */
+const ownSessionFiles = new Set();
 const sink = { post: (message) => received.push(message) };
 const outputLines = [];
 const _mem = new Map();
@@ -53,6 +55,16 @@ try {
 	const snapshot = await waitFor(() => received.find((m) => m.type === "snapshot"), 30_000, "initial snapshot");
 	check("initial snapshot received", !!snapshot);
 	check("snapshot connected", snapshot.status?.connected === true, snapshot.status?.modelLabel ?? "");
+	// Against the real agent: the level list must come from the model's own
+	// thinkingLevelMap, not a fixed six. Kimi K3 TEE, for one, supports only
+	// "max" — offering "xhigh" there is a level clampThinkingLevel would swap.
+	const levels = snapshot.status?.availableThinkingLevels;
+	const known = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+	check(
+		"thinking levels derived from the live model, not invented",
+		Array.isArray(levels) && levels.length > 0 && levels.every((l) => known.includes(l)) && levels.includes(snapshot.status.thinkingLevel),
+		`${JSON.stringify(levels)} current=${snapshot.status?.thinkingLevel}`,
+	);
 
 	// Simulate the webview sending a prompt.
 	const events = [];
@@ -89,8 +101,14 @@ try {
 		await driver.connect();
 		// Fresh resident session owned by the daemon (NOT by this extension's RPC client).
 		const residentName = `host-e2e-live-${Date.now()}`;
+		// PRIME_AGENT_ARGS only reaches the extension's own RPC child. The daemon
+		// is a separate, already-running process: without `sessionDir` it writes
+		// this session into the operator's real ~/.prime/agent/sessions and leaves
+		// it there — the harness has no delete command, only `kill`.
+		const daemonSessionDir = path.join(workdir, "daemon-sessions");
+		fs.mkdirSync(daemonSessionDir, { recursive: true });
 		const createRes = await driver.request(
-			{ type: "create", lifecycle: "resident", name: residentName, config: { cwd: workdir } },
+			{ type: "create", lifecycle: "resident", name: residentName, config: { cwd: workdir, sessionDir: daemonSessionDir } },
 			20_000,
 		);
 		check("resident session created for attach", createRes?.id != null, `id=${createRes?.id ?? "<none>"}`);
@@ -102,6 +120,12 @@ try {
 			sessionFile = listed.find((s) => s.id === createRes.id)?.sessionFile;
 		}
 		check("resident session file surfaced", typeof sessionFile === "string" && sessionFile.length > 0, String(sessionFile ?? "<none>"));
+		if (typeof sessionFile === "string" && sessionFile.length > 0) ownSessionFiles.add(sessionFile);
+		let sandboxed = false;
+		try {
+			sandboxed = fs.realpathSync(path.dirname(sessionFile)) === fs.realpathSync(daemonSessionDir);
+		} catch { /* path gone: treat as not sandboxed and let the check report it */ }
+		check("resident session stays inside the harness sandbox", sandboxed, String(sessionFile ?? "<none>"));
 
 		const promptCountBefore = received.length;
 		// Attach through the same channel the righ-observe parity uses.
@@ -151,6 +175,22 @@ try {
 			watcherEvents.some((e) => e.startsWith("message_")),
 			`${watcherEvents.length} watcher events`,
 		);
+
+		// #68 "on EVERY visit": hiding and reshowing the view asks for a fresh
+		// snapshot. While attached that must repaint the TERMINAL session, not the
+		// background RPC client's own (usually empty) transcript.
+		await controller.refreshSnapshot();
+		const revisit = [...received].reverse().find((m) => m.type === "snapshot");
+		check(
+			"re-visiting an attached session repaints the attached session",
+			revisit?.status?.sessionFile === sessionFile,
+			`${revisit?.status?.sessionFile ?? "<none>"} vs ${sessionFile}`,
+		);
+		check(
+			"the header keeps saying the session is shared with the terminal",
+			/shared with terminal/.test(revisit?.status?.statusText ?? ""),
+			revisit?.status?.statusText ?? "<none>",
+		);
 		watcher.dispose();
 		driver.dispose();
 	}
@@ -185,6 +225,16 @@ try {
 			await killer.connect();
 			await killer.request({ type: "kill", activeSessionId: id }, 15_000);
 			killer.dispose();
+		} catch {
+			// best effort
+		}
+	}
+	// `kill` stops the worker; it does not remove the transcript. Anything the
+	// daemon wrote outside our temp dir is still ours to clean up — a test must
+	// never leave rows in the operator's own history.
+	for (const file of ownSessionFiles) {
+		try {
+			if (!path.resolve(file).startsWith(path.resolve(workdir))) fs.rmSync(file, { force: true });
 		} catch {
 			// best effort
 		}

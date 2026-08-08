@@ -3,6 +3,9 @@
 #
 #   sh install.sh                                clone -> build -> install
 #   LOCAL_DIR=/path/to/checkout sh install.sh    build from an existing checkout (dev)
+#
+# The released build is on the Marketplace and needs none of this:
+#   code --install-extension sirouk.prime-agent-vscode
 set -eu
 
 REPO_URL="https://github.com/sirouk/prime-agent-vscode"
@@ -58,8 +61,11 @@ npm ci
 echo "Packaging extension ..."
 npm run package
 
-VSIX=$(ls -t "$PKG_NAME"-*.vsix 2>/dev/null | head -n 1)
-[ -n "$VSIX" ] || fail "npm run package produced no $PKG_NAME-*.vsix."
+# By exact version, not newest-by-mtime: a dev checkout keeps older .vsix files
+# around and installing one of those would look like a successful install.
+VERSION=$(node -p "require('./package.json').version")
+VSIX="$PKG_NAME-$VERSION.vsix"
+[ -f "$VSIX" ] || fail "npm run package produced no $VSIX."
 
 echo "Installing $VSIX ..."
 code --install-extension "$VSIX" --force

@@ -7,6 +7,9 @@ import { Dropdown, type DropdownItem } from "./dropdown.js";
 import { el, icon, iconButton, svgIcon } from "./dom.js";
 import type { ImageAttachment, ModelRef, RpcModel, RpcSlashCommand, SelectionAttachment } from "../src/protocol.js";
 
+/** Keys that move the caret without producing an input event. */
+const CARET_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
+
 export interface ComposerDeps {
 	onSend: (text: string, images: ImageAttachment[], selections: SelectionAttachment[]) => void;
 	onStop: () => void;
@@ -48,6 +51,9 @@ export class Composer {
 	private selections: SelectionAttachment[] = [];
 	private commands: RpcSlashCommand[] = [];
 	private streaming = false;
+	/** Starts false: until a status says the agent answers, we cannot take a prompt. */
+	private enabled = false;
+	private observing = false;
 	private behavior: "steer" | "followUp" = "steer";
 	private models: RpcModel[] = [];
 	private favorites: ModelRef[] = [];
@@ -62,9 +68,16 @@ export class Composer {
 	private acItems: Array<{ label: string; sub?: string; insert: string; dir?: boolean }> = [];
 	private acSelected = 0;
 	private acKind: "slash" | "mention" | null = null;
-	private acMentionStart = 0;
 	private acRequestId = 0;
 	private mentionDebounce: number | undefined;
+	private draftDebounce: number | undefined;
+	/**
+	 * Paths the operator actually picked from the file search. `LICENSE`,
+	 * `.gitignore` and every extensionless file are indistinguishable from a
+	 * plain word by pattern alone — the accept is the only evidence they are
+	 * mentions, and #19 asked for a mention to *look* selected.
+	 */
+	private accepted = new Set<string>();
 
 	constructor(private readonly deps: ComposerDeps) {
 		this.root = el("div", "composer-dock");
@@ -141,21 +154,34 @@ export class Composer {
 		card.appendChild(this.autocompleteEl);
 
 		this.textarea.addEventListener("keydown", (event) => this.onKeyDown(event));
-		let draftDebounce: number | undefined;
 		this.textarea.addEventListener("input", () => {
 			this.autoGrow();
 			this.updateAutocomplete();
-			window.clearTimeout(draftDebounce);
-			draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
+			window.clearTimeout(this.draftDebounce);
+			this.draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
+		});
+		// The caret moves without an input event too. A mention armed at one offset
+		// and accepted at another splices the path into the middle of the line, and
+		// a panel left armed over zero results swallows Enter with nothing on screen.
+		this.textarea.addEventListener("click", () => this.updateAutocomplete());
+		this.textarea.addEventListener("keyup", (event) => {
+			// ArrowUp/Down belong to the open panel — they move the selection, not the caret.
+			if (CARET_KEYS.has(event.key)) this.updateAutocomplete();
 		});
 		this.textarea.addEventListener("scroll", () => {
 			if (this.mirror) this.mirror.scrollTop = this.textarea.scrollTop;
+		});
+		this.textarea.addEventListener("mousemove", (event) => this.updateMentionHover(event));
+		this.textarea.addEventListener("mouseleave", () => {
+			if (this.textarea.title) this.textarea.title = "";
 		});
 		this.textarea.addEventListener("paste", (event) => this.onPaste(event));
 		this.textarea.addEventListener("drop", (event) => this.onDrop(event));
 		this.textarea.addEventListener("dragover", (event) => event.preventDefault());
 		this.autoGrow();
 		this.updateBehaviorLabel();
+		// Honest from the first frame: nothing has told us the agent answers yet.
+		this.applyInputState();
 	}
 
 	// ---------------------------------------------------------------
@@ -188,6 +214,9 @@ export class Composer {
 			this.currentModel.modelId === modelId &&
 			this.modelLabelEl.textContent === label;
 		if (unchanged) return;
+		// The level list belongs to the outgoing model; carrying it into the new
+		// one would offer levels the new model rejects until the next status lands.
+		this.availableThinkingLevels = null;
 		this.currentModel = { provider, modelId };
 		this.currentDisplayedLabel = label;
 		this.modelLabelEl.textContent = this.truncateModelLabel(label);
@@ -196,19 +225,47 @@ export class Composer {
 	}
 
 	setThinking(level: string, availableLevels?: string[] | null): void {
-		// Daemon may report "max" for the top level; the UI list uses "xhigh".
-		this.currentThinking = level === "max" ? "xhigh" : level;
-		if (Array.isArray(availableLevels) && availableLevels.length > 0) {
-			this.availableThinkingLevels = availableLevels.map((l) => (l === "max" ? "xhigh" : l));
-		}
+		// "max" is a real level, distinct from "xhigh" — several models (Kimi K3 TEE)
+		// support max and nothing else. Aliasing it made the pill read a level the
+		// operator could not have chosen and never marked the current row.
+		this.currentThinking = level;
+		// Assign unconditionally: an absent list means "we don't know this model",
+		// and keeping the last model's list is how stale levels survive a switch.
+		this.availableThinkingLevels = Array.isArray(availableLevels) && availableLevels.length > 0 ? [...availableLevels] : null;
 		if (this.reasoning) this.brainBtn.title = `Thinking level: ${this.currentThinking}`;
 	}
 
 	setObserving(observing: boolean): void {
-		this.textarea.disabled = observing;
-		this.sendBtn.disabled = observing;
-		this.sendBtn.style.opacity = observing ? "0.4" : "";
-		this.textarea.placeholder = observing ? "Watching a live session — read-only" : "Message Prime Agent…";
+		this.observing = observing;
+		this.applyInputState();
+		this.applyRunControls();
+	}
+
+	/**
+	 * Offline means offline: an armed composer over an agent that does not answer
+	 * buys the operator an optimistic bubble and a 120s timeout, nothing else.
+	 */
+	setEnabled(enabled: boolean): void {
+		this.enabled = enabled;
+		this.applyInputState();
+	}
+
+	/** True while a prompt would actually go somewhere. */
+	private canSend(): boolean {
+		return this.enabled && !this.observing;
+	}
+
+	private applyInputState(): void {
+		const blocked = !this.canSend();
+		this.textarea.disabled = blocked;
+		this.sendBtn.disabled = blocked;
+		this.sendBtn.style.opacity = blocked ? "0.4" : "";
+		this.textarea.placeholder = this.observing
+			? "Watching a live session — read-only"
+			: this.enabled
+				? "Message Prime Agent…"
+				: "Not connected — prime-agent isn't answering";
+		this.updateSendState();
 	}
 
 	setSteerDefault(behavior: "steer" | "followUp"): void {
@@ -228,7 +285,9 @@ export class Composer {
 		// fields mean "allow" so we don't silently eat pastes.
 		this.vision = model?.input ? model.input.includes("image") : true;
 		const visionNote = this.vision ? " (accepts images)" : " (text-only, image attach off)";
-		this.modelBtn.title = `${this.currentDisplayedLabel ?? this.modelBtn.title} — click to choose a model${visionNote}`;
+		// Rebuild from the model label only — reading modelBtn.title back would
+		// re-append the suffix on every models/status push until the tooltip is a wall.
+		this.modelBtn.title = `${this.currentDisplayedLabel ?? "Choose model"} — click to choose a model${visionNote}`;
 		this.brainBtn.classList.toggle("disabled-pill", !this.reasoning);
 		this.brainBtn.title = this.reasoning ? `Thinking level: ${this.currentThinking}` : "This model does not support thinking";
 		this.brainBtn.disabled = !this.reasoning;
@@ -278,18 +337,31 @@ export class Composer {
 	private insertTextAtCaret(text: string): void {
 		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
 		const before = this.textarea.value.slice(0, caret);
-		this.textarea.value = `${before}${text}${this.textarea.value.slice(caret)}`;
-		this.textarea.selectionStart = this.textarea.selectionEnd = before.length + text.length;
+		// currentMentionQuery() only recognises an "@" at the start of the input or
+		// after whitespace, so appending one to "…changes in" opened nothing and
+		// left a stray character. Separate it the way insertMention already does.
+		const sep = before && !/\s$/.test(before) ? " " : "";
+		this.textarea.value = `${before}${sep}${text}${this.textarea.value.slice(caret)}`;
+		this.textarea.selectionStart = this.textarea.selectionEnd = before.length + sep.length + text.length;
 		this.autoGrow();
 		this.textarea.focus();
 	}
 
 	setStreaming(streaming: boolean): void {
 		this.streaming = streaming;
-		this.stopBtn.style.display = streaming ? "" : "none";
-		this.behaviorBtn.style.display = streaming ? "" : "none";
-		if (!streaming) this.behavior = "steer";
+		this.applyRunControls();
+		// Back to the configured default between runs — not hard-coded "steer",
+		// which silently overrode primeAgent.defaultStreamingBehavior=followUp.
+		if (!streaming) this.behavior = this.steerDefault;
 		this.updateBehaviorLabel();
+	}
+
+	private applyRunControls(): void {
+		// Never while observing: this Stop belongs to our own session, and the run
+		// on screen is owned by another client. Offering it there is a lie.
+		const show = this.streaming && !this.observing;
+		this.stopBtn.style.display = show ? "" : "none";
+		this.behaviorBtn.style.display = show ? "" : "none";
 	}
 
 	setContext(percent: number | null | undefined, tokens: number | null | undefined, window: number | undefined): void {
@@ -344,9 +416,12 @@ export class Composer {
 	private ensureThresholdFlyout(): HTMLElement {
 		if (this.thresholdFlyout) return this.thresholdFlyout;
 		const panel = el("div", "threshold-flyout");
+		// The panel lives INSIDE the gauge, whose click handler toggles it. Without
+		// this every interaction — including the click Chromium fires at the end of
+		// a slider drag — bubbles up and shuts the popover on the operator.
+		panel.addEventListener("click", (event) => event.stopPropagation());
 		panel.innerHTML = "";
 		const title = el("div", "threshold-title", "");
-		title.title = "When the context window reaches this fill, Prime Agent compacts it automatically. Range: 20%–80%.";
 		const row = el("div", "threshold-row");
 		const slider = document.createElement("input");
 		slider.type = "range";
@@ -392,10 +467,16 @@ export class Composer {
 		if (!panel) return;
 		const tokensAt = (pct: number | null): string =>
 			pct != null && this.contextWindowCurrent ? ` · ${this.abbrevTokens(Math.round((pct / 100) * this.contextWindowCurrent))}` : "";
-		const titleEl = panel.querySelector(".threshold-title");
+		const titleEl = panel.querySelector(".threshold-title") as HTMLElement | null;
 		const slider = panel.querySelector(".threshold-slider") as HTMLInputElement | null;
 		const valueEl = panel.querySelector(".threshold-value");
 		const effective = this.compactThreshold ?? this.compactDefaultPercent;
+		// The agent default sits above 80 on a big window (~94% at 262k). A range
+		// input silently clamps out-of-range values, so a fixed max=80 pinned the
+		// handle at 80 while the readout beside it said 94.
+		const ceiling = Math.max(80, this.compactDefaultPercent ?? 80);
+		if (slider) slider.max = String(ceiling);
+		if (titleEl) titleEl.title = `When the context window reaches this fill, Prime Agent compacts it automatically. Range: 20%–${ceiling}%.`;
 		if (this.compactThreshold != null) {
 			if (titleEl) titleEl.textContent = `Force session auto-compact ≥ ${this.compactThreshold}%`;
 			if (slider) slider.value = String(this.compactThreshold);
@@ -445,6 +526,7 @@ export class Composer {
 	}
 
 	insertMention(path: string): void {
+		this.accepted.add(path);
 		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
 		const before = this.textarea.value.slice(0, caret);
 		const after = this.textarea.value.slice(caret);
@@ -464,6 +546,25 @@ export class Composer {
 		this.textarea.value = text;
 		this.autoGrow();
 		this.focus();
+	}
+
+	/**
+	 * Host-authoritative draft for the thread now on screen. An empty payload
+	 * means "this thread has no draft" and must clear the box: the old
+	 * only-if-non-empty rule carried thread A's unsent sentence into thread B,
+	 * where the next keystroke persisted it over B's own draft.
+	 */
+	setDraft(text: string): void {
+		this.textarea.value = text;
+		this.autoGrow();
+		// Don't steal focus back from History just to clear the box.
+		if (text) this.focus();
+	}
+
+	/** Persist the last keystrokes under the OUTGOING session, before a switch. */
+	flushDraft(): void {
+		window.clearTimeout(this.draftDebounce);
+		this.deps.onDraftChanged(this.textarea.value);
 	}
 
 	focus(): void {
@@ -487,6 +588,8 @@ export class Composer {
 	// ---------------------------------------------------------------
 
 	send(): void {
+		// Keyboard paths (Enter) bypass the disabled button, so the gate lives here too.
+		if (!this.canSend()) return;
 		const text = this.textarea.value.trim();
 		if (!text && this.images.length === 0 && this.selections.length === 0) return;
 		if (this.images.length > 0 && !this.vision) {
@@ -560,14 +663,14 @@ export class Composer {
 			return;
 		}
 		if (!this.reasoning) return;
-		const allLevels = ["off", "minimal", "low", "medium", "high", "xhigh"];
-		const levels = this.availableThinkingLevels?.length
-			? allLevels.filter((l) => this.availableThinkingLevels!.includes(l))
-			: allLevels;
 		const model = this.currentModelInfo();
-		const items: DropdownItem[] = levels.map((level) => ({
+		// Host-derived from the model's thinkingLevelMap. When we have no list,
+		// fall back to the levels every reasoning model accepts — xhigh and max
+		// exist only where the model declares them, so we never invent those.
+		const levels = this.availableThinkingLevels?.length ? this.availableThinkingLevels : ["off", "minimal", "low", "medium", "high"];
+		const items: DropdownItem[] = levels.map((level, index) => ({
 			label: level,
-			sub: level === "xhigh" ? "deepest reasoning this model supports" : undefined,
+			sub: index === levels.length - 1 && levels.length > 1 ? "deepest reasoning this model supports" : undefined,
 			current: level === this.currentThinking,
 			onSelect: () => this.deps.onSetThinking(level),
 		}));
@@ -615,6 +718,7 @@ export class Composer {
 		};
 		const makeItem = (model: RpcModel, section: string): DropdownItem => ({
 			label: this.modelLabelFor(model),
+			title: model.name && model.name !== model.id ? `${this.modelLabelFor(model)} — ${model.name}` : this.modelLabelFor(model),
 			sub: model.name && model.name !== model.id ? model.name : undefined,
 			right: rightFor(model),
 			section,
@@ -670,20 +774,76 @@ export class Composer {
 		if (this.mirror) this.mirror.scrollTop = this.textarea.scrollTop;
 	}
 
-	private syncMirror(): void {
-		if (!this.mirror) return;
-		const text = this.textarea.value;
-		const mentionRe = /(^|[\s(`"'])@((?:[\w-]+\/)+(?:[\w./-]*\w|)|[\w-]+\.[\w]{1,8})(?=$|[\s),.;:'"`\/]|$)/g;
-		const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-		let html = "";
-		let last = 0;
+	/**
+	 * Byte ranges in `text` that are mentions. Two sources, because neither alone
+	 * is honest: the pattern catches anything path-shaped the operator typed by
+	 * hand, and the accepted set catches what the file search offered but no
+	 * pattern can distinguish from a word (`@LICENSE`, `@.gitignore`).
+	 */
+	private mentionRanges(text: string): Array<{ start: number; end: number; path: string }> {
+		const ranges: Array<{ start: number; end: number; path: string }> = [];
+		// A leading "." is legal in every segment (`.github/workflows/ci.yml`), and
+		// a trailing "/" belongs INSIDE the pill — folders are shown with it (#36).
+		const mentionRe = /(^|[\s(`"'])@((?:\.?[\w-]+\/)+(?:\.?[\w./-]*\w|)|\.?[\w-]+\.[\w]{1,8})(?=$|[\s),.;:'"`\/]|$)/g;
 		let match: RegExpExecArray | null;
 		while ((match = mentionRe.exec(text)) !== null) {
 			const start = match.index + match[1].length;
-			const path = match[2];
-			if (start > last) html += esc(text.slice(last, start));
-			html += `<span class="mm" title="${esc(path)}">@${esc(path)}</span>`;
-			last = start + path.length + 1;
+			ranges.push({ start, end: start + match[2].length + 1, path: match[2] });
+		}
+		const overlaps = (start: number, end: number): boolean => ranges.some((r) => start < r.end && end > r.start);
+		// Longest first so `src/a` never claims the head of an accepted `src/ab`.
+		for (const path of [...this.accepted].sort((a, b) => b.length - a.length)) {
+			const needle = `@${path}`;
+			for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length)) {
+				const end = at + needle.length;
+				// Same boundaries as the pattern, so #51's no-bleed guarantee holds.
+				if (at > 0 && !/[\s(`"']/.test(text[at - 1])) continue;
+				if (end < text.length && !/[\s),.;:'"`\/]/.test(text[end])) continue;
+				if (!overlaps(at, end)) ranges.push({ start: at, end, path });
+			}
+		}
+		return ranges.sort((a, b) => a.start - b.start);
+	}
+
+	/**
+	 * Turn #32 asked that hovering an inline mention reveal its path. The styled
+	 * spans live in the mirror layer, which is pointer-events:none under an opaque
+	 * textarea — their own tooltips are unreachable. Hit-test the span rects
+	 * against the pointer and put the tooltip on the textarea, which does get the
+	 * mouse. getClientRects() (not getBoundingClientRect) so a mention wrapped
+	 * across two lines is hit on both of them.
+	 */
+	private updateMentionHover(event: MouseEvent): void {
+		let hovered = "";
+		for (const span of Array.from(this.mirror.querySelectorAll<HTMLElement>(".mm"))) {
+			for (const rect of Array.from(span.getClientRects())) {
+				if (
+					event.clientX >= rect.left && event.clientX <= rect.right &&
+					event.clientY >= rect.top && event.clientY <= rect.bottom
+				) {
+					hovered = span.dataset.path ?? "";
+					break;
+				}
+			}
+			if (hovered) break;
+		}
+		const title = hovered ? `${hovered} — mentioned file, sent as context` : "";
+		if (this.textarea.title !== title) this.textarea.title = title;
+	}
+
+	private syncMirror(): void {
+		if (!this.mirror) return;
+		const text = this.textarea.value;
+		const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+		let html = "";
+		let last = 0;
+		for (const range of this.mentionRanges(text)) {
+			if (range.start > last) html += esc(text.slice(last, range.start));
+			// data-path, not title: the mirror is pointer-events:none beneath an
+			// opaque textarea, so a title here could never fire. updateMentionHover
+			// hit-tests these rects and lends the tooltip to the textarea instead.
+			html += `<span class="mm" data-path="${esc(range.path)}">@${esc(range.path)}</span>`;
+			last = range.end;
 		}
 		if (last < text.length) html += esc(text.slice(last));
 		// A trailing newline collapses without this spacer — keep rows visible.
@@ -706,7 +866,7 @@ export class Composer {
 			this.textarea.value.trim().length > 0 ||
 			this.images.length > 0 ||
 			this.selections.length > 0;
-		this.sendBtn.classList.toggle("muted", !hasContent);
+		this.sendBtn.classList.toggle("muted", !hasContent || !this.canSend());
 	}
 
 	private renderChips(): void {
@@ -718,6 +878,9 @@ export class Composer {
 			chip.appendChild(icon("selection", 12));
 			chip.appendChild(el("span", "chip-label", `${sel.path}:${sel.startLine}-${sel.endLine}`));
 			const remove = el("button", "chip-remove");
+			// The chip's own title describes the selection; the ✕ needs to say what it does.
+			remove.title = "Remove this selection";
+			remove.setAttribute("aria-label", "Remove this selection");
 			remove.appendChild(icon("close", 11));
 			remove.addEventListener("click", (event) => {
 				event.stopPropagation();
@@ -735,6 +898,8 @@ export class Composer {
 			chip.appendChild(thumb);
 			if (img.name) chip.appendChild(el("span", "chip-label", img.name));
 			const remove = el("button", "chip-remove");
+			remove.title = "Remove this image";
+			remove.setAttribute("aria-label", "Remove this image");
 			remove.appendChild(icon("close", 11));
 			remove.addEventListener("click", (event) => {
 				event.stopPropagation();
@@ -824,7 +989,6 @@ export class Composer {
 		const mention = this.currentMentionQuery();
 		if (mention) {
 			this.acKind = "mention";
-			this.acMentionStart = mention.start;
 			// No debounce: per-keystroke freshness, staleness is guarded by the request id.
 			this.acRequestId = Date.now();
 			this.deps.onSearchFiles(mention.query, this.acRequestId);
@@ -836,7 +1000,10 @@ export class Composer {
 	private renderAutocomplete(): void {
 		this.autocompleteEl.textContent = "";
 		if (!this.acKind || this.acItems.length === 0) {
-			this.autocompleteEl.classList.remove("visible");
+			// Disarm, don't just hide: onKeyDown gates on acKind alone, so a search
+			// that matched nothing left Enter captured by an invisible panel — the
+			// operator pressed it twice and the message never went anywhere.
+			this.closeAutocomplete();
 			return;
 		}
 		this.acItems.forEach((item, index) => {
@@ -872,8 +1039,16 @@ export class Composer {
 			this.textarea.value = item.insert;
 			this.textarea.selectionStart = this.textarea.selectionEnd = item.insert.length;
 		} else {
+			// Re-derive the range instead of trusting the offset the panel opened
+			// with: the caret may have moved since (click, arrows), and splicing at
+			// the stale start duplicates the line around a second mention.
+			const range = this.currentMentionQuery();
+			if (!range) {
+				this.closeAutocomplete();
+				return;
+			}
 			// Inline mention: the @token lives IN the text (styled via the mirror layer).
-			const before = this.textarea.value.slice(0, this.acMentionStart);
+			const before = this.textarea.value.slice(0, range.start);
 			const after = this.textarea.value.slice(caret);
 			const path = item.insert;
 			const tail = after.replace(/^\s+/, "");
@@ -882,6 +1057,7 @@ export class Composer {
 			this.textarea.value = `${before}@${path} ${tail}`;
 			const pos = before.length + path.length + 2;
 			this.textarea.selectionStart = this.textarea.selectionEnd = pos;
+			this.accepted.add(path);
 		}
 		this.closeAutocomplete();
 		this.autoGrow();

@@ -81,7 +81,10 @@
 				{ provider: "chutes", modelId: "moonshotai/Kimi-K3-TEE" },
 				{ provider: "anthropic", modelId: "claude-sonnet-4-5" },
 			] });
-			host({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" }, status: { ...baseStatus, modelProvider: "chutes", modelId: "moonshotai/Kimi-K3-TEE" }, steerDefault: "steer" });
+			// Kimi K3 TEE's real thinkingLevelMap maps every level to null except
+			// "max" — the host derives this list, and the brain menu must show it
+			// verbatim rather than the old invented six.
+			host({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" }, status: { ...baseStatus, modelProvider: "chutes", modelId: "moonshotai/Kimi-K3-TEE", availableThinkingLevels: ["max"] }, steerDefault: "steer" });
 			setTimeout(() => {
 				document.querySelector(".rail-pill.model").dispatchEvent(new MouseEvent("click", { bubbles: true }));
 				// The list is capped at 340px; scroll so the Thinking level section is in view.
@@ -112,7 +115,7 @@
 						content: [
 							{ type: "text", text: "Opened `src/foo/bar.ts` — the backoff is linear right now. I'll switch it to exponential with jitter and cap it at 30s." },
 						],
-						usage: { totalTokens: 2040, cost: { total: 0.001 } },
+						usage: { input: 1800, output: 240, totalTokens: 2040, cost: { input: 0.0008, output: 0.0002, total: 0.001 } },
 					},
 				],
 				state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" },
@@ -128,7 +131,7 @@
 						content: [
 							{ type: "text", text: "Starting the suite now; I'll stream results as they land." },
 						],
-						usage: { totalTokens: 1560, cost: { total: 0.001 } },
+						usage: { input: 1400, output: 160, totalTokens: 1560, cost: { input: 0.0008, output: 0.0002, total: 0.001 } },
 					},
 				],
 				state: { model: { provider: "chutes", id: "moonshotai/Kimi-K3-TEE" }, thinkingLevel: "max" },
@@ -148,7 +151,7 @@
 							{ type: "text", text: "I'll study the RPC protocol and build the extension around it.\n\nThe protocol is newline-delimited JSON over stdio:\n\n- **commands** on stdin, `id`-correlated\n- **events** streamed on stdout\n\nLet me verify the framing edge cases first." },
 							{ type: "toolCall", id: "tc1", name: "ipython", arguments: { code: "import json\n\nwith open('packages/coding-agent/src/modes/rpc/rpc-types.ts') as f:\n    src = f.read()\nprint(len(src.splitlines()), 'lines')" } },
 						],
-						usage: { totalTokens: 10230, cost: { total: 0.004 } },
+						usage: { input: 9800, output: 430, totalTokens: 10230, cost: { input: 0.0035, output: 0.0005, total: 0.004 } },
 					},
 					{ role: "toolResult", toolCallId: "tc1", toolName: "ipython", content: [{ type: "text", text: "372 lines" }] },
 					{
@@ -157,7 +160,7 @@
 							{ type: "text", text: "Framing splits on `\\n` only — the client must **not** use `readline`. Now the client:" },
 							{ type: "toolCall", id: "tc2", name: "edit", arguments: { path: "src/rpc-client.ts" } },
 						],
-						usage: { totalTokens: 12900, cost: { total: 0.006 } },
+						usage: { input: 12300, output: 600, totalTokens: 12900, cost: { input: 0.0052, output: 0.0008, total: 0.006 } },
 					},
 					{ role: "toolResult", toolCallId: "tc2", toolName: "edit", content: [{ type: "text", text: "File created: src/rpc-client.ts (221 lines)" }] },
 				],
@@ -168,8 +171,8 @@
 			host({ type: "event", event: { type: "agent_start" } });
 			host({ type: "event", event: { type: "message_start", message: { role: "assistant", content: [] } } });
 			host({ type: "event", event: { type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "Running the smoke test with a real subprocess round-trip. Watch the " }] }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "…" } } });
-			host({ type: "event", event: { type: "tool_execution_start", toolCallId: "tc3", toolName: "bash", args: { command: "node test/smoke.mjs" } } });
-			host({ type: "event", event: { type: "tool_execution_update", toolCallId: "tc3", toolName: "bash", args: {}, partialResult: { output: "PASS  process starts\nPASS  get_state succeeds\n" } } });
+			host({ type: "event", event: { type: "tool_execution_start", toolCallId: "tc3", toolName: "ipython", args: { code: "%%bash\nnode test/smoke.mjs" } } });
+			host({ type: "event", event: { type: "tool_execution_update", toolCallId: "tc3", toolName: "ipython", args: {}, partialResult: { output: "PASS  process starts\nPASS  get_state succeeds\n" } } });
 			host({ type: "changedFiles", files: ["src/rpc-client.ts", "webview/main.ts", "media/main.css"] });
 			host({ type: "status", status: { ...baseStatus, streaming: true } });
 		}

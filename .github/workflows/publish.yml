@@ -23,18 +23,48 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify build (mirror of the release gate)
+      - name: Check the tag matches package.json
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package.json version $pkg" >&2
+            exit 1
+          fi
+          echo "Publishing version $pkg"
+
+      # `npm test` verbatim — one list, so CI and a contributor's terminal can
+      # never drift apart. `npm run test:live` (daemon-parity, host-e2e, smoke)
+      # and preview-shot are deliberately absent: they need a local prime-agent
+      # CLI and a browser, neither of which exists on a runner. release.sh runs
+      # both halves and remains the full gate.
+      - name: Verify build (npm test — the CI-runnable half of the release gate)
         run: |
           npx tsc --noEmit
-          node esbuild.config.mjs
-          node test/webview.test.mjs
-          node test/export-md.test.mjs
-          node test/activate.test.mjs
+          npm test
 
       - name: Package the vsix
-        run: npm run package
+        run: |
+          # vsce globs with dot:true and ignores .gitignore — a stray .env here
+          # would be published to the world inside the vsix.
+          if npx vsce ls --no-dependencies | grep -qE '(^|/)\.env(\.|$)'; then
+            echo "refusing to package: a .env file would ship inside the vsix" >&2
+            exit 1
+          fi
+          npm run package
 
       - name: Publish to the VS Code Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx vsce publish --packagePath "$(ls -t prime-agent-vscode-*.vsix | head -1)"
+        run: |
+          if [ -z "$VSCE_PAT" ]; then
+            echo "VSCE_PAT secret is not set on this repository — cannot publish." >&2
+            echo "Add it under Settings > Secrets and variables > Actions, then re-run this workflow." >&2
+            exit 1
+          fi
+          # Publish the vsix for this version by name; `ls -t` would happily pick
+          # up some other bundle if packaging ever leaves more than one behind.
+          vsix="prime-agent-vscode-$(node -p "require('./package.json').version").vsix"
+          [ -f "$vsix" ] || { echo "npm run package did not produce $vsix" >&2; exit 1; }
+          npx vsce publish --packagePath "$vsix"

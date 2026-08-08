@@ -108,7 +108,7 @@ const expectedCommands = [
 	"primeAgent.newSession",
 	"primeAgent.abort",
 	"primeAgent.compact",
-	"primeAgent.exportHtml",
+	"primeAgent.exportChat",
 	"primeAgent.restart",
 	"primeAgent.history",
 	"primeAgent.addSelectionToChat",

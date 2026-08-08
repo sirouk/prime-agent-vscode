@@ -50,6 +50,19 @@ const controllerConfig = {
 	external: ["vscode"],
 };
 
+// test/host-e2e.mjs requires this bundle directly. It is gitignored with the
+// rest of dist/, so a clean checkout has to build it or that gate cannot run.
+const daemonSidecarConfig = {
+	...shared,
+	entryPoints: ["src/daemon-sidecar.ts"],
+	bundle: true,
+	format: "cjs",
+	platform: "node",
+	target: "node18",
+	outfile: "dist/daemon-sidecar.cjs",
+	external: ["vscode"],
+};
+
 const smokeConfig = {
 	...shared,
 	entryPoints: ["test/smoke.ts"],
@@ -70,4 +83,5 @@ if (watch) {
 	await esbuild.build(webviewConfig);
 	await esbuild.build(smokeConfig);
 	await esbuild.build(controllerConfig);
+	await esbuild.build(daemonSidecarConfig);
 }

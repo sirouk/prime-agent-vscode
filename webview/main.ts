@@ -198,17 +198,26 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 
 const historyView = new HistoryView({
 	onResume: (path, sessionId) => {
+		// Before the switch, or the last 300ms of typing lands under the INCOMING
+		// session id and overwrites the draft the operator saved there.
+		composer.flushDraft();
 		showView("chat");
 		post({ type: "switchSession", path, sessionId });
 	},
 	onDelete: (path, sessionId) => {
 		post({ type: "deleteSession", path, sessionId });
 	},
+	onArchive: (path, sessionId) => {
+		post({ type: "archiveSession", path, sessionId });
+	},
 	onRename: (path, sessionId, name) => {
 		post({ type: "renameHistorySession", path, sessionId, name });
 	},
 	onStop: (path, sessionId) => {
 		post({ type: "stopSession", path, sessionId });
+	},
+	onSearch: (query) => {
+		post({ type: "searchHistory", query });
 	},
 	onBack: () => showView("chat"),
 });
@@ -236,17 +245,35 @@ const subagentsStrip = el("div", "subagents-strip") as HTMLElement;
 let subagentsExpanded = false;
 let sessionChildren: SessionChild[] = [];
 
+/**
+ * Roster status of a row. Hosts before the status field only sent `isStreaming`,
+ * which cannot tell a finished subagent from one waiting between turns — fall
+ * back to it rather than inventing a liveness we don't have.
+ */
+function childStatus(child: SessionChild): "running" | "idle" | "inactive" {
+	return child.status ?? (child.isStreaming ? "running" : "idle");
+}
+
 function renderSubagentsStrip(): void {
 	subagentsStrip.textContent = "";
 	const parent = sessionParent;
 	const viewedId = sessionViewedId;
 	const siblings = sessionSiblings;
-	const nothingToShow = !parent && sessionChildren.length === 0;
+	const nothingToShow = !parent && sessionChildren.length === 0 && siblings.length === 0;
 	if (nothingToShow) {
 		subagentsStrip.classList.remove("visible");
 		return;
 	}
 	subagentsStrip.classList.add("visible");
+
+	// Finished subagents keep their own collapsed group: they are real work the
+	// operator can go back and read, but counting them as live is the drift that
+	// made the strip disagree with what is actually running.
+	const live = (child: SessionChild): boolean => childStatus(child) !== "inactive";
+	const liveChildren = sessionChildren.filter(live);
+	const liveSiblings = siblings.filter(live);
+	const historical = [...sessionChildren, ...siblings].filter((child) => !live(child));
+	const liveCount = liveChildren.length + liveSiblings.length;
 
 	// Back row (separate, never part of the toggle) — always reliable.
 	if (parent) {
@@ -259,10 +286,13 @@ function renderSubagentsStrip(): void {
 
 	// Collapsible header (always a toggle).
 	const header = el("button", "subagents-header") as HTMLButtonElement;
-	header.append(
-		el("span", "subagents-caret", subagentsExpanded ? "▾" : "▸"),
-		`Subagents (${sessionChildren.length + siblings.length})`,
-	);
+	const countLabel =
+		historical.length === 0
+			? `${liveCount}`
+			: liveCount === 0
+				? `${historical.length} finished`
+				: `${liveCount} live · ${historical.length} finished`;
+	header.append(el("span", "subagents-caret", subagentsExpanded ? "▾" : "▸"), `Subagents (${countLabel})`);
 	header.title = "Subagents related to this session — click to expand, browse one to look inside";
 	header.addEventListener("click", () => {
 		subagentsExpanded = !subagentsExpanded;
@@ -275,10 +305,22 @@ function renderSubagentsStrip(): void {
 	const buildRow = (child: SessionChild, isSibling: boolean): HTMLElement => {
 		const row = el("button", `subagent-row${isSibling ? " sibling" : ""}`) as HTMLButtonElement;
 		const viewing = viewedId === child.activeSessionId;
-		const dot = el("span", `subagent-dot${child.isStreaming ? " active" : " idle"}`);
-		dot.title = child.isStreaming ? "active (working)" : "idle";
+		const status = childStatus(child);
+		const dotClass = status === "running" ? "active" : status === "idle" ? "idle" : "done";
+		const dot = el("span", `subagent-dot ${dotClass}`);
+		dot.title =
+			status === "running"
+				? child.isStreaming
+					? "active (responding)"
+					: "active (working)"
+				: status === "idle"
+					? "idle — resident, waiting for work"
+					: "finished — no longer running";
 		const name = el("span", "subagent-name", child.name ?? child.id);
-		const badge = child.isStreaming ? el("span", "subagent-badge", "active") : el("span", "subagent-badge idle", "idle");
+		const badge =
+			status === "running"
+				? el("span", "subagent-badge", "active")
+				: el("span", "subagent-badge idle", status === "idle" ? "idle" : "finished");
 		const suffix = el("span", "subagent-go", viewing ? "" : "view ›");
 		row.title = `${child.runtimeKind === "subagent" ? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : (child.runtimeKind ?? "session")}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
 		if (viewing) {
@@ -293,20 +335,42 @@ function renderSubagentsStrip(): void {
 		return row;
 	};
 
-	if (sessionChildren.length > 0) {
+	if (liveChildren.length > 0) {
 		const list = el("div", "subagents-list");
-		for (const child of sessionChildren) list.appendChild(buildRow(child, false));
+		for (const child of liveChildren) list.appendChild(buildRow(child, false));
 		subagentsStrip.appendChild(list);
 	}
-	if (siblings.length > 0) {
-		const siblingHeader = el("div", "subagents-sibling-header", "Siblings");
+	if (liveSiblings.length > 0) {
+		// The viewed subagent rides in this group too, so name it after the parent
+		// it hangs off rather than calling a session its own sibling.
+		const siblingHeader = el("div", "subagents-sibling-header", parent ? `Under ${parent.name ?? parent.id}` : "Siblings");
 		const list = el("div", "subagents-list siblings");
-		for (const sib of siblings) list.appendChild(buildRow(sib, true));
+		for (const sib of liveSiblings) list.appendChild(buildRow(sib, true));
 		subagentsStrip.append(siblingHeader, list);
+	}
+	if (historical.length > 0) {
+		const histHeader = el("button", "subagents-subhead") as HTMLButtonElement;
+		histHeader.append(
+			el("span", "subagents-caret", historicalExpanded ? "▾" : "▸"),
+			`Historical (${historical.length})`,
+		);
+		histHeader.title = "Subagents that already finished — open one to read what it did";
+		histHeader.addEventListener("click", (event) => {
+			event.stopPropagation();
+			historicalExpanded = !historicalExpanded;
+			renderSubagentsStrip();
+		});
+		subagentsStrip.appendChild(histHeader);
+		if (historicalExpanded) {
+			const list = el("div", "subagents-list historical");
+			for (const child of historical) list.appendChild(buildRow(child, false));
+			subagentsStrip.appendChild(list);
+		}
 	}
 }
 
 let sessionParent: SessionChild | null = null;
+let historicalExpanded = false;
 let spawnSeenBaseline = false;
 let sessionViewedId: string | null = null;
 let sessionSiblings: SessionChild[] = [];
@@ -320,12 +384,23 @@ function renderInstallBanner(url: string, reason: string): void {
 	installBanner.textContent = "";
 	const card = el("div", "install-card");
 	card.appendChild(el("div", "install-title", "Prime Agent CLI not detected"));
-	card.appendChild(el("div", "install-body", `We couldn't reach prime-agent — ${reason}. Install it (takes a minute), then click retry in the sidebar.`));
+	card.appendChild(el("div", "install-body", `We couldn't reach prime-agent — ${reason}. Install it (takes a minute), then click Retry below.`));
 	const actions = el("div", "install-actions");
 	const guide = document.createElement("button");
 	guide.className = "install-cta";
 	guide.textContent = "View the install guide";
 	guide.addEventListener("click", () => post({ type: "openExternal", url }));
+	// The card promised a retry; this is it. Without it the only reconnect control
+	// is a kebab item named something else entirely.
+	const retry = document.createElement("button");
+	retry.className = "install-cta";
+	retry.textContent = "Retry";
+	retry.title = "Try starting prime-agent again";
+	retry.addEventListener("click", () => {
+		installPromptShown = false;
+		installBanner.classList.remove("visible");
+		post({ type: "restart" });
+	});
 	const dismiss = document.createElement("button");
 	dismiss.className = "install-dismiss";
 	dismiss.title = "Dismiss";
@@ -334,7 +409,7 @@ function renderInstallBanner(url: string, reason: string): void {
 		installBanner.classList.remove("visible");
 		post({ type: "dismissInstallPrompt" });
 	});
-	actions.append(guide);
+	actions.append(retry, guide);
 	card.append(actions);
 	card.appendChild(dismiss);
 	installBanner.appendChild(card);
@@ -347,6 +422,11 @@ function showView(view: "chat" | "history"): void {
 	chatView.style.display = view === "chat" ? "" : "none";
 	composer.root.style.display = view === "chat" ? "" : "none";
 	historyView.root.style.display = view === "history" ? "" : "none";
+	// The strip and the Changes panel are siblings of both views and gate purely
+	// on content, so without this they hang over the history list with no
+	// composer under them. "" hands display back to their own .visible class.
+	subagentsStrip.style.display = view === "chat" ? "" : "none";
+	threadDiffsPanel.root.style.display = view === "chat" ? "" : "none";
 	if (view === "history") historyView.showLoading();
 }
 
@@ -372,19 +452,52 @@ let observing = false;
 // Boot splash: until the FIRST live connection, hide the composer and show the
 // breathing Prime Agent mark. Disconnections after that only touch the status strip.
 let everConnected = false;
+let bootSplashRetired = false;
 const bootSplash = el("div", "boot-splash");
 bootSplash.appendChild(el("div", "boot-splash-mark")).appendChild(butterfly(44));
 bootSplash.appendChild(el("div", "boot-splash-name", "Prime Agent"));
-bootSplash.appendChild(el("div", "boot-splash-sub", "connecting…"));
+const bootSplashSub = el("div", "boot-splash-sub", "connecting…");
+bootSplash.appendChild(bootSplashSub);
 app.appendChild(bootSplash);
+
+/** Take the splash down for good. The overlay covers the whole view, so anything
+ *  the operator needs to act on (the install banner above all) must retire it. */
+function retireBootSplash(): void {
+	if (bootSplashRetired) return;
+	bootSplashRetired = true;
+	bootSplash.classList.add("gone");
+	setTimeout(() => bootSplash.remove(), 700);
+}
+
+// Never leave "connecting…" standing as the whole story: if the first connection
+// hasn't landed in 12s, say so honestly instead of breathing forever.
+setTimeout(() => {
+	if (!everConnected && !bootSplashRetired) {
+		bootSplashSub.textContent = "still connecting — checking for the prime-agent CLI…";
+	}
+}, 12_000);
+// Hard ceiling. The splash is opaque and covers the notices, the install card and
+// the kebab's "Restart agent process" — the operator's only escape hatches — so it
+// can never be their final state. The strip's honest "offline" carries the story
+// from here, and the composer stays disabled until a status says otherwise.
+setTimeout(retireBootSplash, 18_000);
 
 function applyStatus(status: StatusSnapshot): void {
 	if (!everConnected && status.connected) {
 		everConnected = true;
-		bootSplash.classList.add("gone");
-		setTimeout(() => bootSplash.remove(), 700);
+		retireBootSplash();
 	}
 	if (currentStatus?.sessionId !== status.sessionId) {
+		// Drop the previous session's tree before repainting — otherwise the old
+		// subagent rows linger as a stuck artifact until the next children push.
+		// `subagentsExpanded` deliberately survives: browsing into a subagent is a
+		// session change, and collapsing the strip under the operator mid-navigation
+		// is exactly the freeze that made siblings unreachable.
+		sessionChildren = [];
+		sessionParent = null;
+		sessionSiblings = [];
+		sessionViewedId = null;
+		spawnSeenBaseline = false;
 		renderSubagentsStrip();
 	}
 	currentStatus = status;
@@ -422,10 +535,13 @@ function applyStatus(status: StatusSnapshot): void {
 	composer.setModel(status.modelLabel, status.modelProvider, status.modelId);
 	composer.setThinking(status.thinkingLevel, status.availableThinkingLevels ?? null);
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
+	// The strip says "offline"; the composer has to mean it, or the operator's
+	// prompt disappears into a 120s timeout with a green dot above it.
+	composer.setEnabled(status.connected);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
-	if (status.compactThresholdPercent !== undefined || status.compactDefaultPercent !== undefined) {
-		composer.setCompactThreshold(status.compactThresholdPercent ?? null, status.compactDefaultPercent ?? null);
-	}
+	// Unconditional: skipping this on a status that carries no override left the
+	// previous session's tick painted on the bar of the session now on screen.
+	composer.setCompactThreshold(status.compactThresholdPercent ?? null, status.compactDefaultPercent ?? null);
 	if (status.statusText) liveLabel.textContent = status.statusText;
 	setObserving(!!status.observingId);
 }
@@ -444,6 +560,8 @@ function addNotice(level: "info" | "warning" | "error", text: string): void {
 	const note = el("div", `notice ${level}`);
 	note.appendChild(el("span", "", text));
 	const dismiss = el("button", "notice-dismiss");
+	dismiss.title = "Dismiss";
+	dismiss.setAttribute("aria-label", "Dismiss this notice");
 	dismiss.appendChild(icon("close", 11));
 	dismiss.addEventListener("click", () => note.remove());
 	note.appendChild(dismiss);
@@ -486,8 +604,10 @@ function dispatchHostMessage(message: HostToWebview): void {
 			transcript.clearSpawnCards?.();
 			spawnSeenBaseline = false;
 			transcript.renderSnapshot(message.messages ?? []);
+			// applyStatus already sets the streaming state from the union of the
+			// transcript and the host status; re-setting it from the transcript
+			// alone would drop a run that started before we attached.
 			applyStatus(message.status);
-			composer.setStreaming(transcript.isStreaming());
 			if (message.steerDefault) composer.setSteerDefault(message.steerDefault);
 			break;
 		case "event":
@@ -509,10 +629,10 @@ function dispatchHostMessage(message: HostToWebview): void {
 			composer.setFavorites(message.favorites);
 			break;
 		case "draft":
-			if (message.text && composer.textIsEmpty()) {
-				composer.setText(message.text);
-				composer.focus();
-			}
+			// Authoritative for the thread now on screen: an empty payload means
+			// "no draft here", and must clear the previous thread's unsent text
+			// rather than let it follow the operator into someone else's session.
+			composer.setDraft(message.text ?? "");
 			break;
 		case "compactThreshold":
 			composer.setCompactThreshold(message.percent, currentStatus?.compactDefaultPercent ?? null);
@@ -526,12 +646,14 @@ function dispatchHostMessage(message: HostToWebview): void {
 			for (const spawn of spawnedList) {
 				transcript.injectSpawnCard({ id: spawn.activeSessionId, name: spawn.name, created: spawn.created });
 			}
-			// Seed cards ONLY for currently-running children; historical ones stay in
-			// the collapsible strip. Spams nothing on resume.
+			// Seed cards ONLY for currently-running children; finished and idle ones
+			// stay in the collapsible strip. Spams nothing on resume. `status` is what
+			// makes this honest: a subagent whose own turn ended but whose children
+			// are still working is running, and isStreaming alone calls it idle.
 			if (!spawnSeenBaseline && sessionChildren.length > 0) {
 				spawnSeenBaseline = true;
 				for (const child of sessionChildren) {
-					if (child.isStreaming && child.created) {
+					if (childStatus(child) === "running" && child.created) {
 						transcript.injectSpawnCard({ id: child.activeSessionId, name: child.name, created: child.created });
 					}
 				}
@@ -561,9 +683,14 @@ function dispatchHostMessage(message: HostToWebview): void {
 			addNotice("info", "Stopped watching the live session.");
 			break;
 		case "notice":
+			// A failure the operator has to read is painted underneath the splash.
+			if (message.level !== "info") retireBootSplash();
 			addNotice(message.level, message.text);
 			break;
 		case "installPrompt":
+			// The splash sits on top of everything — drop it or the operator can
+			// never reach the install guide we just told them to open.
+			retireBootSplash();
 			renderInstallBanner(message.url, message.reason);
 			break;
 		case "uiState":
@@ -594,6 +721,9 @@ function dispatchHostMessage(message: HostToWebview): void {
 			composer.focus();
 			break;
 		case "promptRejected":
+			// The echo we drew will never be confirmed by an event; leaving the key
+			// armed would silently swallow the next message with the same text.
+			transcript.clearOptimistic();
 			addNotice("error", `Prompt rejected: ${message.error}`);
 			break;
 	}

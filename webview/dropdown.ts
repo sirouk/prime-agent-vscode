@@ -16,6 +16,8 @@ export interface DropdownItem {
 	right?: string;
 	/** Called when the item is chosen */
 	onSelect: () => void;
+	/** Native tooltip; defaults to the label, which is what CSS ellipsizes */
+	title?: string;
 	/** Render trailing widgets (star toggles, check marks) inside the row */
 	accessory?: (row: HTMLElement) => void;
 	disabled?: boolean;
@@ -122,6 +124,9 @@ export class Dropdown {
 				this.list.appendChild(el("div", "dropdown-section", item.section));
 			}
 			const row = el("button", `dropdown-item${index === this.selected ? " selected" : ""}${item.current ? " current" : ""}${item.disabled ? " disabled" : ""}`);
+			// Rows ellipsize inside a 340px menu; without this a long model id is
+			// unreadable and two region-prefixed variants look identical.
+			row.title = item.title ?? item.label;
 			const main = el("span", "dropdown-label");
 			main.appendChild(el("span", "dropdown-text", item.label));
 			if (item.sub) main.appendChild(el("span", "dropdown-sub", item.sub));
