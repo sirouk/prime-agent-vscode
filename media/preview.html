@@ -59,6 +59,45 @@
 				{ path: "/a/3.jsonl", cwd: "/home/dev/airship", timestamp: new Date(now - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
 				{ path: "/a/4.jsonl", cwd: "/home/oss/prime-agent", timestamp: new Date(now - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
 			] });
+		} else if (mode === "scrollfollow") {
+			// Enough transcript to overflow, plus a tool card with a long output pane,
+			// so the harness can test the outer scroller AND an inner one.
+			const bulk = [];
+			for (let i = 0; i < 10; i++) {
+				bulk.push({ role: "user", content: `Question number ${i} about the build pipeline and what it does.` });
+				bulk.push({ role: "assistant", model: "Kimi-K3-TEE", stopReason: "stop", content: [
+					{ type: "text", text: `Answer ${i}. ` + "Filler prose to give the transcript real height. ".repeat(6) },
+				], usage: { totalTokens: 100, cost: { total: 0.001 } } });
+			}
+			host({ type: "snapshot", messages: bulk, state: null, status: baseStatus, steerDefault: "steer" });
+
+			// A LIVE assistant turn carrying the thinking block and the tool card, so
+			// the frames below repaint the very row the reader is interacting with —
+			// which is the only arrangement that can catch a destroy-and-rebuild.
+			const TOOL_CODE = "%%bash\nfor i in $(seq 1 200); do echo \"line $i\"; done";
+			const streamMessage = (n) => ({
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "Reasoning step ".repeat(4 * n) },
+					{ type: "text", text: "Streaming reply. ".repeat(8 * n) },
+					{ type: "toolCall", id: "scroll-tool", name: "ipython", arguments: { code: TOOL_CODE } },
+				],
+			});
+			host({ type: "event", event: { type: "agent_start" } });
+			host({ type: "event", event: { type: "message_start", message: streamMessage(1) } });
+			host({ type: "event", event: { type: "message_update", message: streamMessage(1) } });
+			// Give the tool card a long output so its pane has something to scroll.
+			host({ type: "event", event: { type: "tool_execution_end", toolCallId: "scroll-tool", result: {
+				output: Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join("\n"),
+			} } });
+			// The harness streams further frames through this.
+			window.__streamFrame = (n) => host({ type: "event", event: { type: "message_update", message: streamMessage(n) } });
+			// Finishing the turn re-renders the row with isPartial=false — the moment
+			// a rebuild would slam every thinking block shut again.
+			window.__endTurn = () => {
+				host({ type: "event", event: { type: "message_end", message: { ...streamMessage(12), stopReason: "toolUse", usage: { totalTokens: 900, cost: { total: 0.004 } } } } });
+				host({ type: "event", event: { type: "agent_end" } });
+			};
 		} else if (mode === "attachmenu") {
 			host({ type: "snapshot", messages: [], state: null, status: baseStatus, steerDefault: "steer" });
 			host({ type: "models", models: [

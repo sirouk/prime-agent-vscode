@@ -160,6 +160,187 @@ async function armDelete(page, item) {
 	await page.waitForTimeout(80);
 }
 
+/**
+ * Scroll behaviour under a live stream. Runs in real Chromium because this is
+ * pure layout: happy-dom reports every scroll metric as 0, so a DOM-only version
+ * of these checks could never fail.
+ */
+async function verifyScrollFollow(page, out = []) {
+	const metrics = () => page.$eval(".messages", (e) => ({
+		top: e.scrollTop,
+		max: e.scrollHeight - e.clientHeight,
+		overflowing: e.scrollHeight > e.clientHeight + 20,
+	}));
+	const frame = async (n) => {
+		await page.evaluate((i) => window.__streamFrame(i), n);
+		await page.waitForTimeout(60);
+	};
+
+	out.push(mk("transcript actually overflows (otherwise nothing here is meaningful)", (await metrics()).overflowing));
+
+	// 1. Parked at the bottom: the stream must follow.
+	await page.$eval(".messages", (e) => { e.scrollTop = e.scrollHeight; });
+	await page.waitForTimeout(60);
+	for (let i = 1; i <= 3; i++) await frame(i);
+	let m = await metrics();
+	out.push(mk("follows the stream while parked at the bottom", m.max - m.top <= 12, `gap=${m.max - m.top}`));
+
+	// 2. A wheel flick upward releases the lock — the gesture the old code lost.
+	await page.hover(".messages");
+	await page.mouse.wheel(0, -260);
+	await page.waitForTimeout(60);
+	const afterFlick = await metrics();
+	out.push(mk("wheeling up scrolls away from the bottom", afterFlick.max - afterFlick.top > 12, `gap=${afterFlick.max - afterFlick.top}`));
+
+	// 3. Frames keep arriving. The reader must not be dragged back down.
+	for (let i = 4; i <= 9; i++) await frame(i);
+	const afterStream = await metrics();
+	out.push(mk(
+		"streaming does NOT yank the reader back to the bottom",
+		afterStream.max - afterStream.top > 12 && Math.abs(afterStream.top - afterFlick.top) <= 4,
+		`top ${afterFlick.top} -> ${afterStream.top}, gap=${afterStream.max - afterStream.top}`,
+	));
+	// The behaviour every other agentic chat has: you hold your spot, and the new
+	// output piles up below you unseen until you choose to go get it.
+	out.push(mk(
+		"new output accumulates BELOW the held position instead of moving it",
+		afterStream.max > afterFlick.max && afterStream.top === afterFlick.top,
+		`scrollable ${afterFlick.max} -> ${afterStream.max}, position held at ${afterStream.top}`,
+	));
+	out.push(mk("jump-to-bottom pill is offered while detached", await page.$eval(".jump-to-latest", (e) => e.classList.contains("visible")).catch(() => false)));
+
+	// 3b. A SMALL nudge has to count too. The old lock only released past a 48px
+	//     deadzone, so a short scroll left the view "stuck" and the next frame
+	//     dragged it straight back — the version of this that felt unescapable.
+	await page.$eval(".messages", (e) => { e.scrollTop = e.scrollHeight; });
+	await page.waitForTimeout(60);
+	await page.hover(".messages");
+	await page.mouse.wheel(0, -40);
+	await page.waitForTimeout(60);
+	const afterNudge = await metrics();
+	for (let i = 13; i <= 15; i++) await frame(i);
+	const afterNudgeStream = await metrics();
+	out.push(mk(
+		"a small scroll up is respected, not swallowed by a deadzone",
+		afterNudgeStream.max - afterNudgeStream.top > 12 && Math.abs(afterNudgeStream.top - afterNudge.top) <= 4,
+		`top ${afterNudge.top} -> ${afterNudgeStream.top}, gap=${afterNudgeStream.max - afterNudgeStream.top}`,
+	));
+
+	// 4. An expanded thinking block must survive the frames that follow.
+	const details = await page.$("details.thinking");
+	if (details) {
+		await details.evaluate((e) => { e.open = true; });
+		await frame(10);
+		out.push(mk("expanded thinking stays open across streaming frames", await details.evaluate((e) => e.open)));
+
+		// And the other direction: a block the reader CLOSED must stay closed.
+		// Rebuilding forced `open` back on every frame, so collapsing it mid-reply
+		// sprang straight back open — the "closes the elements you were just in".
+		// The reported bug: reading inside an expanded thinking block while the reply
+		// streams threw the inner scrollbar back to the top on every frame, because
+		// the body's textContent is rewritten each time.
+		await details.evaluate((e) => { e.open = true; });
+		await frame(20);
+		const think = await page.$("details.thinking .thinking-body");
+		const thinkScrolls = think ? await think.evaluate((e) => e.scrollHeight > e.clientHeight + 20) : false;
+		out.push(mk("thinking body actually overflows (guards the next check)", thinkScrolls));
+		if (think && thinkScrolls) {
+			// Park mid-pane, not at the bottom: a reader sitting at the tail is
+			// SUPPOSED to keep following it, so only a middle position tests holding.
+			await think.evaluate((e) => { e.scrollTop = Math.floor((e.scrollHeight - e.clientHeight) / 2); });
+			const before = await think.evaluate((e) => e.scrollTop);
+			await frame(21);
+			await frame(22);
+			const after = await think.evaluate((e) => e.scrollTop);
+			out.push(mk("thinking block keeps its place while the reply streams", before > 4 && Math.abs(after - before) <= 4, `${before} -> ${after}`));
+
+			// And a reader parked at the tail should still be carried along.
+			await think.evaluate((e) => { e.scrollTop = e.scrollHeight; });
+			await frame(23);
+			const tail = await think.evaluate((e) => e.scrollHeight - e.scrollTop - e.clientHeight);
+			out.push(mk("thinking block still follows the tail when parked at the bottom", tail <= 6, `gap=${tail}`));
+		}
+
+		await details.evaluate((e) => { e.open = false; });
+		await frame(11);
+		out.push(mk("collapsed thinking stays collapsed across streaming frames", !(await details.evaluate((e) => e.open))));
+	}
+
+	// 5. An expanded tool card's own scroller (.tool-body — the <pre> never
+	//    overflows) must keep its place while the reply keeps streaming. This is
+	//    the check that catches a rebuild detaching and re-attaching the card.
+	const toolHeader = await page.$(".tool .tool-header");
+	if (toolHeader) {
+		await toolHeader.click();
+		await page.waitForTimeout(60);
+		// The <pre> is the element that caps and scrolls, not .tool-body — verified
+		// in the browser rather than assumed from the stylesheet.
+		const body = await page.$(".tool.open .tool-result pre");
+		const scrollable = body ? await body.evaluate((e) => e.scrollHeight > e.clientHeight + 20) : false;
+		out.push(mk("tool output pane actually overflows (guards the next check)", scrollable));
+		if (body && scrollable) {
+			await body.evaluate((e) => { e.scrollTop = 120; });
+			const before = await body.evaluate((e) => e.scrollTop);
+			await frame(11);
+			const after = await body.evaluate((e) => e.scrollTop);
+			out.push(mk("tool output pane keeps its scroll position across frames", before > 0 && Math.abs(after - before) <= 4, `${before} -> ${after}`));
+			out.push(mk("expanded tool card stays open across frames", await page.$eval(".tool", (e) => e.classList.contains("open"))));
+		}
+	}
+
+	// 5c. Poking around mid-reply. Expanding and collapsing cards changes layout,
+	//     and the stream keeps arriving throughout — none of it may re-capture the
+	//     view. Clicks go through evaluate() because Playwright's own click
+	//     scrolls the target into view, which would move the scroller itself.
+	await page.hover(".messages");
+	await page.mouse.wheel(0, -200);
+	await page.waitForTimeout(60);
+	const toggle = () => page.evaluate(() => {
+		document.querySelector(".tool .tool-header")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+	});
+	await toggle();
+	await frame(30);
+	await toggle();
+	await frame(31);
+	const poked = await metrics();
+	out.push(mk(
+		"poking around mid-stream never re-captures the view",
+		poked.max - poked.top > 12,
+		`gap=${poked.max - poked.top}`,
+	));
+	out.push(mk(
+		"jump-to-bottom stays available the whole time",
+		await page.$eval(".jump-to-latest", (e) => e.classList.contains("visible")).catch(() => false),
+	));
+
+	// 6. The pill returns control, and following resumes from there.
+	//    Detach again first: clicking the tool header above made Playwright scroll
+	//    it into view, which legitimately re-parked the reader at the bottom.
+	await page.hover(".messages");
+	await page.mouse.wheel(0, -300);
+	await page.waitForTimeout(80);
+	out.push(mk("pill reappears after detaching again", await page.$eval(".jump-to-latest", (e) => e.classList.contains("visible")).catch(() => false)));
+	await page.click(".jump-to-latest");
+	await page.waitForTimeout(80);
+	m = await metrics();
+	out.push(mk("jump-to-bottom returns to the latest", m.max - m.top <= 12, `gap=${m.max - m.top}`));
+	await frame(12);
+	m = await metrics();
+	out.push(mk("following resumes after jumping back", m.max - m.top <= 12, `gap=${m.max - m.top}`));
+
+	// 7. Finishing the turn repaints the row with isPartial=false — the moment a
+	//    rebuild slammed every thinking block shut. Runs last on purpose: further
+	//    frames after this would re-introduce the same tool id into a fresh turn,
+	//    which the real agent never does.
+	if (details) {
+		await page.evaluate(() => window.__endTurn());
+		await page.waitForTimeout(80);
+		out.push(mk("thinking stays as the reader left it when the turn finishes", !(await details.evaluate((e) => e.open))));
+		out.push(mk("tool card is still open after the turn finishes", await page.$eval(".tool", (e) => e.classList.contains("open"))));
+	}
+	return out;
+}
+
 async function verifyHistory2(page) {
 	const out = [];
 	const summary = await page.$$eval(".history-item", (els) =>
@@ -366,6 +547,7 @@ const MODES = {
 	attachmenu: { file: "preview-attachmenu.png", height: 480, verify: verifyAttachmenu },
 	modelmenu2: { file: "preview-modelmenu2.png", height: 660, verify: verifyModelmenu2 },
 	history2: { file: "preview-history2.png", height: 560, verify: verifyHistory2 },
+	scrollfollow: { file: "preview-scrollfollow.png", height: 520, verify: verifyScrollFollow },
 	markdownnote: { file: "preview-markdownnote.png", height: 420, verify: verifyMarkdownnote },
 	retry: { file: "preview-retry.png", height: 480, verify: verifyRetry },
 };
@@ -393,9 +575,26 @@ for (const [mode, cfg] of entries) {
 		console.log(`[${mode}] ok -> test/${cfg.file}`);
 	}
 	if (cfg.verify) {
-		for (const r of await cfg.verify(page)) {
+		// Collect into an array the verifier owns, so a throw part-way through still
+		// reports what it had already established. Losing every result to one
+		// timeout hides which check actually broke.
+		const collected = [];
+		let thrown = null;
+		try {
+			// Verifiers may either fill the shared array (and return it) or build
+			// their own; only merge when it is a different array.
+			const returned = await cfg.verify(page, collected);
+			if (Array.isArray(returned) && returned !== collected) collected.push(...returned);
+		} catch (err) {
+			thrown = err;
+		}
+		for (const r of collected) {
 			if (!r.pass) failures++;
 			console.log(`  ${r.pass ? "PASS" : "FAIL"}  ${r.name}${r.detail ? ` — ${r.detail}` : ""}`);
+		}
+		if (thrown) {
+			failures++;
+			console.log(`  FAIL  [${mode}] verifier threw after ${collected.length} checks — ${String(thrown).split("\n")[0]}`);
 		}
 	}
 	await page.close();

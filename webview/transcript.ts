@@ -282,15 +282,40 @@ export class Transcript {
 		private readonly deps: TranscriptDeps,
 	) {
 		this.changedFilesBar = changedFilesBar;
-		// Scroll-lock: only auto-follow the stream while the reader is already
-		// at (or very near) the bottom. Scrolling up during a reply must never
-		// be overridden by updates. A "latest" jump pill appears while un-stuck.
+		// Scroll-lock: auto-follow only while the reader is already at the bottom.
+		//
+		// Intent is read from the input events, not from the scroll position. A
+		// scroll event lands a frame after the gesture, so on a fast stream an
+		// auto-follow could fire in between and drag the reader back down before
+		// their flick was ever noticed — the fight this used to lose. wheel and
+		// touchmove unstick synchronously, so the very next frame already knows.
 		this.wireSelectionPreserve();
-		this.scroller.addEventListener("scroll", () => {
-			const nearBottom = this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight < 48;
-			this.stickToBottom = nearBottom;
-			this.updateJumpButton();
+		this.scroller.addEventListener("wheel", (event) => {
+			if ((event as WheelEvent).deltaY < 0) this.setStick(false);
 		}, { passive: true });
+		this.scroller.addEventListener("touchmove", () => {
+			if (!this.atBottom()) this.setStick(false);
+		}, { passive: true });
+		this.scroller.addEventListener("scroll", () => {
+			// Our own snaps land exactly at the bottom, so this re-sticks correctly
+			// and needs no suppression: scrollToBottom only runs while already stuck.
+			this.setStick(this.atBottom());
+		}, { passive: true });
+	}
+
+	/**
+	 * Within a hair of the bottom. Deliberately tight: the old 48px deadzone meant
+	 * a short scroll up left the view "stuck", so the next frame yanked it back
+	 * down and the reader could never get out during a fast reply.
+	 */
+	private atBottom(): boolean {
+		return this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight <= 12;
+	}
+
+	private setStick(value: boolean): void {
+		if (this.stickToBottom === value) return;
+		this.stickToBottom = value;
+		this.updateJumpButton();
 	}
 
 	private updateJumpButton(): void {
@@ -803,32 +828,71 @@ export class Transcript {
 		return parts.join("\n\n").trim();
 	}
 
+	/**
+	 * Repaint an assistant row from the latest message. Called on EVERY streaming
+	 * frame, so it reuses the nodes already on screen instead of clearing the row:
+	 * a rebuild detached every tool card and rebuilt the thinking block on each
+	 * frame, resetting their internal scroll (and any text selection) several
+	 * times a second while the reply arrived.
+	 */
 	private fillAssistantRow(row: HTMLElement, message: AssistantMessage, isPartial: boolean): void {
-		row.textContent = "";
-		const body = el("div", "row-body");
-		row.append(body);
+		let body = row.querySelector(":scope > .row-body") as HTMLElement | null;
+		if (!body) {
+			row.textContent = "";
+			body = el("div", "row-body");
+			row.append(body);
+		}
+		const desired: HTMLElement[] = [];
+		const keyed = (key: string): HTMLElement | null =>
+			body.querySelector(`:scope > [data-part="${key}"]`) as HTMLElement | null;
+		let textIndex = 0;
+		let thinkIndex = 0;
 		for (const part of (message as AssistantMessage).content ?? []) {
 			if (part.type === "text") {
 				if (!part.text.trim()) continue;
-				const md = el("div", "md");
-				renderMarkdown(part.text, md, this.deps.onOpenLink);
-				body.appendChild(md);
+				const key = `text-${textIndex++}`;
+				let md = keyed(key);
+				if (!md) {
+					md = el("div", "md");
+					md.dataset.part = key;
+				}
+				// Markdown is re-rendered only when the text actually changed; an
+				// unchanged tail frame must not blow away a selection inside it.
+				if (md.dataset.src !== part.text) {
+					md.textContent = "";
+					renderMarkdown(part.text, md, this.deps.onOpenLink);
+					md.dataset.src = part.text;
+				}
+				desired.push(md);
 			} else if (part.type === "thinking") {
-				body.appendChild(this.buildThinking(part.thinking, isPartial));
+				const key = `think-${thinkIndex++}`;
+				let node = keyed(key);
+				if (!node) {
+					node = this.buildThinking(part.thinking, isPartial);
+					node.dataset.part = key;
+				} else {
+					this.updateThinking(node, part.thinking);
+				}
+				desired.push(node);
 			} else if (part.type === "toolCall") {
 				const block = this.ensureToolBlock(part.id, part.name, part.arguments ?? {});
-				body.appendChild(block.root);
+				block.root.dataset.part = `tool-${part.id}`;
+				desired.push(block.root);
 			}
 		}
 		if (!isPartial) {
 			this.priceUserTurn(message.usage);
 			const meta = this.usageLine(message as AssistantMessage);
 			if (meta) {
-				body.appendChild(meta);
-			} else if (body.childElementCount === 0) {
-				body.appendChild(el("div", "usage-line", "(no response)"));
+				meta.dataset.part = "usage";
+				desired.push(meta);
+			} else if (desired.length === 0) {
+				const empty = el("div", "usage-line", "(no response)");
+				empty.dataset.part = "usage";
+				desired.push(empty);
 			}
 		}
+		this.reconcileChildren(body, desired);
 	}
 
 	private buildThinking(thinking: string, isPartial: boolean): HTMLElement {
@@ -841,13 +905,70 @@ export class Transcript {
 		copyBtn.addEventListener("click", (event) => {
 			event.preventDefault();
 			event.stopPropagation();
-			copyToClipboard(thinking);
+			// Read the text off the node, not a closure: the block is reused across
+			// streaming frames, so a captured string would copy the first chunk only.
+			copyToClipboard((details.querySelector(".thinking-body") as HTMLElement | null)?.textContent ?? "");
 		});
 		summary.appendChild(copyBtn);
 		const body = el("div", "thinking-body");
 		body.textContent = thinking;
 		details.append(summary, body);
 		return details;
+	}
+
+	/**
+	 * Find the element that really scrolls around `node` — the <pre> and its
+	 * `.tool-body`, or a `.thinking-body`, all cap themselves in CSS, so which one
+	 * overflows depends on the content. Walks out no further than `stopClass`.
+	 */
+	private scrollPaneFor(node: HTMLElement, stopClass: string): HTMLElement {
+		for (let el: HTMLElement | null = node; el; el = el.parentElement) {
+			if (el.scrollHeight > el.clientHeight + 4) return el;
+			if (el.classList.contains(stopClass)) break;
+		}
+		return node;
+	}
+
+	/**
+	 * Run `mutate` without throwing the reader to the top. Replacing textContent
+	 * resets the scroll offset of whatever is scrolling, and these panes are
+	 * rewritten on every streaming frame — so an operator reading an expanded
+	 * thinking block or tool output gets slammed back to line one several times a
+	 * second. Someone parked at the bottom keeps following the tail instead.
+	 */
+	private preservingScroll(anchor: HTMLElement, stopClass: string, mutate: () => void): void {
+		const pane = this.scrollPaneFor(anchor, stopClass);
+		const wasAtBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 4;
+		const previousTop = pane.scrollTop;
+		mutate();
+		pane.scrollTop = wasAtBottom ? pane.scrollHeight : previousTop;
+	}
+
+	/** Grow an existing thinking block in place, leaving its open/closed state alone. */
+	private updateThinking(details: HTMLElement, thinking: string): void {
+		const body = details.querySelector(".thinking-body") as HTMLElement | null;
+		if (!body || body.textContent === thinking) return;
+		this.preservingScroll(body, "thinking", () => {
+			body.textContent = thinking;
+		});
+	}
+
+	/**
+	 * Put `desired` in order inside `parent`, touching the DOM only where it is
+	 * already wrong. The guard matters more than it looks: re-inserting a node
+	 * that is already in position still detaches and re-attaches it, which resets
+	 * the scroll offset of anything scrollable inside — the tool output and shell
+	 * panes the operator is trying to read while the reply streams.
+	 */
+	private reconcileChildren(parent: HTMLElement, desired: HTMLElement[]): void {
+		for (const [index, node] of desired.entries()) {
+			if (parent.childNodes[index] !== node) {
+				parent.insertBefore(node, parent.childNodes[index] ?? null);
+			}
+		}
+		while (parent.childNodes.length > desired.length) {
+			parent.removeChild(parent.childNodes[parent.childNodes.length - 1]);
+		}
 	}
 
 	private usageLine(message: AssistantMessage): HTMLElement | null {
@@ -984,7 +1105,11 @@ export class Transcript {
 		block.summary.textContent = this.toolSummary(name, args);
 		block.root.dataset.toolKind = view.kind;
 		block.root.dataset.toolLang = view.lang;
-		this.renderToolInput(block, name, args);
+		// Repainting the call replaces the <pre>; if the card is open and someone is
+		// reading it, that would jump them to the top mid-stream.
+		this.preservingScroll(block.inputSection, "tool", () => {
+			this.renderToolInput(block, name, args);
+		});
 	}
 
 	private ensureToolBlock(id: string, name: string, args: Record<string, unknown>): ToolBlock {
@@ -1156,12 +1281,26 @@ export class Transcript {
 		return section;
 	}
 
+	/**
+	 * Replace a result pane's text while leaving the reader where they were.
+	 * Tool output arrives in whole-buffer snapshots, so every partial rewrites the
+	 * pane; without restoring scrollTop, anyone reading a long shell output gets
+	 * thrown back to the top several times a second. A reader parked at the bottom
+	 * keeps following the tail, which is what they want there.
+	 */
+	private setPaneText(pre: HTMLElement, text: string): void {
+		if (pre.textContent === text) return;
+		this.preservingScroll(pre, "tool", () => {
+			pre.textContent = text;
+		});
+	}
+
 	private attachToolResultText(id: string, text: string, isError: boolean): void {
 		const block = this.toolBlocks.get(id);
 		if (!block) return;
 		const section = this.ensureResultSection(block, isError ? "error" : "output", isError);
 		const pre = section.querySelector("pre");
-		if (pre) pre.textContent = text || (isError ? "(error)" : "");
+		if (pre) this.setPaneText(pre as HTMLElement, text || (isError ? "(error)" : ""));
 		this.setToolState(id, isError ? "error" : "done");
 	}
 
@@ -1172,7 +1311,7 @@ export class Transcript {
 		if (!text) return;
 		const section = this.ensureResultSection(block, "output", false);
 		const pre = section.querySelector("pre");
-		if (pre) pre.textContent = text;
+		if (pre) this.setPaneText(pre as HTMLElement, text);
 		this.scrollToBottom();
 	}
 

@@ -13,6 +13,18 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- Scrolling no longer fights you during a reply. Auto-follow now sticks only while you are
+  actually parked at the bottom; the moment you scroll up you hold your place and the new output
+  piles up below, reachable with the jump-to-bottom arrow. Intent is read from the wheel/touch
+  gesture rather than the scroll position, which arrives a frame later — long enough for a frame
+  to drag you back down — and the old 48px deadzone that swallowed short scrolls is gone
+- Expanded thinking blocks and tool cards keep their place while the reply streams. Each frame
+  used to rebuild the whole assistant row, which detached every tool card and recreated the
+  thinking block: inner scrollbars snapped to the top several times a second, blocks you had
+  collapsed sprang open, and text selections were lost. Rows are now repainted in place, and the
+  panes that are rewritten each frame keep their scroll offset (or keep following the tail if
+  that is where you were)
+
 - Tool cards fill in as their arguments stream. The first frame prime-agent sends for a tool call
   carries no arguments at all — the card was built from that frame and never rebuilt, so the
   collapsed summary stayed empty and the expanded call showed a bare `{}` for the rest of the
