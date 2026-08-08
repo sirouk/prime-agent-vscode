@@ -12,6 +12,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     if: github.repository == 'sirouk/prime-agent-vscode'
+    # VSCE_PAT lives in the "CI" environment. Declaring it here is what grants
+    # this job access to that scope — without it, `secrets.VSCE_PAT` resolves to
+    # an empty string and the guard below stops the run. A repo-level secret of
+    # the same name still works through this declaration (environment secrets
+    # just take precedence), so either place to store it is fine.
+    environment: CI
     steps:
       - uses: actions/checkout@v4
 
@@ -59,8 +65,11 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
           if [ -z "$VSCE_PAT" ]; then
-            echo "VSCE_PAT secret is not set on this repository — cannot publish." >&2
-            echo "Add it under Settings > Secrets and variables > Actions, then re-run this workflow." >&2
+            echo "VSCE_PAT resolved to empty — cannot publish." >&2
+            echo "It must be a SECRET (not a variable) named VSCE_PAT, stored either in the" >&2
+            echo "'CI' environment (Settings > Environments > CI > Add environment secret)" >&2
+            echo "or at repo level (Settings > Secrets and variables > Actions)." >&2
+            echo "Then re-run this workflow." >&2
             exit 1
           fi
           # Publish the vsix for this version by name; `ls -t` would happily pick
