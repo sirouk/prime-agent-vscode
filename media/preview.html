@@ -59,6 +59,21 @@
 				{ path: "/a/3.jsonl", cwd: "/home/dev/airship", timestamp: new Date(now - 26*3600e3).toISOString(), name: "airship-deploys", inWorkspace: false },
 				{ path: "/a/4.jsonl", cwd: "/home/oss/prime-agent", timestamp: new Date(now - 50*3600e3).toISOString(), firstPrompt: "Study the prime-agent system", inWorkspace: false },
 			] });
+		} else if (mode === "longthread") {
+			// A thread far past the render window, so the harness can check that only
+			// the tail is built, that "load earlier" walks backwards without moving
+			// the reader, and that a long-running session trims itself.
+			const many = [];
+			for (let i = 0; i < 500; i++) {
+				many.push({ role: "user", content: `Turn ${i}: a question with enough text to occupy a row.` });
+				many.push({ role: "assistant", model: "Kimi-K3-TEE", stopReason: "stop",
+					usage: { totalTokens: 60, cost: { total: 0.0005 } },
+					content: [{ type: "text", text: `Reply ${i}. ` + "Some prose to give this row height. ".repeat(3) }] });
+			}
+			host({ type: "snapshot", messages: many, state: null, status: baseStatus, steerDefault: "steer" });
+			window.__totalMessages = many.length;
+			// One appended row per call, through the same path a live turn uses.
+			window.__addTurn = (i) => host({ type: "event", event: { type: "message_start", message: { role: "user", content: `Appended turn ${i}` } } });
 		} else if (mode === "scrollfollow") {
 			// Enough transcript to overflow, plus a tool card with a long output pane,
 			// so the harness can test the outer scroller AND an inner one.

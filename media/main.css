@@ -2533,3 +2533,35 @@ body.vscode-light pre.term {
 	color: var(--pa-accent);
 	background: var(--pa-accent-dim);
 }
+
+/* ---------- transcript windowing ---------- */
+
+/* Long threads render only the tail; these two say so out loud rather than
+   letting the transcript appear to begin part-way through. */
+.earlier-bar {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	padding: 2px 0 6px;
+	font-size: 10.5px;
+	color: var(--pa-dim);
+}
+
+.earlier-load {
+	padding: 3px 10px;
+	font-size: 10.5px;
+	color: var(--pa-text);
+	background: var(--pa-surface-2);
+	border: 1px solid var(--pa-border);
+	border-radius: 999px;
+	cursor: pointer;
+}
+
+.earlier-load:hover {
+	border-color: var(--pa-border-strong);
+}
+
+.earlier-count {
+	color: var(--pa-faint);
+}

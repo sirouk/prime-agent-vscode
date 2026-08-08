@@ -86,6 +86,14 @@ export interface TranscriptDeps {
 	onFocusComposer: () => void;
 }
 
+/** Rows built on open. Enough to fill several screens without paying for the tail. */
+const INITIAL_RENDER = 150;
+/** How many older messages one "load earlier" click brings in. */
+const LOAD_BATCH = 100;
+/** Ceiling on rendered rows in a long-running session, and the level trimming targets. */
+const MAX_RENDERED_ROWS = 600;
+const PRUNE_TO = 400;
+
 interface ToolBlock {
 	root: HTMLElement;
 	chevron: SVGSVGElement;
@@ -120,6 +128,13 @@ export class Transcript {
 
 	private stickToBottom = true;
 	private spawnCardIds = new Set<string>();
+	/** Messages held as data, above the rendered window. */
+	private olderMessages: AgentMessage[] = [];
+	private earlierBar: HTMLElement | null = null;
+	private prunedNotice: HTMLElement | null = null;
+	private prunedCount = 0;
+	/** When set, new rows go before this node instead of at the end. */
+	private insertAnchor: Node | null = null;
 
 	/**
 	 * Insert a "subagent spawned" marker into the transcript, positioned by the
@@ -380,7 +395,7 @@ export class Transcript {
 		}
 		root.appendChild(hints);
 
-		this.scroller.appendChild(root);
+		this.place(root);
 		this.welcome = root;
 	}
 
@@ -411,14 +426,117 @@ export class Transcript {
 		// detached node would leave the operator with no way back to the bottom
 		// for the rest of the session.
 		this.jumpBtn = null;
+		// Windowing state belongs to the transcript we just discarded.
+		this.prunedNotice = null;
+		this.prunedCount = 0;
+		this.insertAnchor = null;
+		this.earlierBar = null;
 		this.hasContent = messages.length > 0;
-		for (const message of messages) {
+		// Long threads open at the bottom and only build what is near it. A
+		// 3000-message session rendered whole costs ~330ms and ~100k DOM nodes
+		// before the operator sees anything, and every reflow after that pays for
+		// all of it. The rest stays in memory as data and renders on demand.
+		this.olderMessages = messages.length > INITIAL_RENDER ? messages.slice(0, messages.length - INITIAL_RENDER) : [];
+		for (const message of messages.slice(Math.max(0, messages.length - INITIAL_RENDER))) {
 			this.renderMessage(message, false);
 		}
+		this.renderEarlierBar();
 		if (!this.hasContent) this.showWelcome();
 		// A freshly opened session always lands on the latest message, whatever
 		// the scroll position was in the session we came from.
 		this.forceScrollToBottom();
+	}
+
+	/**
+	 * The "N earlier messages" affordance. Always states the true remaining count:
+	 * a transcript that silently starts part-way through is the kind of thing that
+	 * makes an operator distrust everything else on screen.
+	 */
+	private renderEarlierBar(): void {
+		this.earlierBar?.remove();
+		this.earlierBar = null;
+		if (this.olderMessages.length === 0) return;
+		const bar = el("div", "earlier-bar");
+		const button = el("button", "earlier-load") as HTMLButtonElement;
+		const remaining = this.olderMessages.length;
+		button.textContent = `Load ${Math.min(LOAD_BATCH, remaining)} earlier message${Math.min(LOAD_BATCH, remaining) === 1 ? "" : "s"}`;
+		button.title = `${remaining} earlier message${remaining === 1 ? "" : "s"} in this thread are not rendered yet`;
+		button.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.loadEarlier();
+		});
+		bar.append(button, el("span", "earlier-count", `${remaining} earlier`));
+		this.earlierBar = bar;
+		this.scroller.insertBefore(bar, this.scroller.firstChild);
+	}
+
+	/** Render the next batch of older messages above the current view, in place. */
+	loadEarlier(): void {
+		if (this.olderMessages.length === 0) return;
+		const batch = this.olderMessages.splice(Math.max(0, this.olderMessages.length - LOAD_BATCH), LOAD_BATCH);
+		// Anchor on the first row that is already on screen: growing the transcript
+		// upward must leave what the operator is reading exactly where it is.
+		const heightBefore = this.scroller.scrollHeight;
+		const topBefore = this.scroller.scrollTop;
+		const anchor = this.earlierBar?.nextSibling ?? this.scroller.firstChild;
+		this.insertAnchor = anchor;
+		try {
+			for (const message of batch) this.renderMessage(message, false);
+		} finally {
+			this.insertAnchor = null;
+		}
+		this.renderEarlierBar();
+		this.scroller.scrollTop = topBefore + (this.scroller.scrollHeight - heightBefore);
+	}
+
+	/**
+	 * Place a freshly built row. Everything that adds to the transcript goes
+	 * through here so `loadEarlier` can redirect a batch above the existing rows
+	 * without every call site knowing about it.
+	 */
+	private place(node: Node): void {
+		if (this.insertAnchor) this.scroller.insertBefore(node, this.insertAnchor);
+		else this.scroller.appendChild(node);
+	}
+
+	/**
+	 * Keep the rendered window bounded on a session that runs for hours. Only ever
+	 * trims while the reader is parked at the bottom — dropping rows above someone
+	 * who is reading would move the ground under them — and drops the tool blocks
+	 * that went with them so the map does not outlive the DOM.
+	 */
+	private pruneOldRows(): void {
+		if (!this.stickToBottom) return;
+		const rows = this.scroller.children;
+		const removable = rows.length - (this.earlierBar ? 1 : 0) - (this.jumpBtn ? 1 : 0);
+		if (removable <= MAX_RENDERED_ROWS) return;
+		let toRemove = removable - PRUNE_TO;
+		for (const node of Array.from(rows)) {
+			if (toRemove <= 0) break;
+			if (node === this.earlierBar || node === this.jumpBtn) continue;
+			if (node.contains(this.streamingBubble) || node === this.streamingBubble) break;
+			for (const [id, block] of this.toolBlocks) {
+				if (node.contains(block.root)) this.toolBlocks.delete(id);
+			}
+			node.remove();
+			toRemove -= 1;
+			this.prunedCount += 1;
+		}
+		if (this.prunedCount > 0) this.renderPrunedNotice();
+	}
+
+	/** Say plainly that the top of the transcript is no longer rendered. */
+	private renderPrunedNotice(): void {
+		if (this.olderMessages.length > 0) return; // the earlier bar already says it
+		if (!this.prunedNotice) {
+			this.prunedNotice = el("div", "earlier-bar");
+			this.prunedNotice.appendChild(el("span", "earlier-count", ""));
+		}
+		const label = this.prunedNotice.firstChild as HTMLElement;
+		label.textContent = `${this.prunedCount} earlier message${this.prunedCount === 1 ? "" : "s"} trimmed from view — the session still has them`;
+		if (this.prunedNotice.parentElement !== this.scroller || this.scroller.firstChild !== this.prunedNotice) {
+			this.scroller.insertBefore(this.prunedNotice, this.scroller.firstChild);
+		}
 	}
 
 	// ---------------------------------------------------------------
@@ -431,7 +549,7 @@ export class Transcript {
 		this.dismissWelcome();
 		this.stopWorking();
 		this.streamingBubble = this.buildAssistantRow(message, true);
-		this.scroller.appendChild(this.streamingBubble);
+		this.place(this.streamingBubble);
 		this.hasContent = true;
 	}
 
@@ -453,7 +571,7 @@ export class Transcript {
 				if (message.role === "assistant") {
 					this.stopWorking();
 					this.streamingBubble = this.buildAssistantRow(message as AssistantMessage, true);
-					this.scroller.appendChild(this.streamingBubble);
+					this.place(this.streamingBubble);
 					this.hasContent = true;
 				} else {
 					this.dismissWelcome();
@@ -488,7 +606,7 @@ export class Transcript {
 				this.stopWorking();
 				const block = this.ensureToolBlock(event.toolCallId, event.toolName, event.args ?? {});
 				if (!block.root.isConnected) {
-					this.scroller.appendChild(block.root);
+					this.place(block.root);
 				}
 				this.setToolState(event.toolCallId, "running");
 				if (this.streaming) this.startWorking();
@@ -523,6 +641,7 @@ export class Transcript {
 			default:
 				break;
 		}
+		this.pruneOldRows();
 		this.scrollToBottom();
 	}
 
@@ -540,7 +659,7 @@ export class Transcript {
 			`Provider request failed — auto-retry ${attempt}/${maxAttempts}${errorMessage ? ` · ${errorMessage.slice(0, 90)}` : ""}`,
 		);
 		row.appendChild(label);
-		this.scroller.appendChild(row);
+		this.place(row);
 		this.retryRow = row;
 		this.hasContent = true;
 	}
@@ -572,7 +691,7 @@ export class Transcript {
 		const mark = butterfly(15, "working-mark");
 		row.appendChild(mark);
 		row.appendChild(el("span", "working-label", "Working"));
-		this.scroller.appendChild(row);
+		this.place(row);
 		this.workingRow = row;
 		const label = row.querySelector(".working-label");
 		window.clearInterval(this.workingTimer);
@@ -599,7 +718,7 @@ export class Transcript {
 		if (!text && images.length === 0) return;
 		this.dismissWelcome();
 		const content = images.length > 0 ? buildContent(text, images) : text;
-		this.scroller.appendChild(this.buildUserRow({ role: "user", content } as UserMessage));
+		this.place(this.buildUserRow({ role: "user", content } as UserMessage));
 		this.hasContent = true;
 		this.optimisticText = text;
 		// The operator just hit send — that is an explicit intent to follow along.
@@ -640,9 +759,9 @@ export class Transcript {
 				this.optimisticText = null;
 				return; // already rendered optimistically
 			}
-			this.scroller.appendChild(this.buildUserRow(message as UserMessage));
+			this.place(this.buildUserRow(message as UserMessage));
 		} else if (role === "assistant") {
-			this.scroller.appendChild(this.buildAssistantRow(message as AssistantMessage, isPartial));
+			this.place(this.buildAssistantRow(message as AssistantMessage, isPartial));
 		} else if (role === "toolResult") {
 			this.renderToolResult(message as ToolResultMessage);
 		} else if (role === ("bashExecution" as string)) {
@@ -999,7 +1118,7 @@ export class Transcript {
 
 	private systemNote(text: string, isError = false): void {
 		this.dismissWelcome();
-		this.scroller.appendChild(el("div", `system-note${isError ? " error" : ""}`, text));
+		this.place(el("div", `system-note${isError ? " error" : ""}`, text));
 		this.hasContent = true;
 	}
 
@@ -1326,7 +1445,7 @@ export class Transcript {
 			return;
 		}
 		const orphan = this.ensureToolBlock(message.toolCallId, message.toolName ?? "tool", {});
-		this.scroller.appendChild(orphan.root);
+		this.place(orphan.root);
 		this.attachToolResultText(message.toolCallId, text, message.isError ?? false);
 	}
 

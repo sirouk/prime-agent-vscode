@@ -341,6 +341,72 @@ async function verifyScrollFollow(page, out = []) {
 	return out;
 }
 
+/**
+ * Long-thread windowing: open cheap, walk backwards on demand, and stay bounded
+ * on a session that runs for hours. Real Chromium again — this is all layout and
+ * DOM cost, which happy-dom cannot report.
+ */
+async function verifyLongThread(page, out = []) {
+	const rows = () => page.$$eval(".messages > *", (els) => els.length);
+	const total = await page.evaluate(() => window.__totalMessages);
+
+	const initial = await rows();
+	out.push(mk("a 1000-message thread renders only its tail", initial > 0 && initial <= 160, `${initial} rows for ${total} messages`));
+	out.push(mk(
+		"the untendered remainder is stated, not hidden",
+		(await page.$eval(".earlier-bar .earlier-count", (e) => e.textContent).catch(() => "")).includes("earlier"),
+		await page.$eval(".earlier-bar .earlier-count", (e) => e.textContent).catch(() => "<none>"),
+	));
+	out.push(mk("opens at the newest message", await page.$eval(".messages", (e) => e.scrollHeight - e.scrollTop - e.clientHeight <= 12)));
+
+	// Walk backwards: the rows already on screen must not move under the reader.
+	await page.$eval(".messages", (e) => { e.scrollTop = 0; });
+	await page.waitForTimeout(60);
+	const anchorText = await page.$eval(".messages > .row:not(.earlier-bar)", (e) => e.textContent.slice(0, 40)).catch(() => "");
+	// Offset of that row within the viewport BEFORE the load — the bar sits above
+	// it, so the correct outcome is "unchanged", not "zero".
+	const offsetOf = (t) => page.evaluate((text) => {
+		const el = [...document.querySelectorAll(".messages > .row")].find((r) => r.textContent.slice(0, 40) === text);
+		if (!el) return null;
+		return Math.round(el.getBoundingClientRect().top - document.querySelector(".messages").getBoundingClientRect().top);
+	}, t);
+	const offsetBefore = await offsetOf(anchorText);
+	await page.click(".earlier-load");
+	await page.waitForTimeout(120);
+	const after = await rows();
+	out.push(mk("load earlier brings in the previous batch", after > initial, `${initial} -> ${after} rows`));
+	const offsetAfter = await offsetOf(anchorText);
+	out.push(mk("the row you were reading stays put while earlier ones load above it",
+		offsetBefore !== null && offsetAfter !== null && Math.abs(offsetAfter - offsetBefore) <= 8,
+		`offset ${offsetBefore} -> ${offsetAfter}`));
+
+	// A long-running session trims from the top, but only while parked at the tail.
+	await page.$eval(".messages", (e) => { e.scrollTop = e.scrollHeight; });
+	await page.waitForTimeout(60);
+	const beforeGrow = await rows();
+	await page.evaluate(async () => { for (let i = 0; i < 400; i++) window.__addTurn(i); });
+	await page.waitForTimeout(200);
+	const grown = await rows();
+	out.push(mk("a long-running session stays bounded instead of growing forever",
+		grown <= 700 && grown < beforeGrow + 400, `${beforeGrow} -> ${grown} rows after 400 appended turns`));
+	out.push(mk("trimming is disclosed to the operator",
+		(await page.$eval(".messages > .earlier-bar", (e) => e.textContent).catch(() => "")).length > 0));
+
+	// Reading above must never be interrupted by trimming.
+	await page.$eval(".messages", (e) => { e.scrollTop = 200; });
+	await page.waitForTimeout(60);
+	const heldTop = await page.$eval(".messages", (e) => e.scrollTop);
+	const heldRows = await rows();
+	await page.evaluate(() => { for (let i = 0; i < 200; i++) window.__addTurn(1000 + i); });
+	await page.waitForTimeout(200);
+	out.push(mk("nothing is trimmed while the reader is scrolled up",
+		(await rows()) >= heldRows, `${heldRows} -> ${await rows()} rows`));
+	out.push(mk("and their position is untouched",
+		Math.abs((await page.$eval(".messages", (e) => e.scrollTop)) - heldTop) <= 4,
+		`${heldTop} -> ${await page.$eval(".messages", (e) => e.scrollTop)}`));
+	return out;
+}
+
 async function verifyHistory2(page) {
 	const out = [];
 	const summary = await page.$$eval(".history-item", (els) =>
@@ -548,6 +614,7 @@ const MODES = {
 	modelmenu2: { file: "preview-modelmenu2.png", height: 660, verify: verifyModelmenu2 },
 	history2: { file: "preview-history2.png", height: 560, verify: verifyHistory2 },
 	scrollfollow: { file: "preview-scrollfollow.png", height: 520, verify: verifyScrollFollow },
+	longthread: { file: "preview-longthread.png", height: 560, verify: verifyLongThread },
 	markdownnote: { file: "preview-markdownnote.png", height: 420, verify: verifyMarkdownnote },
 	retry: { file: "preview-retry.png", height: 480, verify: verifyRetry },
 };

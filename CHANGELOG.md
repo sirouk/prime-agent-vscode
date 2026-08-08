@@ -13,6 +13,17 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- Long threads open instantly and stay light. Only the newest ~150 messages are built on open,
+  with the exact number of earlier ones stated above them and a button to walk backwards a batch
+  at a time — loading earlier messages leaves the row you were reading exactly where it was.
+  A 3000-message thread went from ~330ms and ~102,000 DOM nodes to ~16ms and ~5,100, and the cost
+  no longer grows with the thread
+- A session left running for hours no longer grows without bound: once the rendered window passes
+  600 rows it trims from the top back to 400, dropping the tool blocks that went with them so
+  nothing outlives the DOM. Trimming happens only while you are parked at the bottom — never
+  under a reader who has scrolled up — and the transcript says how many rows it has trimmed
+  rather than appearing to start part-way through
+
 ## [1.0.7]
 
 - Scrolling no longer fights you during a reply. Auto-follow now sticks only while you are
