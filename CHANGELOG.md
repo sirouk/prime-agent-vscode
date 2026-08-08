@@ -13,6 +13,10 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- Release publishing runs end to end from CI again: the publish job now declares the `CI`
+  environment, without which `secrets.VSCE_PAT` resolved to an empty string and every release
+  stopped at the credential guard. 1.0.4 never reached the Marketplace for this reason
+
 ## [1.0.5]
 
 - History row actions are ordered stop, rename, archive, delete — archive sits beside delete as the non-destructive retire, and delete stays last, furthest from a stray click
