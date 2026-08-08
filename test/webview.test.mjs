@@ -142,6 +142,48 @@ await new Promise((r) => setTimeout(r, 0));
 check("edit copy includes the path and the hunks", clipboard.includes("src/app.ts") && clipboard.includes("```diff") && clipboard.includes("-const x = 1;") && clipboard.includes("+const y = 3;"), JSON.stringify(clipboard));
 check("edit copy emits the output once, not twice", clipboard.split("edited src/app.ts").length - 1 === 1, JSON.stringify(clipboard));
 
+// --- Streamed tool arguments. Replays the event order a real `prime-agent --mode rpc`
+// emits (verified against the CLI): the FIRST message_update carrying a toolCall has
+// `arguments: {}`, the code lands over later updates, and tool_execution_start repeats
+// it only afterwards. The card is created on that first empty frame, so the collapsed
+// summary and the expanded call both have to survive being built from nothing.
+{
+	// Appends to the live transcript on purpose — resetting with a snapshot here
+	// would wipe the turns the checks further down still need.
+	const partial = { role: "assistant", content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: {} }] };
+	hostMessage({ type: "event", event: { type: "message_start", message: partial } });
+	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
+
+	// Hold the node: the block is reused across frames, so the reference stays valid
+	// and can never drift onto one of the ipython cards rendered earlier in this file.
+	const card = [...document.querySelectorAll(".messages .tool")].pop();
+	check("tool card appears on the first (argument-less) frame", !!card && card.dataset.toolName === "ipython", card?.dataset.toolName ?? "<none>");
+	check("summary starts empty because the arguments have not arrived",
+		(card?.querySelector(".tool-summary")?.textContent ?? "") === "");
+
+	const full = {
+		role: "assistant",
+		content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: { code: "%%bash\ncd /repo\nnpm run build -- --prod" } }],
+	};
+	hostMessage({ type: "event", event: { type: "message_update", message: full } });
+
+	// prime-agent's own scorer condenses `npm run build` to `npm build`.
+	const summaryText = () => card?.querySelector(".tool-summary")?.textContent ?? "";
+	const inputText = () => card?.querySelector(".tool-section:not(.tool-result) pre")?.textContent ?? "";
+	check("collapsed summary fills in once the arguments arrive", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+	check("expanded call fills in too", inputText().includes("npm run build -- --prod"), JSON.stringify(inputText()));
+	check("late arguments upgrade the card to a shell card", card?.dataset.toolKind === "shell", card?.dataset.toolKind ?? "<none>");
+
+	// A trailing partial frame must never wipe a card that is already complete.
+	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
+	check("a later empty frame cannot blank the summary", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+	check("a later empty frame cannot blank the call", inputText().includes("npm run build -- --prod"), JSON.stringify(inputText()));
+
+	// tool_execution_start repeats the same args last; it must not regress anything.
+	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "stream-1", toolName: "ipython", args: full.content[0].arguments } });
+	check("tool_execution_start leaves the completed card intact", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+}
+
 // --- #23: the user turn shows a price, honestly labeled as the reply's input cost ---
 const ufCost = scroller.querySelector(".row-user .user-footer .uf-cost");
 check("user footer shows the metered turn input price", !!ufCost && ufCost.textContent === "$0.0137 input", ufCost?.textContent ?? "<none>");

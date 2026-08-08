@@ -92,8 +92,15 @@ interface ToolBlock {
 	summary: HTMLElement;
 	pill: HTMLElement;
 	body: HTMLElement;
+	inputSection: HTMLElement;
 	resultSection: HTMLElement | null;
 	state: "running" | "done" | "error";
+	/**
+	 * Length of the call text currently painted. Tool arguments arrive in pieces,
+	 * so the card is rebuilt whenever a longer version shows up — and never by a
+	 * shorter one, which is how a late partial frame is stopped from blanking it.
+	 */
+	renderedInputLen: number;
 }
 
 export class Transcript {
@@ -917,9 +924,75 @@ export class Transcript {
 		}
 	}
 
+	/**
+	 * Paint the "input" half of a tool card: the call itself, its copy button and
+	 * (for edits) the hunks. Split out of ensureToolBlock because it has to run
+	 * again every time fuller arguments arrive.
+	 */
+	private renderToolInput(block: ToolBlock, name: string, args: Record<string, unknown>): void {
+		const view = toolView(name, args);
+		const section = block.inputSection;
+		section.textContent = "";
+		const inputHead = el("div", "tool-section-head");
+		inputHead.appendChild(el("span", "", view.label));
+		inputHead.appendChild(this.makeCopyButton(view.input));
+		section.appendChild(inputHead);
+
+		if (name === "edit" && Array.isArray(args?.edits)) {
+			this.buildEditSections(args, inputHead, section);
+			return;
+		}
+		const pre = el("pre");
+		if (view.kind === "shell") {
+			pre.className = "term";
+			pre.textContent = "";
+			for (const [index, line] of view.input.split("\n").entries()) {
+				if (index > 0) pre.appendChild(document.createTextNode("\n"));
+				const lineEl = el("span", "term-line", line);
+				if (index === 0) pre.appendChild(el("span", "term-prompt", "$ "));
+				pre.appendChild(lineEl);
+			}
+		} else {
+			pre.textContent = view.input;
+		}
+		section.appendChild(pre);
+
+		// Edit-tool convenience: jump to the target file.
+		const maybePath = args?.path;
+		if ((name === "edit" || name === "write" || name === "read") && typeof maybePath === "string" && maybePath.trim()) {
+			const openBtn = el("button", "tool-open", `Open ${shortenPath(maybePath)}`);
+			openBtn.title = "Open file in editor";
+			openBtn.addEventListener("click", (event) => {
+				event.stopPropagation();
+				this.deps.onOpenFile(maybePath);
+			});
+			section.appendChild(openBtn);
+		}
+	}
+
+	/**
+	 * Tool arguments stream in. The first `message_update` carrying a toolCall has
+	 * `arguments: {}` — the code lands over the updates that follow, and only then
+	 * does tool_execution_start repeat it. The card is created on that first empty
+	 * sighting, so without re-rendering here the collapsed summary stays blank and
+	 * the expanded call shows nothing for the life of the card.
+	 */
+	private refreshToolArgs(block: ToolBlock, name: string, args: Record<string, unknown>): void {
+		const view = toolView(name, args);
+		if (view.input.length <= block.renderedInputLen) return;
+		block.renderedInputLen = view.input.length;
+		block.summary.textContent = this.toolSummary(name, args);
+		block.root.dataset.toolKind = view.kind;
+		block.root.dataset.toolLang = view.lang;
+		this.renderToolInput(block, name, args);
+	}
+
 	private ensureToolBlock(id: string, name: string, args: Record<string, unknown>): ToolBlock {
 		const existing = this.toolBlocks.get(id);
-		if (existing) return existing;
+		if (existing) {
+			this.refreshToolArgs(existing, name, args);
+			return existing;
+		}
 
 		const root = el("div", "tool");
 		const header = el("button", "tool-header");
@@ -946,45 +1019,6 @@ export class Transcript {
 
 		const inputSection = el("div", "tool-section");
 		const view = toolView(name, args);
-		const inputText = view.input;
-		const inputHead = el("div", "tool-section-head");
-		inputHead.appendChild(el("span", "", view.label));
-		inputHead.appendChild(this.makeCopyButton(inputText));
-		inputSection.appendChild(inputHead);
-
-		if (name === "edit" && Array.isArray(args?.edits)) {
-			this.buildEditSections(args, inputHead, inputSection);
-		} else {
-			const pre = el("pre");
-			if (view.kind === "shell") {
-				pre.className = "term";
-				pre.textContent = "";
-				for (const [index, line] of inputText.split("\n").entries()) {
-					if (index > 0) pre.appendChild(document.createTextNode("\n"));
-					const lineEl = el("span", "term-line", line);
-					if (index === 0) {
-						const prompt = el("span", "term-prompt", "$ ");
-						pre.appendChild(prompt);
-					}
-					pre.appendChild(lineEl);
-				}
-			} else {
-				pre.textContent = inputText;
-			}
-			inputSection.appendChild(pre);
-
-			// Edit-tool convenience: jump to the target file.
-			const maybePath = args?.path;
-			if ((name === "edit" || name === "write" || name === "read") && typeof maybePath === "string" && maybePath.trim()) {
-				const openBtn = el("button", "tool-open", `Open ${shortenPath(maybePath)}`);
-				openBtn.title = "Open file in editor";
-				openBtn.addEventListener("click", (event) => {
-					event.stopPropagation();
-					this.deps.onOpenFile(maybePath);
-				});
-				inputSection.appendChild(openBtn);
-			}
-		}
 		body.appendChild(inputSection);
 
 		const block: ToolBlock = {
@@ -993,9 +1027,12 @@ export class Transcript {
 			summary,
 			pill,
 			body,
+			inputSection,
 			resultSection: null,
 			state: "running",
+			renderedInputLen: view.input.length,
 		};
+		this.renderToolInput(block, name, args);
 		root.dataset.toolName = name;
 		// The chrome keys off the kind, not the name — see toolView.
 		root.dataset.toolKind = view.kind;

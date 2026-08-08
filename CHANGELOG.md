@@ -13,6 +13,12 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- Tool cards fill in as their arguments stream. The first frame prime-agent sends for a tool call
+  carries no arguments at all — the card was built from that frame and never rebuilt, so the
+  collapsed summary stayed empty and the expanded call showed a bare `{}` for the rest of the
+  session. Cards now re-render when fuller arguments arrive, and only ever upgrade, so a late
+  partial frame cannot blank a card that is already complete
+
 ## [1.0.6]
 
 - Release publishing runs end to end from CI again: the publish job now declares the `CI`
