@@ -496,6 +496,11 @@ function adoptAuthoritativeSession(sessionId: string | undefined): boolean {
 	pendingFileSearches.clear();
 	composer.resetForSessionBoundary();
 	menu.classList.remove("visible");
+	// resetForSessionBoundary() drops the slash catalog with the rest of the
+	// composer's per-session state, and the host only ever sends it in answer to
+	// `ready` — i.e. once per webview. Whoever discards it has to ask again, or
+	// the "/" menu is empty for every thread after the first one opened here.
+	post({ type: "requestCommands" });
 	return true;
 }
 

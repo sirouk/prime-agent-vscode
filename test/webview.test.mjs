@@ -816,6 +816,35 @@ check("snapshot boundary clears all composer-local session state", textarea.valu
 hostMessage({ type: "fileSearchResults", requestId: snapshotSessionSearch.requestId, files: [{ path: "src/stale-snapshot-response.ts", isDir: false }] });
 check("old file-search result is ignored after snapshot boundary", !document.querySelector(".autocomplete.visible") && !document.querySelector(".ac-item"));
 
+// --- The slash catalog must survive a session boundary.
+// resetForSessionBoundary() discards it with the rest of the composer's
+// per-session state, and the host only volunteers it in answer to `ready` —
+// once per webview. Without a re-request, "/" opened an empty menu in every
+// thread after the first one this panel showed.
+hostMessage({ type: "commands", commands: [
+	{ name: "compact", description: "Compact the context" },
+	{ name: "security-pipeline", description: "Run the security review" },
+] });
+const slashItems = () => {
+	textarea.value = "/";
+	textarea.selectionStart = textarea.selectionEnd = 1;
+	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+	return [...document.querySelectorAll(".ac-item")].map((item) => item.textContent.trim());
+};
+check("slash menu lists the agent's commands", slashItems().length === 2, JSON.stringify(slashItems()));
+posted.length = 0;
+hostMessage({ type: "status", status: { ...baseStatus, sessionId: "session-boundary-slash", sessionName: "slash" } });
+check("a session boundary re-requests the slash catalog it just discarded",
+	posted.some((message) => message.type === "requestCommands"),
+	JSON.stringify(posted.map((message) => message.type)));
+hostMessage({ type: "commands", commands: [
+	{ name: "compact", description: "Compact the context" },
+	{ name: "security-pipeline", description: "Run the security review" },
+] });
+check("the slash menu works again in the resumed thread", slashItems().length === 2, JSON.stringify(slashItems()));
+textarea.value = "";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+
 // --- paste image on a text-only model shows a composer hint ---
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 posted.length = 0;

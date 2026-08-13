@@ -1464,14 +1464,24 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
+	/**
+	 * The slash catalog is a property of the agent BUILD, not of the session on
+	 * screen, and the webview asks for it again every time a session boundary
+	 * discards its copy. So it must answer in exactly the states the old guards
+	 * refused: while attached to a daemon session, while observing, and while a
+	 * restore is in flight — those are precisely when a boundary just happened.
+	 * guardObservedReadOnly() also had no business here: it exists to refuse
+	 * MUTATIONS on a read-only view, and it made a harmless catalog query pop an
+	 * operator-facing "that session is read-only" warning.
+	 */
 	async listCommands(): Promise<void> {
-		if (this.guardObservedReadOnly("listing commands")) return;
-		const epoch = this.viewEpoch;
 		await this.ensureStarted();
 		const client = this.client;
-		if (!client || !this.isCurrentRpcView(client, epoch)) return;
+		if (!client?.running || this.disposed) return;
 		const response = await client.request({ type: "get_commands" }, 30_000);
-		if (!this.isCurrentRpcView(client, epoch)) return;
+		// Identity only: a reply from the client we asked is valid for any view,
+		// because the answer does not describe a session.
+		if (this.client !== client || this.disposed) return;
 		if (response.success) {
 			const data = response.data as { commands?: RpcSlashCommand[] };
 			this.broadcast({ type: "commands", commands: data.commands ?? [] });

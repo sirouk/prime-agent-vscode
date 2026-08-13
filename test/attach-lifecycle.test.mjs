@@ -181,6 +181,46 @@ fs.writeFileSync(untracked, "x");
 const head = await new GitHeadContentProvider().provideTextDocumentContent({ with: () => ({ fsPath: untracked }) });
 check("a path outside any repository yields an empty HEAD side", head === "", JSON.stringify(head).slice(0, 48));
 
+// --- the slash catalog answers for the session on screen, whatever it is ------
+// It describes the agent build, not the session, and the webview asks for it
+// again after every boundary — which is exactly when the view is attached,
+// observing, or restoring. The old guards refused in all three, and
+// guardObservedReadOnly() additionally popped a read-only warning at the
+// operator for what is a harmless catalog query.
+posts.length = 0;
+const commandClient = {
+	running: true,
+	request: async (command) =>
+		command.type === "get_commands"
+			? { success: true, data: { commands: [{ name: "compact" }, { name: "security-pipeline" }] } }
+			: { success: false, error: "unexpected" },
+	sendRaw: () => {},
+};
+controller.client = commandClient;
+controller.ensureStarted = async () => {};
+controller.attached = { activeSessionId: "handle-C", sessionPath: path.join(workdir, "c.jsonl"), sessionId: "c" };
+controller.attachedEpoch = controller.viewEpoch;
+await controller.listCommands();
+check("attached view still gets the slash catalog",
+	posts.some((m) => m.type === "commands" && m.commands.length === 2),
+	JSON.stringify(posts.map((m) => m.type)));
+
+posts.length = 0;
+controller.attached = null;
+controller.attachedEpoch = null;
+controller.observingId = "obs-2";
+controller.observationRestoring = true;
+await controller.listCommands();
+check("observing/restoring view still gets the slash catalog",
+	posts.some((m) => m.type === "commands" && m.commands.length === 2),
+	JSON.stringify(posts.map((m) => m.type)));
+check("asking for the catalog never warns the operator",
+	!posts.some((m) => m.type === "notice"),
+	JSON.stringify(posts.filter((m) => m.type === "notice").map((m) => m.text)));
+controller.observingId = null;
+controller.observationRestoring = false;
+controller.client = null;
+
 controller.dispose();
 console.log(failed === 0 ? "\nPASS attach-lifecycle" : `\nFAIL attach-lifecycle (${failed})`);
 process.exit(failed === 0 ? 0 : 1);
