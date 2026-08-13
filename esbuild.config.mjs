@@ -63,6 +63,19 @@ const controllerConfig = {
 	external: ["vscode"],
 };
 
+// test/attach-lifecycle.test.mjs drives the lease helpers directly; like the
+// sidecar bundle below it is gitignored, so a clean checkout must build it.
+const sessionActionsConfig = {
+	...shared,
+	entryPoints: ["src/session-actions.ts"],
+	bundle: true,
+	format: "cjs",
+	platform: "node",
+	target: "node18",
+	outfile: "dist/session-actions.cjs",
+	external: ["vscode"],
+};
+
 // test/host-e2e.mjs requires this bundle directly. It is gitignored with the
 // rest of dist/, so a clean checkout has to build it or that gate cannot run.
 const daemonSidecarConfig = {
@@ -97,4 +110,5 @@ if (watch) {
 	await esbuild.build(smokeConfig);
 	await esbuild.build(controllerConfig);
 	await esbuild.build(daemonSidecarConfig);
+	await esbuild.build(sessionActionsConfig);
 }

@@ -709,7 +709,9 @@ function dispatchHostMessage(message: HostToWebview): void {
 			composer.setDraft(message.text ?? "");
 			break;
 		case "compactThreshold":
-			composer.setCompactThreshold(message.percent, currentStatus?.compactDefaultPercent ?? null);
+			// The host sends the agent default alongside the override; reading it off
+			// the last status instead lost it entirely before the first snapshot.
+			composer.setCompactThreshold(message.percent, message.defaultPercent ?? currentStatus?.compactDefaultPercent ?? null);
 			break;
 		case "sessionChildren": {
 			sessionChildren = message.children ?? [];
@@ -747,6 +749,12 @@ function dispatchHostMessage(message: HostToWebview): void {
 		case "observedSession":
 			adoptAuthoritativeSession(message.sessionId);
 			setObserving(true);
+			// Same session boundary as a snapshot: without clearing these, the
+			// spawn-card dedupe keeps suppressing every id seen before the observed
+			// transcript, and "Subagent spawned" never appears again for them.
+			pendingPrompts.clear();
+			transcript.clearSpawnCards?.();
+			spawnSeenBaseline = false;
 			transcript.renderSnapshot(message.messages);
 			showView("chat");
 			break;
@@ -808,6 +816,15 @@ function dispatchHostMessage(message: HostToWebview): void {
 			composer.insertMention(message.path);
 			showView("chat");
 			break;
+		case "promptAccepted":
+			// Prompts WITH an echo are released by onOptimisticConfirmed when the
+			// agent echoes them. One without an echo (selection-only) never gets
+			// that callback, so its retained payload — images included — would sit
+			// in memory until the next session boundary.
+			for (const [id, entry] of pendingPrompts) {
+				if (entry.text.length === 0 && entry.images.length === 0) pendingPrompts.delete(id);
+			}
+			break;
 		case "changedFiles":
 			transcript.renderChangedFiles(message.files);
 			break;
@@ -823,7 +840,11 @@ function dispatchHostMessage(message: HostToWebview): void {
 			const rejected = message.clientRequestId ? pendingPrompts.get(message.clientRequestId) : undefined;
 			const removed = transcript.rejectOptimistic(message.clientRequestId);
 			if (message.clientRequestId) pendingPrompts.delete(message.clientRequestId);
-			if (removed && rejected) composer.restoreRejectedPayload(rejected.text, rejected.images, rejected.selections);
+			// A selection-only prompt draws no local echo, so `removed` is false for
+			// it — gating the restore on `removed` alone silently ate the operator's
+			// attachments when the host refused the send.
+			const hadEcho = Boolean(rejected && (rejected.text.length > 0 || rejected.images.length > 0));
+			if (rejected && (removed || !hadEcho)) composer.restoreRejectedPayload(rejected.text, rejected.images, rejected.selections);
 			addNotice("error", `Prompt rejected: ${message.error}`);
 			break;
 	}

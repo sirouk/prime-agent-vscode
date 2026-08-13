@@ -37,10 +37,15 @@ const ALLOWED_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 
 function sanitizeHref(href: string): string {
 	try {
-		const url = new URL(href, "https://example.invalid");
-		if (ALLOWED_LINK_PROTOCOLS.has(url.protocol)) return href;
+		// Deliberately NO base URL. Resolving against one turned a relative or
+		// protocol-relative target ("docs/x.md", "//evil.example") into an
+		// "allowed" https link whose real destination the text never named — and
+		// which the host then refuses anyway. Only an explicit, absolute,
+		// allow-listed URL becomes a link; anything else stays inert.
+		const url = new URL(href);
+		if (ALLOWED_LINK_PROTOCOLS.has(url.protocol)) return url.href;
 	} catch {
-		// fallthrough
+		// not an absolute URL
 	}
 	return "#";
 }
@@ -48,7 +53,15 @@ function sanitizeHref(href: string): string {
 /** Render inline markdown (code spans, bold, italic, links) into parent. */
 function renderInline(text: string, parent: HTMLElement, onOpenLink: (href: string) => void): void {
 	// Tokenize with a single pass regex; code spans win over emphasis.
-	const pattern = /(`+)([^`]|`(?!`))*?\1|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\n]+)\*|_([^_\n]+)_|\[([^\]]+)\]\(([^)\s]+)\)/g;
+	// Every alternative is newline-bounded AND length-bounded. With open-ended
+	// classes an unmatched delimiter ("[", "**", a stray backtick) rescanned to
+	// the end of the message from every position — quadratic per pass, and the
+	// transcript re-runs this on every streaming delta, so one long reply
+	// containing bare "[" froze the panel (measured: 1.9 s at 40k occurrences,
+	// 7.4 s at 80k; now 20 ms / 64 ms). The caps are far above any real inline
+	// span; anything longer simply renders as the literal text it already is.
+	const pattern =
+		/(`+)([^`\n]|`(?!`)){0,1000}?\1|\*\*([^*\n]{1,1000})\*\*|__([^_\n]{1,1000})__|\*([^*\n]{1,1000})\*|_([^_\n]{1,1000})_|\[([^\]\n]{1,500})\]\(([^)\s\n]{1,2000})\)/g;
 	let last = 0;
 	let match: RegExpExecArray | null;
 	while ((match = pattern.exec(text)) !== null) {
@@ -75,12 +88,20 @@ function renderInline(text: string, parent: HTMLElement, onOpenLink: (href: stri
 			const a = el("a") as HTMLAnchorElement;
 			a.textContent = label;
 			const href = sanitizeHref(rawHref);
+			const openable = href !== "#";
 			a.href = href;
-			a.title = rawHref;
+			// Hand the HOST the sanitized absolute URL, never the raw text: the two
+			// must agree on the destination, or a click opens something the link
+			// never claimed (and a relative target only earns an error notice).
+			a.title = openable ? rawHref : `${rawHref} — not an openable link`;
+			if (!openable) a.className = "md-link-inert";
 			a.addEventListener("click", (event) => {
 				event.preventDefault();
-				if (href !== "#") onOpenLink(rawHref);
+				if (openable) onOpenLink(href);
 			});
+			// Middle-click and modifier-click bypass the click handler entirely, so
+			// an inert target must not stay navigable through them either.
+			a.addEventListener("auxclick", (event) => event.preventDefault());
 			parent.appendChild(a);
 		}
 		last = match.index + match[0].length;

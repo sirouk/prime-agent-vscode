@@ -3,6 +3,7 @@
  * both attach to the shared SessionController.
  */
 
+import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 
 declare const PRIME_AGENT_BUILD_REV: string | undefined;
@@ -32,6 +33,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	resolveWebviewView(view: vscode.WebviewView): void {
+		// VS Code can resolve a NEW view object for the same provider (the view is
+		// moved to another container, or reset). Release the previous view's
+		// listeners first, or every resolve adds another visibility subscription
+		// that re-wires the webview once more per toggle.
+		for (const d of this.viewDisposables.splice(0)) d.dispose();
 		this.view = view;
 		// VS Code silently replaces the inner webview object when the panel is
 		// hidden/re-shown/reloaded (activity-bar toggles, window restore, Developer:
@@ -42,6 +48,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 		this.wire();
 		view.onDidChangeVisibility(() => {
 			if (view.visible) this.wire();
+		}, null, this.viewDisposables);
+		view.onDidDispose(() => {
+			if (this.view !== view) return;
+			for (const d of this.receiveDisposables.splice(0)) d.dispose();
+			this.view = null;
 		}, null, this.viewDisposables);
 	}
 
@@ -530,8 +541,13 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			return;
 		case "openExternal":
 			try {
-				const uri = vscode.Uri.parse(message.url);
-				if (uri.scheme !== "https" && uri.scheme !== "mailto") throw new Error("unsupported link scheme");
+				const uri = vscode.Uri.parse(message.url, true);
+				// Must stay in step with markdown.ts' ALLOWED_LINK_PROTOCOLS: a link
+				// the transcript renders as clickable and the host then refuses is
+				// just an error notice where an opened page was promised.
+				if (uri.scheme !== "https" && uri.scheme !== "http" && uri.scheme !== "mailto") {
+					throw new Error("unsupported link scheme");
+				}
 				await vscode.env.openExternal(uri);
 			} catch {
 				controller.showErrorNotice("Blocked an unsupported external link.");
@@ -561,10 +577,6 @@ function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 }
 
 function getNonce(): string {
-	let text = "";
-	const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-	for (let i = 0; i < 32; i++) {
-		text += possible.charAt(Math.floor(Math.random() * possible.length));
-	}
-	return text;
+	// A CSP nonce is a security token: Math.random() is not a source of those.
+	return randomBytes(24).toString("base64url");
 }

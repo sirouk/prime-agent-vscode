@@ -116,8 +116,10 @@ async function readTail(filePath: string): Promise<{ name?: string; archived: bo
 		const { size } = await handle.stat();
 		const start = Math.max(0, size - TAIL_BYTES);
 		const buffer = Buffer.alloc(size - start);
-		await handle.read(buffer, 0, buffer.length, start);
-		const lines = buffer.toString("utf8").split("\n");
+		// Short reads are legal: decode only what was actually read, or the NUL
+		// padding turns the final (most authoritative) record into garbage.
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+		const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
 		let name: string | undefined;
 		let nameResolved = false;
 		let archived: boolean | undefined;

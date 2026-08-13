@@ -79,7 +79,10 @@ export async function isSessionActive(sessionPath: string): Promise<boolean> {
 		if (typeof owner.pid === "number" && owner.pid > 0) {
 			try {
 				process.kill(owner.pid, 0);
-			} catch {
+			} catch (err) {
+				// EPERM means the process EXISTS and belongs to someone else — the
+				// opposite of a stale lock. Only ESRCH proves the owner is gone.
+				if ((err as { code?: string }).code === "EPERM") return true;
 				return false; // stale lock
 			}
 			// The pid being alive is not enough: after a crash + reboot the OS hands
@@ -181,8 +184,16 @@ async function readAppendParent(sessionPath: string): Promise<{ parentId: string
 		if (size === 0) throw new Error("Empty session file");
 		const start = Math.max(0, size - APPEND_TAIL_BYTES);
 		const buffer = Buffer.alloc(size - start);
-		await handle.read(buffer, 0, buffer.length, start);
-		const tail = buffer.toString("utf8");
+		// This tail decides both the parent id and whether the file needs a leading
+		// newline, so a short read cannot be tolerated here: read until the window
+		// is full (or the file really ended) and decode exactly those bytes.
+		let filled = 0;
+		while (filled < buffer.length) {
+			const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, start + filled);
+			if (bytesRead <= 0) break;
+			filled += bytesRead;
+		}
+		const tail = buffer.subarray(0, filled).toString("utf8");
 		const needsLeadingNewline = !tail.endsWith("\n");
 		const lines = tail.split("\n");
 		if (start > 0) lines.shift(); // first record may be a truncated prefix

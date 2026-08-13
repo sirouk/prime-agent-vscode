@@ -479,7 +479,12 @@ export class Transcript {
 	private renderEarlierBar(): void {
 		this.earlierBar?.remove();
 		this.earlierBar = null;
-		if (this.olderMessages.length === 0) return;
+		if (this.olderMessages.length === 0) {
+			// The wording of the trimmed-gap marker depends on whether unrendered
+			// history still sits above it.
+			this.renderPrunedNotice();
+			return;
+		}
 		const bar = el("div", "earlier-bar");
 		const button = el("button", "earlier-load") as HTMLButtonElement;
 		const remaining = this.olderMessages.length;
@@ -491,7 +496,10 @@ export class Transcript {
 		});
 		bar.append(button, el("span", "earlier-count", `${remaining} earlier`));
 		this.earlierBar = bar;
+		// Always the topmost row, which keeps it above the trimmed-gap marker: the
+		// messages this button loads are older than the rows that were trimmed.
 		this.scroller.insertBefore(bar, this.scroller.firstChild);
+		this.renderPrunedNotice();
 	}
 
 	/** Render the next batch of older messages above the current view, in place. */
@@ -532,12 +540,18 @@ export class Transcript {
 	private pruneOldRows(): void {
 		if (!this.stickToBottom) return;
 		const rows = this.scroller.children;
-		const removable = rows.length - (this.earlierBar ? 1 : 0) - (this.jumpBtn ? 1 : 0);
+		// Chrome rows are not messages: counting (or deleting) them inflates the
+		// trimmed count and drifts the effective window by a slot per cycle.
+		const chrome =
+			(this.earlierBar?.parentElement === this.scroller ? 1 : 0) +
+			(this.jumpBtn?.parentElement === this.scroller ? 1 : 0) +
+			(this.prunedNotice?.parentElement === this.scroller ? 1 : 0);
+		const removable = rows.length - chrome;
 		if (removable <= MAX_RENDERED_ROWS) return;
 		let toRemove = removable - PRUNE_TO;
 		for (const node of Array.from(rows)) {
 			if (toRemove <= 0) break;
-			if (node === this.earlierBar || node === this.jumpBtn) continue;
+			if (node === this.earlierBar || node === this.jumpBtn || node === this.prunedNotice) continue;
 			if (node.contains(this.streamingBubble) || node === this.streamingBubble) break;
 			for (const [id, block] of this.toolBlocks) {
 				if (node.contains(block.root)) this.toolBlocks.delete(id);
@@ -549,17 +563,32 @@ export class Transcript {
 		if (this.prunedCount > 0) this.renderPrunedNotice();
 	}
 
-	/** Say plainly that the top of the transcript is no longer rendered. */
+	/**
+	 * Say plainly that part of the transcript is no longer rendered. This must be
+	 * stated even when the "load earlier" bar is present: that bar counts only the
+	 * messages never rendered (`olderMessages`) and knows nothing about rows that
+	 * were rendered and later trimmed. Suppressing it left the two mechanisms
+	 * meeting at an invisible seam — "Load earlier" spliced old rows straight onto
+	 * a tail with hundreds of messages missing in between, reading as continuous.
+	 */
 	private renderPrunedNotice(): void {
-		if (this.olderMessages.length > 0) return; // the earlier bar already says it
+		if (this.prunedCount === 0) return;
 		if (!this.prunedNotice) {
-			this.prunedNotice = el("div", "earlier-bar");
+			this.prunedNotice = el("div", "earlier-bar pruned-bar");
 			this.prunedNotice.appendChild(el("span", "earlier-count", ""));
 		}
 		const label = this.prunedNotice.firstChild as HTMLElement;
-		label.textContent = `${this.prunedCount} earlier message${this.prunedCount === 1 ? "" : "s"} trimmed from view — the session still has them`;
-		if (this.prunedNotice.parentElement !== this.scroller || this.scroller.firstChild !== this.prunedNotice) {
-			this.scroller.insertBefore(this.prunedNotice, this.scroller.firstChild);
+		const plural = this.prunedCount === 1 ? "" : "s";
+		label.textContent =
+			this.olderMessages.length > 0
+				? `gap: ${this.prunedCount} message${plural} between the rows above and below were trimmed from view — the session still has them`
+				: `${this.prunedCount} earlier message${plural} trimmed from view — the session still has them`;
+		// Placed once, directly under the "load earlier" bar, and never moved
+		// afterwards: rows loaded later are inserted ABOVE it, so the marker keeps
+		// standing exactly where the missing stretch is.
+		if (this.prunedNotice.parentElement !== this.scroller) {
+			const after = this.earlierBar?.parentElement === this.scroller ? this.earlierBar.nextSibling : this.scroller.firstChild;
+			this.scroller.insertBefore(this.prunedNotice, after);
 		}
 	}
 
@@ -929,8 +958,11 @@ export class Transcript {
 		const tokensEl = el("span", "uf-tokens", estLabel);
 		tokensEl.title = "Estimated from message length (~4 chars/token). Only replies are metered.";
 		footer.appendChild(tokensEl);
-		// The price lands when the reply that consumed this message arrives.
-		this.pendingUserFooter = footer;
+		// The price lands when the reply that consumed this message arrives — so
+		// only a row appended at the LIVE tail may claim it. Rows rebuilt above the
+		// window by loadEarlier are ancient history; letting them take the slot put
+		// the next reply's cost on a message from the top of the transcript.
+		if (this.insertAnchor === null) this.pendingUserFooter = footer;
 		const copyBtn = el("button", "uf-icon") as HTMLButtonElement;
 		copyBtn.title = "Copy message";
 		copyBtn.appendChild(icon("copy", 11));

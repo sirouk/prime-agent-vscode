@@ -522,6 +522,15 @@ textarea::-webkit-scrollbar {
 	text-decoration: underline;
 }
 
+/* A target we will not open (relative path, unknown scheme) must not be dressed
+   up as a working link. */
+.md a.md-link-inert,
+.md a.md-link-inert:hover {
+	color: var(--pa-dim);
+	text-decoration: underline dotted;
+	cursor: default;
+}
+
 .md blockquote {
 	margin: 0.35em 0;
 	padding: 3px 11px;
@@ -2598,4 +2607,13 @@ body.vscode-light pre.term {
 
 .earlier-count {
 	color: var(--pa-faint);
+}
+
+/* The trimmed-gap marker sits INSIDE the thread, between loaded history and the
+   rendered tail, so it needs a visible seam of its own. */
+.pruned-bar {
+	border-top: 1px dashed var(--pa-border);
+	border-bottom: 1px dashed var(--pa-border);
+	margin: 6px 0;
+	padding: 5px 0;
 }

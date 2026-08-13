@@ -404,8 +404,10 @@ export class DaemonSidecar {
 	}
 
 	async list(all = false): Promise<SessionSummaryRef[]> {
-		const data = await this.request<{ sessions?: SessionSummaryRef[] }>({ type: "list", all }, 20_000);
-		return data.sessions ?? [];
+		// `data` is optional in the envelope: a success with no payload must read as
+		// "no rows", not as a TypeError thrown from inside a caller's try block.
+		const data = await this.request<{ sessions?: SessionSummaryRef[] } | undefined>({ type: "list", all }, 20_000);
+		return data?.sessions ?? [];
 	}
 
 	/**
@@ -416,14 +418,16 @@ export class DaemonSidecar {
 	 * ignored; the response carries the whole list.
 	 */
 	async listSavedSessions(cwd: string, scope: "current" | "all" = "all"): Promise<SavedSessionInfo[]> {
-		const data = await this.request<{ sessions?: SavedSessionInfo[] }>({ type: "list_saved_sessions", cwd, scope }, 60_000);
-		return data.sessions ?? [];
+		const data = await this.request<{ sessions?: SavedSessionInfo[] } | undefined>({ type: "list_saved_sessions", cwd, scope }, 60_000);
+		return data?.sessions ?? [];
 	}
 
 	async attach(activeSessionId: string): Promise<AttachResult> {
-		return this.request<AttachResult>(
-			{ type: "attach", activeSessionId, capabilities: ["attach_snapshot", "event_sequence", "slim_attach"] },
-			30_000,
+		return (
+			(await this.request<AttachResult | undefined>(
+				{ type: "attach", activeSessionId, capabilities: ["attach_snapshot", "event_sequence", "slim_attach"] },
+				30_000,
+			)) ?? {}
 		);
 	}
 
@@ -463,16 +467,16 @@ export class DaemonSidecar {
 	}
 
 	async getMessages(activeSessionId: string): Promise<Array<Record<string, unknown>>> {
-		const data = await this.request<{ messages?: Array<Record<string, unknown>> }>({ type: "get_messages", activeSessionId }, 60_000);
-		return data.messages ?? [];
+		const data = await this.request<{ messages?: Array<Record<string, unknown>> } | undefined>({ type: "get_messages", activeSessionId }, 60_000);
+		return data?.messages ?? [];
 	}
 
 	async getState(activeSessionId: string): Promise<Record<string, unknown>> {
-		return this.request<Record<string, unknown>>({ type: "get_state", activeSessionId }, 20_000);
+		return (await this.request<Record<string, unknown> | undefined>({ type: "get_state", activeSessionId }, 20_000)) ?? {};
 	}
 
 	async getSessionStats(activeSessionId: string): Promise<Record<string, unknown>> {
-		return this.request<Record<string, unknown>>({ type: "get_session_stats", activeSessionId }, 20_000);
+		return (await this.request<Record<string, unknown> | undefined>({ type: "get_session_stats", activeSessionId }, 20_000)) ?? {};
 	}
 
 	dispose(): void {

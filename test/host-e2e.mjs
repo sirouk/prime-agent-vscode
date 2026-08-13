@@ -23,21 +23,12 @@ const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-host-e2e-"));
 // touches that unrelated service. HOST_E2E_DAEMON_SOCKET remains an escape
 // hatch for diagnosing an externally managed daemon.
 const daemonSocket = process.env.HOST_E2E_DAEMON_SOCKET ?? path.join(workdir, "daemon.sock");
+// The private daemon is started BY the agent we launch, never by this harness.
+// RPC mode owns the daemon at the socket it is given: handed one that some other
+// process already put there, it refuses to start at all ("a background service
+// from a different Prime Agent version is running"), which is exactly what a
+// pre-spawned `--mode daemon` here looks like to it.
 let daemonProcess = null;
-if (!process.env.HOST_E2E_DAEMON_SOCKET) {
-	daemonProcess = spawn("prime-agent", ["--mode", "daemon", "--daemon-socket", daemonSocket], {
-		stdio: "ignore",
-		env: { ...process.env },
-	});
-	const deadline = Date.now() + 15_000;
-	while (!fs.existsSync(daemonSocket) && Date.now() < deadline && daemonProcess.exitCode === null) {
-		await new Promise((resolve) => setTimeout(resolve, 50));
-	}
-	if (!fs.existsSync(daemonSocket)) {
-		try { daemonProcess.kill("SIGTERM"); } catch {}
-		throw new Error(`private daemon did not start at ${daemonSocket}`);
-	}
-}
 process.env.PRIME_AGENT_DAEMON_SOCKET = daemonSocket;
 process.env.PRIME_AGENT_ARGS = `--session-dir ${path.join(workdir, "sessions")} --daemon-socket ${daemonSocket}`;
 vscodeStub.workspace.workspaceFolders = [{ uri: { fsPath: workdir, scheme: "file" }, name: "e2e", index: 0 }];
@@ -77,6 +68,9 @@ try {
 	await controller.ensureStarted();
 	const snapshot = await waitFor(() => received.find((m) => m.type === "snapshot"), 30_000, "initial snapshot");
 	check("initial snapshot received", !!snapshot);
+	// The agent brings the private daemon up as part of starting; the sidecar
+	// half of this test has nothing to attach to until it exists.
+	await waitFor(() => fs.existsSync(daemonSocket), 30_000, `private daemon socket at ${daemonSocket}`);
 	check("snapshot connected", snapshot.status?.connected === true, snapshot.status?.modelLabel ?? "");
 	// Against the real agent: the level list must come from the model's own
 	// thinkingLevelMap, not a fixed six. Kimi K3 TEE, for one, supports only
@@ -269,6 +263,23 @@ try {
 			await Promise.race([once(daemonProcess, "exit"), sleep(2_000)]);
 		} catch {
 			// Best effort: this socket and process belong only to the temporary test.
+		}
+	}
+	// The agent started the private daemon, so it outlives our subprocess. Stop
+	// the one bound to OUR socket (never the operator's default daemon) rather
+	// than leaving a stray service behind after every run.
+	if (!process.env.HOST_E2E_DAEMON_SOCKET) {
+		try {
+			const { execFileSync } = await import("node:child_process");
+			const pids = execFileSync("pgrep", ["-f", `daemon-socket ${daemonSocket}`], { encoding: "utf8" })
+				.split("\n")
+				.map((line) => Number(line.trim()))
+				.filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid);
+			for (const pid of pids) {
+				try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+			}
+		} catch {
+			// pgrep exits non-zero when nothing matches: nothing to clean up.
 		}
 	}
 	fs.rmSync(workdir, { recursive: true, force: true });

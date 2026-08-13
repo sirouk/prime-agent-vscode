@@ -376,17 +376,20 @@ export class Composer {
 		this.behaviorBtn.style.display = show ? "" : "none";
 	}
 
-	setContext(percent: number | null | undefined, tokens: number | null | undefined, window: number | undefined): void {
-		if (percent == null || window == null) {
+	// Parameter deliberately NOT named `window`: this class calls window.setTimeout
+	// elsewhere, and shadowing the global with a number here is a TypeError
+	// waiting for the next line of code added to this method.
+	setContext(percent: number | null | undefined, tokens: number | null | undefined, contextWindow: number | undefined): void {
+		if (percent == null || contextWindow == null) {
 			this.contextWrap.style.display = "none";
 			return;
 		}
-		this.contextWindowCurrent = window ?? this.contextWindowCurrent;
+		this.contextWindowCurrent = contextWindow ?? this.contextWindowCurrent;
 		this.contextWrap.style.display = "";
 		this.contextFill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
 		this.contextFill.className = `context-fill${percent > 85 ? " hot" : percent > 65 ? " warm" : ""}`;
 		const compact = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(0)}k` : String(n));
-		this.contextLabel.textContent = tokens != null ? `${compact(tokens)}/${compact(window)}` : `${percent}%`;
+		this.contextLabel.textContent = tokens != null ? `${compact(tokens)}/${compact(contextWindow)}` : `${percent}%`;
 		this.contextWrap.title = `Context window: ${percent}% used${this.compactThreshold != null ? ` · auto-compact at ${this.compactThreshold}%` : ""} — click to set the threshold`;
 	}
 
@@ -502,21 +505,40 @@ export class Composer {
 		offBtn?.classList.toggle("active", this.compactThreshold === null);
 	}
 
+	/** Outside-click closer for the open flyout, owned so every close path frees it. */
+	private thresholdCloser: ((event: MouseEvent) => void) | null = null;
+
+	/**
+	 * Close the threshold flyout and drop its document listener. Closing by
+	 * clicking the gauge again, or across a session boundary, used to leave the
+	 * capture-phase listener installed for the life of the webview — one leak per
+	 * open/close cycle.
+	 */
+	private closeThresholdFlyout(): void {
+		this.thresholdFlyout?.classList.remove("visible");
+		if (this.thresholdCloser) {
+			document.removeEventListener("mousedown", this.thresholdCloser, true);
+			this.thresholdCloser = null;
+		}
+	}
+
 	private toggleThresholdFlyout(): void {
 		const panel = this.ensureThresholdFlyout();
 		if (panel.classList.contains("visible")) {
-			panel.classList.remove("visible");
+			this.closeThresholdFlyout();
 			return;
 		}
 		this.renderThresholdFlyout();
 		panel.classList.add("visible");
 		setTimeout(() => {
+			// A second open may have raced this frame; keep exactly one listener.
+			if (this.thresholdCloser || !panel.classList.contains("visible")) return;
 			const closeOnce = (event: MouseEvent) => {
 				if (this.thresholdFlyout && !this.thresholdFlyout.contains(event.target as Node) && !this.contextWrap.contains(event.target as Node)) {
-					this.thresholdFlyout.classList.remove("visible");
-					document.removeEventListener("mousedown", closeOnce, true);
+					this.closeThresholdFlyout();
 				}
 			};
+			this.thresholdCloser = closeOnce;
 			document.addEventListener("mousedown", closeOnce, true);
 		}, 0);
 	}
@@ -626,7 +648,7 @@ export class Composer {
 		this.modelMenu = null;
 		this.thinkingMenu?.hide();
 		this.thinkingMenu = null;
-		this.thresholdFlyout?.classList.remove("visible");
+		this.closeThresholdFlyout();
 		window.clearTimeout(this.hintTimer);
 		this.hintEl?.classList.remove("visible");
 
