@@ -13,3 +13,6 @@ test/smoke.mjs.map
 
 test/preview-*.png
 test/e2e-shots/
+
+# graphify knowledge-graph output (2.6MB, regenerate with /graphify)
+graphify-out/
