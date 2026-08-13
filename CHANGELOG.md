@@ -201,7 +201,13 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.4...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.10...HEAD
+[1.0.10]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.9...v1.0.10
+[1.0.9]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.8...v1.0.9
+[1.0.8]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.7...v1.0.8
+[1.0.7]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.6...v1.0.7
+[1.0.6]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.5...v1.0.6
+[1.0.5]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.1...v1.0.2
