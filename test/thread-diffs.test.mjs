@@ -101,6 +101,7 @@ check("re-snapshotting does not duplicate hunks", lastDiffs()?.[0]?.hunks.length
 
 // --- subagent edits, harvested from the child's own session file ---
 const childFile = path.join(workdir, "sub-1.jsonl");
+controller.state = { sessionFile: path.join(workdir, "root.jsonl") };
 const childRecord = (target, oldStr, newStr) =>
 	`${JSON.stringify({
 		type: "message",

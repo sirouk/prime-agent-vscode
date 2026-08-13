@@ -9,6 +9,18 @@ import type { ImageAttachment, ModelRef, RpcModel, RpcSlashCommand, SelectionAtt
 
 /** Keys that move the caret without producing an input event. */
 const CARET_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
+const MAX_IMAGES = 8;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
+
+/** Decoded byte count without allocating an image-sized buffer in the webview. */
+function base64Bytes(value: string): number {
+	const compact = value.replace(/\s/g, "");
+	if (compact.length === 0) return 0;
+	const padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
+	return Math.max(0, Math.floor((compact.length * 3) / 4) - padding);
+}
 
 export interface ComposerDeps {
 	onSend: (text: string, images: ImageAttachment[], selections: SelectionAttachment[]) => void;
@@ -386,9 +398,9 @@ export class Composer {
 	private thresholdFlyout: HTMLElement | null = null;
 	private contextTick: HTMLElement | null = null;
 
-	setCompactThreshold(percent: number | null, defaultPercent?: number | null): void {
+	setCompactThreshold(percent: number | null, defaultPercent: number | null = null): void {
 		this.compactThreshold = percent;
-		if (defaultPercent != null) this.compactDefaultPercent = defaultPercent;
+		this.compactDefaultPercent = defaultPercent;
 		this.renderThresholdFlyout();
 		this.renderContextTick();
 	}
@@ -521,7 +533,16 @@ export class Composer {
 			this.showHint("Current model is text-only — switch to a vision model to attach images.");
 			return;
 		}
-		this.images.push(...images);
+		let totalBytes = this.images.reduce((total, image) => total + base64Bytes(image.data), 0);
+		let accepted = 0;
+		for (const image of images) {
+			const bytes = base64Bytes(image.data);
+			if (this.images.length >= MAX_IMAGES || bytes > MAX_IMAGE_BYTES || totalBytes + bytes > MAX_TOTAL_IMAGE_BYTES) continue;
+			this.images.push(image);
+			totalBytes += bytes;
+			accepted += 1;
+		}
+		if (accepted < images.length) this.showHint("Some images were skipped (maximum 8 images, 8 MiB each, 16 MiB total).");
 		this.renderChips();
 	}
 
@@ -542,6 +563,19 @@ export class Composer {
 		return this.textarea.value.trim() === "";
 	}
 
+	/** Restore one rejected send without overwriting an intervening draft. */
+	restoreRejectedPayload(text: string, images: ImageAttachment[], selections: SelectionAttachment[]): boolean {
+		if (this.textarea.value.trim() || this.images.length > 0 || this.selections.length > 0) return false;
+		this.textarea.value = text;
+		this.images = [...images];
+		this.selections = [...selections];
+		this.renderChips();
+		this.autoGrow();
+		this.deps.onDraftChanged(text);
+		this.focus();
+		return true;
+	}
+
 	setText(text: string): void {
 		this.textarea.value = text;
 		this.autoGrow();
@@ -559,6 +593,45 @@ export class Composer {
 		this.autoGrow();
 		// Don't steal focus back from History just to clear the box.
 		if (text) this.focus();
+	}
+
+	/**
+	 * Drop UI state that belongs to the session which just left the panel.
+	 *
+	 * A host snapshot/status is authoritative for a different session, whereas
+	 * chips, autocomplete results, open pickers, and a debounced local draft are
+	 * not. In particular, cancelling the debounce prevents its late write from
+	 * becoming the incoming session's draft.
+	 */
+	resetForSessionBoundary(): void {
+		window.clearTimeout(this.draftDebounce);
+		this.draftDebounce = undefined;
+		window.clearTimeout(this.mentionDebounce);
+		this.mentionDebounce = undefined;
+
+		this.textarea.value = "";
+		this.textarea.selectionStart = this.textarea.selectionEnd = 0;
+		this.textarea.title = "";
+		this.images = [];
+		this.selections = [];
+		this.accepted.clear();
+		this.commands = [];
+		this.acRequestId += 1;
+		this.acSelected = 0;
+		this.closeAutocomplete();
+
+		this.attachMenu?.hide();
+		this.attachMenu = null;
+		this.modelMenu?.hide();
+		this.modelMenu = null;
+		this.thinkingMenu?.hide();
+		this.thinkingMenu = null;
+		this.thresholdFlyout?.classList.remove("visible");
+		window.clearTimeout(this.hintTimer);
+		this.hintEl?.classList.remove("visible");
+
+		this.renderChips();
+		this.autoGrow();
 	}
 
 	/** Persist the last keystrokes under the OUTGOING session, before a switch. */
@@ -596,6 +669,12 @@ export class Composer {
 			this.showHint("Dropped images: current model is text-only. Switch to a vision model or remove the chips.");
 			this.images = [];
 			this.renderChips();
+		}
+		// A text-only model can strip the sole content of a message. Do not turn
+		// that into an empty RPC prompt after accurately warning the operator.
+		if (!text && this.images.length === 0 && this.selections.length === 0) {
+			this.closeAutocomplete();
+			return;
 		}
 		this.deps.onSend(text, this.images, this.selections);
 		this.textarea.value = "";
@@ -834,7 +913,15 @@ export class Composer {
 	private syncMirror(): void {
 		if (!this.mirror) return;
 		const text = this.textarea.value;
-		const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+		// Both text and `data-path` below come from the editor / host file list.
+		// Quotes must be escaped too: this string is assigned to innerHTML, and an
+		// otherwise-valid filename can contain a quote that ends an attribute.
+		const esc = (s: string) => s
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;")
+			.replace(/'/g, "&#39;");
 		let html = "";
 		let last = 0;
 		for (const range of this.mentionRanges(text)) {
@@ -914,7 +1001,7 @@ export class Composer {
 	private onPaste(event: ClipboardEvent): void {
 		const files = event.clipboardData?.files;
 		if (!files || files.length === 0) return;
-		const imageFiles = Array.from(files).filter((f) => f.type.startsWith("image/"));
+		const imageFiles = Array.from(files).filter((f) => SUPPORTED_IMAGE_MIME_TYPES.has(f.type));
 		if (imageFiles.length === 0) return;
 		event.preventDefault();
 		if (!this.vision) {
@@ -932,20 +1019,34 @@ export class Composer {
 			this.showHint("Current model is text-only — switch to a vision model to attach images.");
 			return;
 		}
-		this.readImageFiles(Array.from(files).filter((f) => f.type.startsWith("image/")));
+		this.readImageFiles(Array.from(files).filter((f) => SUPPORTED_IMAGE_MIME_TYPES.has(f.type)));
 	}
 
 	private readImageFiles(files: File[]): void {
-		for (const file of files) {
+		const existingBytes = () => this.images.reduce((total, image) => total + base64Bytes(image.data), 0);
+		let skipped = files.length > MAX_IMAGES;
+		for (const file of files.slice(0, MAX_IMAGES)) {
+			if (file.size > MAX_IMAGE_BYTES || this.images.length >= MAX_IMAGES || existingBytes() + file.size > MAX_TOTAL_IMAGE_BYTES) {
+				skipped = true;
+				continue;
+			}
 			const reader = new FileReader();
 			reader.onload = () => {
 				const dataUrl = reader.result as string;
 				const [header, data] = dataUrl.split(",");
-				this.images.push({ data, mimeType: header.replace("data:", "").replace(";base64", ""), name: file.name || "image" });
+				const mimeType = header.replace("data:", "").replace(";base64", "");
+				if (!SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) return;
+				const bytes = base64Bytes(data);
+				if (this.images.length >= MAX_IMAGES || bytes > MAX_IMAGE_BYTES || existingBytes() + bytes > MAX_TOTAL_IMAGE_BYTES) {
+					this.showHint("Some images were skipped (maximum 8 images, 8 MiB each, 16 MiB total).");
+					return;
+				}
+				this.images.push({ data, mimeType, name: file.name || "image" });
 				this.renderChips();
 			};
 			reader.readAsDataURL(file);
 		}
+		if (skipped) this.showHint("Some images were skipped (maximum 8 images, 8 MiB each, 16 MiB total).");
 	}
 
 	// ---------------------------------------------------------------
@@ -990,7 +1091,9 @@ export class Composer {
 		if (mention) {
 			this.acKind = "mention";
 			// No debounce: per-keystroke freshness, staleness is guarded by the request id.
-			this.acRequestId = Date.now();
+			// Keep request IDs monotonic. A response from the session that just left
+			// cannot collide with a new search made in the same millisecond.
+			this.acRequestId += 1;
 			this.deps.onSearchFiles(mention.query, this.acRequestId);
 			return;
 		}
@@ -1067,6 +1170,7 @@ export class Composer {
 	private closeAutocomplete(): void {
 		this.acKind = null;
 		this.acItems = [];
+		this.autocompleteEl.textContent = "";
 		this.autocompleteEl.classList.remove("visible");
 	}
 }

@@ -75,6 +75,15 @@
 	text-align: left;
 }
 
+.td-toggle {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+	flex: 1;
+	text-align: left;
+}
+
 .td-row:hover {
 	background: var(--pa-raised, var(--pa-surface));
 }
@@ -130,6 +139,7 @@
 }
 
 .td-row:hover .td-open,
+.td-row:focus-within .td-open,
 .td-open:hover {
 	color: var(--pa-accent);
 }

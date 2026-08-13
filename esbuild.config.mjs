@@ -1,4 +1,5 @@
 import * as esbuild from "esbuild";
+import { execFileSync } from "node:child_process";
 
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
@@ -10,11 +11,23 @@ const shared = {
 	minify: production,
 };
 
-import { execSync } from "node:child_process";
+function sourceRevision() {
+	try {
+		const revision = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		return revision || "nogit";
+	} catch {
+		return "nogit";
+	}
+}
 
-const buildRev =
-	process.env.BUILD_REV ??
-	`${execSync("git rev-parse --short HEAD 2>/dev/null || date +%s").toString().trim()}-${Math.floor(Date.now() / 1000)}`;
+// BUILD_REV takes precedence for release builds. SOURCE_DATE_EPOCH makes a
+// source build reproducible, while a normal local build still changes its
+// webview cache key after a rebuild.
+const buildTimestamp = process.env.SOURCE_DATE_EPOCH ?? Math.floor(Date.now() / 1000).toString();
+const buildRev = process.env.BUILD_REV ?? `${sourceRevision()}-${buildTimestamp}`;
 
 const extensionConfig = {
 	...shared,

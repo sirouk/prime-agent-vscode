@@ -80,10 +80,11 @@ export interface TranscriptDeps {
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => void;
 	onOpenDiff: (path: string) => void;
 	onForkFromUser: (ordinal: number) => void;
-	onSpawnedCardClick: (activeSessionId: string) => void;
+	onSpawnedCardClick: (browseRef: string) => void;
 	onNewSession: () => void;
 	onShowHistory: () => void;
 	onFocusComposer: () => void;
+	onOptimisticConfirmed?: (clientRequestId: string) => void;
 }
 
 /** Rows built on open. Enough to fill several screens without paying for the tail. */
@@ -111,10 +112,23 @@ interface ToolBlock {
 	renderedInputLen: number;
 }
 
+/** A locally rendered prompt which has not yet been confirmed by the agent. */
+interface OptimisticUserRow {
+	clientRequestId: string;
+	text: string;
+	/** Exact ordered image identity prevents same-text queue rows swapping on delivery. */
+	imageSignature: string;
+	row: HTMLElement;
+}
+
 export class Transcript {
 	private toolBlocks = new Map<string, ToolBlock>();
 	private streamingBubble: HTMLElement | null = null;
-	private optimisticText: string | null = null;
+	/** Pending optimistic rows, keyed by the webview request that created them. */
+	private optimisticRows = new Map<string, OptimisticUserRow>();
+	/** Ordinal of each durable user message within the complete session history. */
+	private userOrdinals = new WeakMap<object, number>();
+	private nextUserOrdinal = 0;
 	private retryRow: HTMLElement | null = null;
 	private workingRow: HTMLElement | null = null;
 	private workingStartedAt = 0;
@@ -146,7 +160,7 @@ export class Transcript {
 		this.scroller.querySelectorAll(".spawned-card").forEach((n) => n.remove());
 	}
 
-	injectSpawnCard(options: { id: string; name?: string; created?: string | null }): void {
+	injectSpawnCard(options: { id: string; browseRef?: string; name?: string; created?: string | null }): void {
 		const card = el("div", "spawned-card");
 		if (this.spawnCardIds.has(options.id)) return;
 		this.spawnCardIds.add(options.id);
@@ -158,6 +172,7 @@ export class Transcript {
 		card.appendChild(label);
 		const view = el("button", "spawned-view", "view ›") as HTMLButtonElement;
 		view.title = "Look inside this subagent";
+		view.disabled = !options.browseRef;
 		card.appendChild(view);
 		// Ordered insert: before the first existing row newer than created.
 		const createdMs = options.created ? Date.parse(options.created) : NaN;
@@ -176,7 +191,7 @@ export class Transcript {
 		this.hasContent = true;
 		view.addEventListener("click", (event) => {
 			event.stopPropagation();
-			this.deps.onSpawnedCardClick(options.id);
+			if (options.browseRef) this.deps.onSpawnedCardClick(options.browseRef);
 		});
 		this.scrollToBottom();
 	}
@@ -274,7 +289,7 @@ export class Transcript {
 		// Snapshot before the browser's default mousedown handling collapses it.
 		this.scroller.addEventListener("mousedown", (event) => {
 			const target = event.target as HTMLElement | null;
-			const toggler = target?.closest(".tool-header, details.thinking > summary") as HTMLElement | null;
+			const toggler = target?.closest(".tool-toggle, details.thinking > summary") as HTMLElement | null;
 			if (!toggler) {
 				this.pendingSelection = null; // a click elsewhere is a new selection, not a restore
 				return;
@@ -286,7 +301,7 @@ export class Transcript {
 		this.scroller.addEventListener("toggle", () => this.restoreSelection(), true);
 		// .tool cards toggle a class in their own click handler; run after it.
 		this.scroller.addEventListener("click", (event) => {
-			if (!(event.target as HTMLElement | null)?.closest(".tool-header")) return;
+			if (!(event.target as HTMLElement | null)?.closest(".tool-toggle")) return;
 			setTimeout(() => this.restoreSelection(), 0);
 		}, true);
 	}
@@ -421,7 +436,16 @@ export class Transcript {
 		// and stopWorking() also kills the 1s timer whose row we just deleted.
 		this.streaming = false;
 		this.stopWorking();
-		this.optimisticText = null;
+		this.optimisticRows.clear();
+		this.userOrdinals = new WeakMap<object, number>();
+		this.nextUserOrdinal = 0;
+		for (const message of messages) {
+			if (message.role === "user") this.userOrdinals.set(message, this.nextUserOrdinal++);
+		}
+		// Changed-files state is scoped to the session on screen. A snapshot is the
+		// boundary between sessions (and is also used by restart), so retaining the
+		// previous thread's strip here would be a false claim about this thread.
+		this.renderChangedFiles([]);
 		// The jump pill lived inside the scroller we just emptied; keeping the
 		// detached node would leave the operator with no way back to the bottom
 		// for the rest of the session.
@@ -712,54 +736,82 @@ export class Transcript {
 	// Message rendering
 	// ---------------------------------------------------------------
 
-	/** Render the user's message immediately on send; deduped when the real
-	 * message_start event for it arrives shortly after. */
-	showOptimisticUserMessage(text: string, images: Array<{ data: string; mimeType: string }>): void {
+	/** Render a prompt immediately and retain the exact row until the host settles it. */
+	showOptimisticUserMessage(
+		clientRequestId: string,
+		text: string,
+		images: Array<{ data: string; mimeType: string }>,
+	): void {
 		if (!text && images.length === 0) return;
 		this.dismissWelcome();
 		const content = images.length > 0 ? buildContent(text, images) : text;
-		this.place(this.buildUserRow({ role: "user", content } as UserMessage));
+		// This ordinal is temporary: the durable ordinal is applied when the agent
+		// echoes the message. It still makes a just-sent row fork sensibly before
+		// that echo arrives.
+		const row = this.buildUserRow({ role: "user", content } as UserMessage, this.nextUserOrdinal + this.optimisticRows.size);
+		this.place(row);
 		this.hasContent = true;
-		this.optimisticText = text;
+		this.optimisticRows.set(clientRequestId, { clientRequestId, text, imageSignature: this.imageSignature(images), row });
 		// The operator just hit send — that is an explicit intent to follow along.
 		this.forceScrollToBottom();
 		this.updateJumpButton();
 	}
 
-	/** Forget the pending optimistic echo (rejected prompt, session change). */
-	clearOptimistic(): void {
-		this.optimisticText = null;
+	/** Remove the exact local echo for a rejected prompt without disturbing later sends. */
+	rejectOptimistic(clientRequestId?: string): boolean {
+		const pending = clientRequestId
+			? this.optimisticRows.get(clientRequestId)
+			: this.optimisticRows.size === 1
+				? this.optimisticRows.values().next().value
+				: undefined;
+		if (!pending) return false;
+		this.optimisticRows.delete(pending.clientRequestId);
+		if (this.pendingUserFooter && pending.row.contains(this.pendingUserFooter)) this.pendingUserFooter = null;
+		pending.row.remove();
+		if (!this.scroller.querySelector(".row, .tool, .system-note, .working-row, .retry-row, .spawned-card")) {
+			this.hasContent = false;
+			this.showWelcome();
+		}
+		this.updateJumpButton();
+		return true;
 	}
 
 	/**
-	 * Does this delivered user message echo the bubble we already drew?
-	 *
-	 * No wall clock: a steered or queued message is only injected at the next turn
-	 * boundary, which on a long tool call is minutes away — any timeout here shows
-	 * the operator their own message twice. The echo is consumed on the first
-	 * match instead.
+	 * Find the optimistic echo for a durable user message. No wall clock: a steered
+	 * or queued message can arrive minutes later, so confirmation is content-based.
 	 */
-	private matchesOptimistic(delivered: string): boolean {
-		const typed = this.optimisticText;
-		if (typed === null) return false;
-		if (delivered === typed) return true;
-		// The host appends editor selections to the prompt (composeMessageText:
-		// `<attachment …>` blocks, or a ` (path lines a-b)` reference), so the
-		// delivered text is never byte-identical — but the typed text stays its prefix.
-		if (typed.length === 0 || !delivered.startsWith(typed)) return false;
-		const appended = delivered.slice(typed.length);
-		return appended.startsWith("\n\n<attachment ") || appended.startsWith(" (");
+	private matchingOptimistic(message: UserMessage): OptimisticUserRow | undefined {
+		const delivered = this.userMessageText(message);
+		const imageSignature = this.userMessageImageSignature(message);
+		for (const pending of this.optimisticRows.values()) {
+			if (pending.imageSignature !== imageSignature) continue;
+			if (delivered === pending.text) return pending;
+			// The host appends editor selections to the prompt (composeMessageText:
+			// `<attachment …>` blocks, or a ` (path lines a-b)` reference), so the
+			// delivered text is not byte-identical — but the typed text stays its prefix.
+			if (pending.text.length === 0 || !delivered.startsWith(pending.text)) continue;
+			const appended = delivered.slice(pending.text.length);
+			if (appended.startsWith("\n\n<attachment ") || appended.startsWith(" (")) return pending;
+		}
+		return undefined;
 	}
 
 	private renderMessage(message: AgentMessage, isPartial: boolean): void {
 		const role = message.role;
 		if (role === "user") {
-			const text = this.userMessageText(message as UserMessage);
-			if (this.matchesOptimistic(text)) {
-				this.optimisticText = null;
-				return; // already rendered optimistically
+			const userMessage = message as UserMessage;
+			const ordinal = this.userMessageOrdinal(userMessage);
+			const pending = this.matchingOptimistic(userMessage);
+			if (pending) {
+				this.optimisticRows.delete(pending.clientRequestId);
+				this.deps.onOptimisticConfirmed?.(pending.clientRequestId);
+				if (pending.row.isConnected) {
+					pending.row.dataset.userOrdinal = String(ordinal);
+					this.markRowTimestamp(pending.row, this.messageTimestamp(userMessage));
+					return; // already rendered optimistically
+				}
 			}
-			this.place(this.buildUserRow(message as UserMessage));
+			this.place(this.buildUserRow(userMessage, ordinal));
 		} else if (role === "assistant") {
 			this.place(this.buildAssistantRow(message as AssistantMessage, isPartial));
 		} else if (role === "toolResult") {
@@ -816,8 +868,31 @@ export class Transcript {
 		if (ts != null) row.dataset.ts = String(ts);
 	}
 
-	private buildUserRow(message: UserMessage): HTMLElement {
+	private userMessageOrdinal(message: UserMessage): number {
+		const existing = this.userOrdinals.get(message);
+		if (existing !== undefined) return existing;
+		const ordinal = this.nextUserOrdinal++;
+		this.userOrdinals.set(message, ordinal);
+		return ordinal;
+	}
+
+	private imageSignature(images: Array<{ data: string; mimeType: string }>): string {
+		// JSON length-prefixing makes the sequence unambiguous without a lossy hash.
+		return images.map((image) => `${image.mimeType.length}:${image.mimeType}${image.data.length}:${image.data}`).join("");
+	}
+
+	private userMessageImageSignature(message: UserMessage): string {
+		if (!Array.isArray(message.content)) return "";
+		return this.imageSignature(
+			message.content
+				.filter((part) => part.type === "image")
+				.map((part) => ({ data: (part as { data: string }).data, mimeType: (part as { mimeType: string }).mimeType })),
+		);
+	}
+
+	private buildUserRow(message: UserMessage, ordinal: number): HTMLElement {
 		const row = el("div", "row row-user");
+		row.dataset.userOrdinal = String(ordinal);
 		const plainText = this.userMessageText(message);
 		const bubble = el("div", "bubble bubble-user");
 		if (typeof message.content === "string") {
@@ -868,9 +943,8 @@ export class Transcript {
 		forkBtn.appendChild(icon("fork", 11));
 		forkBtn.addEventListener("click", (event) => {
 			event.stopPropagation();
-			const users = Array.from(this.scroller.querySelectorAll(".row-user"));
-			const ordinal = users.indexOf(row);
-			if (ordinal >= 0) this.deps.onForkFromUser(ordinal);
+			const ordinal = Number(row.dataset.userOrdinal);
+			if (Number.isInteger(ordinal) && ordinal >= 0) this.deps.onForkFromUser(ordinal);
 		});
 		footer.append(copyBtn, forkBtn);
 		return footer;
@@ -1239,8 +1313,10 @@ export class Transcript {
 		}
 
 		const root = el("div", "tool");
-		const header = el("button", "tool-header");
-		header.title = "Expand tool details";
+		const header = el("div", "tool-header");
+		const toggle = el("button", "tool-toggle") as HTMLButtonElement;
+		toggle.title = "Expand tool details";
+		toggle.setAttribute("aria-expanded", "false");
 		const chevron = icon("chevron", 13);
 		chevron.classList.add("tool-chevron");
 		const statusDot = el("span", "tool-dot running");
@@ -1254,11 +1330,13 @@ export class Transcript {
 			event.stopPropagation();
 			copyToClipboard(this.buildToolCopy(id));
 		});
-		header.append(chevron, statusDot, nameEl, summary, pill, copyAllBtn);
+		toggle.append(chevron, statusDot, nameEl, summary, pill);
+		header.append(toggle, copyAllBtn);
 		const body = el("div", "tool-body");
 		root.append(header, body);
-		header.addEventListener("click", () => {
-			root.classList.toggle("open");
+		toggle.addEventListener("click", () => {
+			const open = root.classList.toggle("open");
+			toggle.setAttribute("aria-expanded", String(open));
 		});
 
 		const inputSection = el("div", "tool-section");

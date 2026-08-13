@@ -19,6 +19,7 @@ import * as path from "node:path";
 
 const PROTOCOL_NAME = "prime-agent.daemon";
 const PROTOCOL_VERSION = 7;
+const MAX_JSONL_FRAME_BYTES = 4 * 1024 * 1024;
 
 export interface DaemonHello {
 	socketPath?: string;
@@ -110,14 +111,22 @@ export class DaemonSidecar {
 	private nextIdValue = 1;
 	private readonly pending = new Map<string, Pending>();
 	private buffer = "";
-	private helloResolve: ((hello: DaemonHello) => void) | null = null;
+	/** The handshake belongs to one concrete socket, never to the next reconnect. */
+	private helloWait:
+		| {
+				socket: net.Socket;
+				resolve: (hello: DaemonHello) => void;
+				reject: (error: Error) => void;
+				timer: NodeJS.Timeout;
+		  }
+		| null = null;
 	hello: DaemonHello | null = null;
 	connected = false;
 	/** Diagnostic: number of parsed socket lines since attach (used by live-driver probes). */
 	traceCount = 0;
 	lastLineAtom = "";
-	/** Hook for EVERY raw socket line (diagnostic routing). */
-	onAnyLine: (line: string) => void = () => {};
+	/** Hook for every socket record's size, without exposing its private payload. */
+	onAnyLine: (byteLength: number) => void = () => {};
 	/** Hook for every non-response daemon message (session_event, session_status, ...). */
 	onEvent: (message: DaemonServerMessage) => void = () => {};
 	/** Hook when the socket closes so hosts can invalidate attached state. */
@@ -125,12 +134,16 @@ export class DaemonSidecar {
 
 	isSupported(): boolean {
 		if (!this.hello) return false;
-		const nameOk = !this.hello.protocol?.name || this.hello.protocol.name === PROTOCOL_NAME;
-		const versionOk = this.hello.protocol?.version == null || this.hello.protocol.version >= PROTOCOL_VERSION;
+		const nameOk = this.hello.protocol?.name === PROTOCOL_NAME;
+		const versionOk = typeof this.hello.protocol?.version === "number" && this.hello.protocol.version >= PROTOCOL_VERSION;
 		return nameOk && versionOk;
 	}
 
 	socketPath(): string {
+		// A private daemon socket lets integration tests (and isolated operator
+		// setups) avoid taking ownership of an unrelated default background daemon.
+		const configured = process.env.PRIME_AGENT_DAEMON_SOCKET?.trim();
+		if (configured) return configured;
 		if (os.platform() === "win32") return "\\\\.\\pipe\\prime-agent-daemon";
 		return path.join(os.tmpdir(), `prime-agent-${process.getuid?.() ?? "user"}`, "daemon.sock");
 	}
@@ -162,50 +175,137 @@ export class DaemonSidecar {
 		}
 		const socket = new net.Socket();
 		this.socket = socket;
+		this.connected = false;
+		this.hello = null;
+		this.buffer = "";
 		const helloWait = new Promise<DaemonHello>((resolve, reject) => {
-			this.helloResolve = resolve;
-			const timer = setTimeout(() => reject(new Error("daemon hello timed out")), timeoutMs);
-			this.helloResolve = (hello) => {
-				clearTimeout(timer);
-				resolve(hello);
-			};
+			const timer = setTimeout(() => this.rejectHello(socket, new Error("daemon hello timed out")), timeoutMs);
+			this.helloWait = { socket, resolve, reject, timer };
 		});
 		socket.setNoDelay(true);
-		socket.on("data", (chunk: Buffer) => {
-			this.buffer += chunk.toString("utf8");
+		// Node's decoder preserves a multi-byte UTF-8 character split across TCP
+		// packets; Buffer#toString on every packet does not.
+		socket.setEncoding("utf8");
+		socket.on("data", (chunk: string) => {
+			if (this.socket !== socket) return;
+			this.buffer += chunk;
 			let index = this.buffer.indexOf("\n");
 			while (index >= 0) {
 				const line = this.buffer.slice(0, index).trim();
 				this.buffer = this.buffer.slice(index + 1);
-				if (line) this.handleLine(line);
+				if (Buffer.byteLength(line, "utf8") > MAX_JSONL_FRAME_BYTES) {
+					this.rejectOversizedFrame(socket);
+					return;
+				}
+				if (line) this.handleLine(socket, line);
 				index = this.buffer.indexOf("\n");
 			}
+			// Apply the cap only to the residual unterminated record. A single TCP
+			// read can legitimately contain several complete frames whose aggregate
+			// size exceeds the per-frame ceiling.
+			if (Buffer.byteLength(this.buffer, "utf8") > MAX_JSONL_FRAME_BYTES) this.rejectOversizedFrame(socket);
 		});
-		socket.on("close", () => this.onSocketClosed());
+		socket.on("close", () => this.onSocketClosed(socket));
 		socket.on("error", () => {
 			/* errors surface through close/pending time-outs */
 		});
-		await new Promise<void>((resolve, reject) => {
-			const onErr = () => reject(new Error(`daemon socket unavailable at ${sockPath}`));
-			socket.once("error", onErr);
-			socket.connect({ path: sockPath }, () => {
-				socket.off("error", onErr);
-				resolve();
+		try {
+			const connectWait = new Promise<void>((resolve, reject) => {
+				let settled = false;
+				const cleanUp = (): void => {
+					socket.off("error", fail);
+					socket.off("close", fail);
+				};
+				const fail = (): void => {
+					if (settled) return;
+					settled = true;
+					cleanUp();
+					reject(new Error(`daemon socket unavailable at ${sockPath}`));
+				};
+				socket.once("error", fail);
+				socket.once("close", fail);
+				socket.connect({ path: sockPath }, () => {
+					if (settled) return;
+					settled = true;
+					cleanUp();
+					resolve();
+				});
 			});
-		});
-		this.hello = await helloWait;
-		if (!this.isSupported()) {
-			this.dispose();
-			throw new Error(
-				`daemon protocol mismatch: got ${this.hello.protocol?.name ?? "?"} v${this.hello.protocol?.version ?? "?"}, expected ${PROTOCOL_NAME} v${PROTOCOL_VERSION}+`,
-			);
+			const [, hello] = await Promise.all([connectWait, helloWait]);
+			if (this.socket !== socket) throw new Error("daemon socket was replaced during handshake");
+			this.hello = hello;
+			if (!this.isSupported()) {
+				const protocol = hello.protocol;
+				this.dispose();
+				throw new Error(
+					`daemon protocol mismatch: got ${protocol?.name ?? "?"} v${protocol?.version ?? "?"}, expected ${PROTOCOL_NAME} v${PROTOCOL_VERSION}+`,
+				);
+			}
+			this.connected = true;
+		} catch (error) {
+			this.rejectHello(socket, error instanceof Error ? error : new Error(String(error)));
+			if (this.socket === socket) {
+				this.socket = null;
+				this.connected = false;
+				this.hello = null;
+				this.buffer = "";
+				try {
+					socket.destroy();
+				} catch {
+					// already closed
+				}
+			}
+			throw error;
 		}
-		this.connected = true;
 	}
 
-	private onSocketClosed(): void {
+	private rejectOversizedFrame(socket: net.Socket): void {
+		if (this.socket !== socket) return;
+		this.buffer = "";
+		this.onSocketClosed(socket);
+		try {
+			socket.destroy(new Error("daemon frame exceeded 4 MiB"));
+		} catch {
+			// already closed
+		}
+	}
+
+	/** A non-object/non-JSON line invalidates the peer just like an oversized frame. */
+	private rejectMalformedFrame(socket: net.Socket): void {
+		if (this.socket !== socket) return;
+		this.buffer = "";
+		this.onSocketClosed(socket);
+		try {
+			socket.destroy(new Error("daemon sent a malformed JSONL record"));
+		} catch {
+			// already closed
+		}
+	}
+
+	private resolveHello(socket: net.Socket, hello: DaemonHello): void {
+		const wait = this.helloWait;
+		if (!wait || wait.socket !== socket) return;
+		this.helloWait = null;
+		clearTimeout(wait.timer);
+		wait.resolve(hello);
+	}
+
+	private rejectHello(socket: net.Socket, error: Error): void {
+		const wait = this.helloWait;
+		if (!wait || wait.socket !== socket) return;
+		this.helloWait = null;
+		clearTimeout(wait.timer);
+		wait.reject(error);
+	}
+
+	private onSocketClosed(socket: net.Socket): void {
+		if (this.socket !== socket) return;
+		this.socket = null;
 		this.connected = false;
+		this.hello = null;
+		this.buffer = "";
 		const error = new Error("daemon socket closed");
+		this.rejectHello(socket, error);
 		for (const [, pending] of this.pending) {
 			clearTimeout(pending.timer);
 			pending.reject(error);
@@ -214,22 +314,36 @@ export class DaemonSidecar {
 		this.onClose();
 	}
 
-	private handleLine(line: string): void {
+	private handleLine(socket: net.Socket, line: string): void {
+		if (this.socket !== socket) return;
 		this.traceCount += 1;
-		this.lastLineAtom = line.slice(0, 60);
-		this.onAnyLine(line.slice(0, 120));
+		// Keep diagnostics useful without retaining a fragment of prompts, tool
+		// output, or model responses in a long-lived public field.
+		this.lastLineAtom = "invalid";
+		this.onAnyLine(Buffer.byteLength(line, "utf8"));
 		let message: DaemonServerMessage;
 		try {
-			message = JSON.parse(line) as DaemonServerMessage;
+			const value: unknown = JSON.parse(line);
+			if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as { type?: unknown }).type !== "string") {
+				this.rejectMalformedFrame(socket);
+				return;
+			}
+			message = value as DaemonServerMessage;
 		} catch {
+			this.rejectMalformedFrame(socket);
 			return;
 		}
+		this.lastLineAtom = message.type;
 		if (message.type === "daemon_hello") {
-			this.helloResolve?.(message as unknown as DaemonHello);
+			this.resolveHello(socket, message as unknown as DaemonHello);
 			return;
 		}
-		if (message.type === "response" && typeof (message as { id?: unknown }).id === "string") {
-			const id = (message as unknown as { id: string }).id;
+		if (message.type === "response") {
+			const id = (message as { id?: unknown }).id;
+			if (typeof id !== "string" || typeof (message as { success?: unknown }).success !== "boolean") {
+				this.rejectMalformedFrame(socket);
+				return;
+			}
 			const pending = this.pending.get(id);
 			if (pending) {
 				this.pending.delete(id);
@@ -258,7 +372,8 @@ export class DaemonSidecar {
 	}
 
 	async request<T = unknown>(command: Record<string, unknown>, timeoutMs = 30_000): Promise<T> {
-		if (!this.connected || !this.socket) throw new Error("daemon sidecar is not connected");
+		const socket = this.socket;
+		if (!this.connected || !socket) throw new Error("daemon sidecar is not connected");
 		const id = this.nextId();
 		const line = `${JSON.stringify({
 			type: "command",
@@ -272,7 +387,19 @@ export class DaemonSidecar {
 				reject(new Error(`daemon command timed out: ${String(command.type)}`));
 			}, timeoutMs);
 			this.pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
-			this.socket?.write(line, "utf8");
+			if (this.socket !== socket || socket.destroyed) {
+				this.pending.delete(id);
+				clearTimeout(timer);
+				reject(new Error("daemon sidecar disconnected before the command could be sent"));
+				return;
+			}
+			try {
+				socket.write(line, "utf8");
+			} catch (error) {
+				this.pending.delete(id);
+				clearTimeout(timer);
+				reject(error instanceof Error ? error : new Error(String(error)));
+			}
 		});
 	}
 
@@ -349,13 +476,17 @@ export class DaemonSidecar {
 	}
 
 	dispose(): void {
+		const socket = this.socket;
+		this.socket = null;
+		this.connected = false;
+		this.hello = null;
+		this.buffer = "";
+		if (socket) this.rejectHello(socket, new Error("sidecar disposed"));
 		try {
-			this.socket?.destroy();
+			socket?.destroy();
 		} catch {
 			// ignore
 		}
-		this.socket = null;
-		this.connected = false;
 		for (const [, pending] of this.pending) {
 			clearTimeout(pending.timer);
 			pending.reject(new Error("sidecar disposed"));

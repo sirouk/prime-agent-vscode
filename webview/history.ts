@@ -141,16 +141,22 @@ export class HistoryView {
 
 	private currentId?: string;
 
-	private buildItem(session: RecentSession, showFolder: boolean): HTMLButtonElement {
-		const item = el("button", "history-item") as HTMLButtonElement;
+	private buildItem(session: RecentSession, showFolder: boolean): HTMLElement {
+		// Keep the row container non-interactive: the inline management controls and
+		// rename input must never become descendants of the resume control.
+		const item = el("div", "history-item");
 		item.title = session.cwd;
 		item.dataset.showFolder = showFolder ? "1" : "0";
 		const isCurrent = session.id === this.currentId;
 		if (isCurrent) item.classList.add("current");
 		const top = el("div", "history-item-top");
 		const name = session.name || session.firstPrompt || "(untitled session)";
-		top.appendChild(el("span", "history-item-name", isCurrent ? `${name} (current)` : name));
-		top.appendChild(
+		const resume = isCurrent ? el("div", "history-resume") : document.createElement("button");
+		resume.className = "history-resume";
+		resume.title = isCurrent ? `${name} (current session)` : `Resume ${name}`;
+		if (!isCurrent) resume.setAttribute("aria-label", resume.title);
+		resume.appendChild(el("span", "history-item-name", isCurrent ? `${name} (current)` : name));
+		resume.appendChild(
 			el(
 				"span",
 				"history-item-time",
@@ -164,7 +170,7 @@ export class HistoryView {
 			const run = el("span", "running-mark") as HTMLElement;
 			run.title = "Running right now";
 			run.appendChild(el("span", "running-dot"));
-			top.appendChild(run);
+			resume.appendChild(run);
 		}
 		const actions = el("div", "history-actions");
 		if (!isCurrent) {
@@ -218,7 +224,7 @@ export class HistoryView {
 			// two retire actions. Delete stays last: the furthest from a stray click.
 			actions.append(rename, archive, del);
 		}
-		top.appendChild(actions);
+		top.append(resume, actions);
 		item.appendChild(top);
 		// A row surfaced by a transcript hit shows the hit, so the operator can see
 		// why it matched instead of having to guess.
@@ -229,7 +235,15 @@ export class HistoryView {
 			if (sub) item.appendChild(el("div", "history-item-sub", sub));
 		}
 		if (!isCurrent) {
-			item.addEventListener("click", () => this.deps.onResume(session.path, session.id));
+			const resumeSession = (): void => this.deps.onResume(session.path, session.id);
+			resume.addEventListener("click", resumeSession);
+			// Preserve click-anywhere row behavior without stealing clicks intended
+			// for a nested action or rename input.
+			item.addEventListener("click", (event) => {
+				const target = event.target as HTMLElement | null;
+				if (target?.closest?.("button, input, select, textarea, a, [contenteditable='true']")) return;
+				resumeSession();
+			});
 		}
 		return item;
 	}
@@ -238,8 +252,11 @@ export class HistoryView {
 	private armRename(item: HTMLElement, session: RecentSession): void {
 		if (item.classList.contains("renaming") || item.classList.contains("confirming")) return;
 		item.classList.add("renaming");
-		const nameSpan = item.querySelector(".history-item-name") as HTMLElement | null;
-		if (!nameSpan) return;
+		const resume = item.querySelector(".history-resume") as HTMLElement | null;
+		if (!resume) {
+			item.classList.remove("renaming");
+			return;
+		}
 		const currentText = session.name || session.firstPrompt || "";
 		const input = document.createElement("input");
 		input.className = "history-rename-input";
@@ -247,7 +264,7 @@ export class HistoryView {
 		input.spellcheck = false;
 		const restore = (): void => {
 			item.classList.remove("renaming");
-			input.replaceWith(nameSpan);
+			input.replaceWith(resume);
 		};
 		input.addEventListener("keydown", (event) => {
 			event.stopPropagation();
@@ -261,7 +278,7 @@ export class HistoryView {
 			}
 		});
 		input.addEventListener("blur", () => restore());
-		nameSpan.replaceWith(input);
+		resume.replaceWith(input);
 		input.focus();
 		input.select();
 	}

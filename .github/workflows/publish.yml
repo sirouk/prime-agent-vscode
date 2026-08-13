@@ -1,6 +1,9 @@
 name: Publish extension
 
 on:
+  push:
+    branches: [master]
+  pull_request:
   release:
     types: [published]
   workflow_dispatch:
@@ -9,28 +12,44 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  verify:
     runs-on: ubuntu-latest
-    if: github.repository == 'sirouk/prime-agent-vscode'
-    # VSCE_PAT lives in the "CI" environment. Declaring it here is what grants
-    # this job access to that scope — without it, `secrets.VSCE_PAT` resolves to
-    # an empty string and the guard below stops the run. A repo-level secret of
-    # the same name still works through this declaration (environment secrets
-    # just take precedence), so either place to store it is fine.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Locked @vscode/vsce dependencies require Node 22 or newer.
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify build
+        run: |
+          npm run typecheck
+          npm test
+
+  publish:
+    needs: verify
+    if: github.event_name == 'release' && github.repository == 'sirouk/prime-agent-vscode'
+    runs-on: ubuntu-latest
+    # VSCE_PAT lives in the "CI" environment. Declaring it here grants this
+    # release-only job access without exposing deployment secrets to PR checks.
     environment: CI
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
       - name: Check the tag matches package.json
-        if: github.event_name == 'release'
         run: |
           tag="${GITHUB_REF_NAME#v}"
           pkg="$(node -p "require('./package.json').version")"
@@ -39,16 +58,6 @@ jobs:
             exit 1
           fi
           echo "Publishing version $pkg"
-
-      # `npm test` verbatim — one list, so CI and a contributor's terminal can
-      # never drift apart. `npm run test:live` (daemon-parity, host-e2e, smoke)
-      # and preview-shot are deliberately absent: they need a local prime-agent
-      # CLI and a browser, neither of which exists on a runner. release.sh runs
-      # both halves and remains the full gate.
-      - name: Verify build (npm test — the CI-runnable half of the release gate)
-        run: |
-          npx tsc --noEmit
-          npm test
 
       - name: Package the vsix
         run: |

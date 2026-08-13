@@ -159,6 +159,8 @@
         "primeAgent.command": {
           "type": "string",
           "default": "prime-agent",
+          "scope": "machine",
+          "ignoreSync": true,
           "description": "Command used to start the Prime Agent CLI. Set to an absolute path (e.g. /path/to/prime-agent.sh) when prime-agent is not on PATH."
         },
         "primeAgent.args": {
@@ -167,11 +169,15 @@
             "type": "string"
           },
           "default": [],
+          "scope": "machine",
+          "ignoreSync": true,
           "description": "Extra CLI arguments appended after `--mode rpc` (e.g. [\"--provider\", \"chutes\"])."
         },
         "primeAgent.model": {
           "type": "string",
           "default": "",
+          "scope": "machine",
+          "ignoreSync": true,
           "description": "Model passed as --model when the agent starts (provider/id pattern). Empty uses the default model."
         },
         "primeAgent.maxFileSearchResults": {
@@ -202,7 +208,7 @@
     "typecheck": "tsc --noEmit",
     "package": "node esbuild.config.mjs --production && npx @vscode/vsce package --no-dependencies",
     "smoke": "node test/smoke.mjs",
-    "test": "node test/activate.test.mjs && node test/webview.test.mjs && node test/thread-diffs.test.mjs && node test/export-md.test.mjs && node test/recent-sessions-tail.test.mjs",
+    "test": "node test/activate.test.mjs && node test/chat-view-message.test.mjs && node test/session-controller-boundary.test.mjs && node test/session-actions.test.mjs && node test/webview.test.mjs && node test/thread-diffs.test.mjs && node test/export-md.test.mjs && node test/recent-sessions-tail.test.mjs && node test/transport-regression.test.mjs",
     "test:live": "node esbuild.config.mjs && node test/daemon-parity.mjs --require-daemon && node test/host-e2e.mjs && node test/smoke.mjs",
     "pretest": "node esbuild.config.mjs",
     "presmoke": "node esbuild.config.mjs"
@@ -211,7 +217,7 @@
     "@types/node": "^22.10.5",
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.2.1",
-    "esbuild": "^0.24.2",
+    "esbuild": "^0.28.2",
     "happy-dom": "^20.11.1",
     "playwright": "^1.62.1",
     "typescript": "^5.9.2"

@@ -42,6 +42,8 @@ export class Dropdown {
 	private open = false;
 	private outsideHandler: (event: MouseEvent) => void;
 	private keyHandler: (event: KeyboardEvent) => void;
+	private readonly repositionHandler = (): void => this.position();
+	private readonly wheelHandler = (event: WheelEvent): void => event.stopPropagation();
 
 	constructor(private readonly anchor: HTMLElement, private readonly options: DropdownOptions = {}) {
 		this.root = el("div", "dropdown");
@@ -51,6 +53,8 @@ export class Dropdown {
 			}
 		};
 		this.keyHandler = (event) => this.onKey(event);
+		// The menu is reused between opens, so install this containment rule once.
+		this.root.addEventListener("wheel", this.wheelHandler, { passive: true });
 	}
 
 	isOpen(): boolean {
@@ -82,13 +86,16 @@ export class Dropdown {
 		}
 		this.root.appendChild(this.list);
 		this.refilter();
-		// Keep wheel gestures within the menu — no scroll-chaining into the transcript behind it.
-		this.root.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
-
-		this.anchor.appendChild(this.root);
+		// Portal outside the anchor control. Appending a menu with inputs and row
+		// buttons to a <button> makes invalid nested interactive content and breaks
+		// both keyboard navigation and screen-reader semantics.
+		document.body.appendChild(this.root);
+		this.position();
 		this.open = true;
+		this.anchor.setAttribute("aria-expanded", "true");
 		document.addEventListener("mousedown", this.outsideHandler, true);
 		document.addEventListener("keydown", this.keyHandler, true);
+		window.addEventListener("resize", this.repositionHandler);
 		if (this.input) this.input.focus();
 	}
 
@@ -101,8 +108,21 @@ export class Dropdown {
 			dbg.__dropdownTrace.push(new Error().stack?.split("\n").slice(1, 6).join(" < ") ?? "?");
 		}
 		this.root.remove();
+		this.anchor.setAttribute("aria-expanded", "false");
 		document.removeEventListener("mousedown", this.outsideHandler, true);
 		document.removeEventListener("keydown", this.keyHandler, true);
+		window.removeEventListener("resize", this.repositionHandler);
+	}
+
+	/** Position the portal just above its rail control, as the old child menu did. */
+	private position(): void {
+		const rect = this.anchor.getBoundingClientRect();
+		const margin = 8;
+		const width = Math.min(340, Math.max(240, this.root.offsetWidth || 240));
+		const left = Math.max(margin, Math.min(rect.left - 6, window.innerWidth - width - margin));
+		this.root.style.position = "fixed";
+		this.root.style.left = `${left}px`;
+		this.root.style.bottom = `${Math.max(margin, window.innerHeight - rect.top + margin)}px`;
 	}
 
 	private refilter(): void {
@@ -123,21 +143,32 @@ export class Dropdown {
 				lastSection = item.section;
 				this.list.appendChild(el("div", "dropdown-section", item.section));
 			}
-			const row = el("button", `dropdown-item${index === this.selected ? " selected" : ""}${item.current ? " current" : ""}${item.disabled ? " disabled" : ""}`);
+			const row = el("div", `dropdown-item${index === this.selected ? " selected" : ""}${item.current ? " current" : ""}${item.disabled ? " disabled" : ""}`);
+			const select = el("button", "dropdown-select") as HTMLButtonElement;
 			// Rows ellipsize inside a 340px menu; without this a long model id is
 			// unreadable and two region-prefixed variants look identical.
-			row.title = item.title ?? item.label;
+			select.title = item.title ?? item.label;
 			const main = el("span", "dropdown-label");
 			main.appendChild(el("span", "dropdown-text", item.label));
 			if (item.sub) main.appendChild(el("span", "dropdown-sub", item.sub));
-			row.appendChild(main);
-			if (item.right) row.appendChild(el("span", "dropdown-right", item.right));
+			select.appendChild(main);
+			if (item.right) select.appendChild(el("span", "dropdown-right", item.right));
+			row.appendChild(select);
 			item.accessory?.(row);
-			row.addEventListener("click", (event) => {
-				event.stopPropagation();
+			const activate = (): void => {
 				if (item.disabled) return;
 				this.hide();
 				item.onSelect();
+			};
+			select.addEventListener("click", (event) => {
+				event.stopPropagation();
+				activate();
+			});
+			// Keep the whole visual row clickable without nesting its accessory
+			// button inside the selection button.
+			row.addEventListener("click", (event) => {
+				if ((event.target as HTMLElement | null)?.closest("button")) return;
+				activate();
 			});
 			row.addEventListener("mousemove", () => {
 				if (this.selected !== index) {

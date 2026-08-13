@@ -12,7 +12,9 @@ const mk = (name, pass, detail = "") => ({ name, pass: !!pass, detail });
 
 async function verifyAttachmenu(page) {
 	const rail = ".composer-rail";
-	const dd = `${rail} .dropdown`;
+	// Dropdowns are portaled beside the rail rather than nested inside its
+	// button anchors, so the menu may contain inputs and action buttons safely.
+	const dd = ".dropdown";
 	const out = [];
 
 	const railBtns = await page.$$eval(`${rail} > .icon-btn`, (els) => els.map((e) => e.title));
@@ -51,7 +53,7 @@ async function verifyAttachmenu(page) {
 }
 
 async function verifyModelmenu2(page) {
-	const dd = ".rail-pill.model .dropdown";
+	const dd = ".dropdown";
 	const out = [];
 	out.push(mk("model dropdown opened via .rail-pill.model click", !!(await page.$(dd))));
 

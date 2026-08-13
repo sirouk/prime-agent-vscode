@@ -5,6 +5,8 @@
  */
 
 import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,7 +18,28 @@ const { SessionController } = require("./dist/controller.cjs");
 const { vscodeStub } = require("./test/vscode-stub.cjs");
 
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-host-e2e-"));
-process.env.PRIME_AGENT_ARGS = `--session-dir ${path.join(workdir, "sessions")}`;
+// The operator may have a live daemon from another CLI version. Exercise the
+// extension against a private socket so this test neither prompts to stop nor
+// touches that unrelated service. HOST_E2E_DAEMON_SOCKET remains an escape
+// hatch for diagnosing an externally managed daemon.
+const daemonSocket = process.env.HOST_E2E_DAEMON_SOCKET ?? path.join(workdir, "daemon.sock");
+let daemonProcess = null;
+if (!process.env.HOST_E2E_DAEMON_SOCKET) {
+	daemonProcess = spawn("prime-agent", ["--mode", "daemon", "--daemon-socket", daemonSocket], {
+		stdio: "ignore",
+		env: { ...process.env },
+	});
+	const deadline = Date.now() + 15_000;
+	while (!fs.existsSync(daemonSocket) && Date.now() < deadline && daemonProcess.exitCode === null) {
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	if (!fs.existsSync(daemonSocket)) {
+		try { daemonProcess.kill("SIGTERM"); } catch {}
+		throw new Error(`private daemon did not start at ${daemonSocket}`);
+	}
+}
+process.env.PRIME_AGENT_DAEMON_SOCKET = daemonSocket;
+process.env.PRIME_AGENT_ARGS = `--session-dir ${path.join(workdir, "sessions")} --daemon-socket ${daemonSocket}`;
 vscodeStub.workspace.workspaceFolders = [{ uri: { fsPath: workdir, scheme: "file" }, name: "e2e", index: 0 }];
 
 let failed = 0;
@@ -240,6 +263,14 @@ try {
 		}
 	}
 	controller.dispose();
+	if (daemonProcess?.exitCode === null) {
+		try {
+			daemonProcess.kill("SIGTERM");
+			await Promise.race([once(daemonProcess, "exit"), sleep(2_000)]);
+		} catch {
+			// Best effort: this socket and process belong only to the temporary test.
+		}
+	}
 	fs.rmSync(workdir, { recursive: true, force: true });
 }
 

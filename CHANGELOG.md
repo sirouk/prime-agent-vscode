@@ -13,6 +13,10 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- Hardened the extension boundary and session lifecycle: webview messages now use host-issued session and child capabilities; workspace links cannot expose files outside the selected folder; malformed or oversized daemon/RPC frames fail safely; image and prompt payloads are bounded; and sensitive command/prompt data is no longer logged by default.
+- Fixed live-session correctness across restarts, reconnects, nested subagent browsing, history actions, observing, and rapid navigation. The visible transcript, controls, status, child strip, exports, model pickers, and optimistic prompt rows now stay bound to the session the operator is actually viewing.
+- Made release and packaging gates portable and complete, including Node 22 CI, portable build revisions, production package checks, accessibility-safe webview controls, and focused host/transport regressions.
+
 ## [1.0.8]
 
 - Long threads open instantly and stay light. Only the newest ~150 messages are built on open,

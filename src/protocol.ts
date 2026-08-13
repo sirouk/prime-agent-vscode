@@ -159,8 +159,10 @@ export interface RpcSessionState {
 export interface SessionChild {
 	/** bare id (uuid or sub-xxxx) for display */
 	id: string;
-	/** daemon attach target (12-char active id, or the id when resident) */
+	/** daemon attach target (12-char active id, or the id when resident); display only. */
 	activeSessionId: string;
+	/** Opaque host-issued capability required to browse this rendered child. */
+	browseRef?: string;
 	name?: string;
 	runtimeKind?: string;
 	rlmDepth?: number;
@@ -244,6 +246,8 @@ export interface PromptPayload {
 	selections: SelectionAttachment[];
 	/** delivery behavior while the agent is streaming */
 	streamingBehavior: "steer" | "followUp";
+	/** Correlates an optimistic webview row with its eventual transport verdict. */
+	clientRequestId?: string;
 }
 
 export type WebviewToHost =
@@ -262,7 +266,7 @@ export type WebviewToHost =
 	| { type: "searchHistory"; query: string }
 	| { type: "setModel"; provider: string; modelId: string }
 	| { type: "setThinkingLevel"; level: string }
-	| { type: "switchSession"; path: string; sessionId?: string }
+	| { type: "switchSession"; path: string; sessionId: string }
 	| { type: "stopObserving" }
 	| { type: "deleteSession"; path: string; sessionId: string }
 	| { type: "searchFiles"; query: string; requestId: number }
@@ -274,7 +278,7 @@ export type WebviewToHost =
 	| { type: "pickModel" }
 	| { type: "pickThinkingLevel" }
 	| { type: "toggleFavoriteModel"; provider: string; modelId: string }
-	| { type: "browseChild"; activeSessionId: string; parentSessionId?: string }
+	| { type: "browseChild"; browseRef: string }
 	| { type: "backToParent" }
 	| { type: "forkFromUser"; ordinal: number }
 	| { type: "copyConversation" }
@@ -283,7 +287,7 @@ export type WebviewToHost =
 	| { type: "renameHistorySession"; path: string; sessionId: string; name: string }
 	| { type: "stopSession"; path: string; sessionId: string }
 	| { type: "archiveSession"; path: string; sessionId: string }
-	| { type: "draftChanged"; text: string }
+	| { type: "draftChanged"; text: string; sessionId: string }
 	| { type: "setCompactThreshold"; percent: number | null }
 	| { type: "openExternal"; url: string };
 
@@ -350,7 +354,7 @@ export type HostToWebview =
 			steerDefault?: "steer" | "followUp";
 		}
 	| { type: "favorites"; favorites: ModelRef[] }
-	| { type: "sessionChildren"; children: SessionChild[]; parent?: SessionChild; siblings?: SessionChild[]; viewedActiveSessionId?: string; spawned?: Array<{ activeSessionId: string; name?: string; created?: string }> }
+	| { type: "sessionChildren"; children: SessionChild[]; parent?: SessionChild; siblings?: SessionChild[]; viewedActiveSessionId?: string; spawned?: Array<{ activeSessionId: string; browseRef?: string; name?: string; created?: string }> }
 	| { type: "installPrompt"; url: string; reason: string }
 	| ThreadDiffsMessage
 	| { type: "draft"; text: string }
@@ -362,7 +366,7 @@ export type HostToWebview =
 	| { type: "history"; sessions: RecentSession[] }
 	| { type: "showHistory" }
 	| { type: "promptAccepted"; kind: "prompt" | "steer" | "followUp" }
-	| { type: "promptRejected"; error: string }
+	| { type: "promptRejected"; error: string; clientRequestId?: string }
 	| { type: "notice"; level: "info" | "warning" | "error"; text: string }
 	| { type: "uiState"; statusText?: string; title?: string }
 	| { type: "fileSearchResults"; requestId: number; files: FileSearchItem[] }
@@ -403,7 +407,7 @@ export interface ThreadDiffHunk {
 }
 
 export interface ThreadDiffFile {
-	/** Workspace-relative path when resolvable, absolute otherwise. */
+	/** Workspace-relative path, validated by the extension host. */
 	path: string;
 	/** Source of the most recent recorded change. */
 	viaSource: ThreadDiffSource;

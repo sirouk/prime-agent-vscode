@@ -39,6 +39,14 @@ function hostMessage(data) {
 	window.dispatchEvent(new window.MessageEvent("message", { data }));
 }
 
+function requestImageFromPicker() {
+	const attach = [...document.querySelectorAll(".composer-rail .icon-btn")].find((button) => button.title.startsWith("Attach"));
+	attach.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	const imageItem = [...document.querySelectorAll(".dropdown-item")].find((item) => item.textContent.includes("Image…"));
+	imageItem.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	return posted.filter((message) => message.type === "pickImage").at(-1);
+}
+
 const code = fs.readFileSync(new URL("../media/main.js", import.meta.url), "utf8");
 window.eval(code);
 
@@ -54,6 +62,8 @@ check("splash shows the Prime Agent mark and name",
 	!!splash?.querySelector('svg[viewBox="0 0 178 178"]') && document.querySelector(".boot-splash-name")?.textContent === "Prime Agent");
 check("splash says what it is waiting for", (document.querySelector(".boot-splash-sub")?.textContent ?? "").includes("connecting"),
 	document.querySelector(".boot-splash-sub")?.textContent ?? "<none>");
+hostMessage({ type: "uiState", title: "early agent title", statusText: "warming up" });
+check("uiState title paints before the first status snapshot", document.querySelector(".session-title")?.textContent === "early agent title");
 
 const baseStatus = {
 	connected: true, streaming: false, compacting: false, retrying: false, restoring: false,
@@ -136,6 +146,8 @@ check("shell copy carries the output too", clipboard.includes("done"), JSON.stri
 
 // #20: an edit card copies its diff, and its output exactly once
 const editCard = [...scroller.querySelectorAll(".tool")].find((t) => t.dataset.toolName === "edit");
+check("tool copy is a sibling of the expandable tool control",
+	!!editCard?.querySelector(".tool-header > .tool-toggle + .tool-copy-all") && !editCard?.querySelector(".tool-toggle .tool-copy-all"));
 clipboard = "";
 editCard.querySelector(".tool-copy-all").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 await new Promise((r) => setTimeout(r, 0));
@@ -244,6 +256,10 @@ check("model menu has search", !!dropdown.querySelector(".dropdown-search"));
 check("favorites section present", [...document.querySelectorAll(".dropdown-section")].some((s) => s.textContent === "Favorites"));
 check("model menu items only (no thinking section)", document.querySelectorAll(".dropdown-item").length === 3,
 	`${document.querySelectorAll(".dropdown-item").length} items`);
+check("dropdown is portaled outside its button anchor", !modelBtn.contains(dropdown));
+check("open model menu contains no nested native controls",
+	document.querySelectorAll("button button, button input, button select, button textarea").length === 0,
+	[...document.querySelectorAll("button button, button input, button select, button textarea")].map((node) => node.outerHTML).join("\n"));
 posted.length = 0;
 // toggle favorite on the gpt-5 row
 const gptRow = [...document.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("gpt-5"));
@@ -354,7 +370,7 @@ check("subagents strip hidden with no children", !document.querySelector(".subag
 hostMessage({
 	type: "sessionChildren",
 	children: [
-		{ id: "019fdaa1-0000", activeSessionId: "abcdef123450", name: "verify-threads", runtimeKind: "subagent", rlmDepth: 1, isStreaming: true, attachedClients: 0 },
+		{ id: "019fdaa1-0000", activeSessionId: "abcdef123450", browseRef: "browse-verify-threads", name: "verify-threads", runtimeKind: "subagent", rlmDepth: 1, isStreaming: true, attachedClients: 0 },
 		{ id: "019fdaa2-0001", activeSessionId: "abcdef123451", name: "audit-style", runtimeKind: "subagent", rlmDepth: 1, isStreaming: false, attachedClients: 1 },
 	],
 });
@@ -367,7 +383,7 @@ check("two subagent rows", rows.length === 2);
 check("active badge on streaming child", [...rows].some((r) => r.querySelector(".subagent-badge")?.textContent === "active"));
 posted.length = 0;
 [...rows].find((r) => r.textContent.includes("verify-threads")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("browse posts browseChild", posted.some((m) => m.type === "browseChild" && m.activeSessionId === "abcdef123450"));
+check("browse posts the host-issued child reference", posted.some((m) => m.type === "browseChild" && m.browseRef === "browse-verify-threads"));
 // host confirms the browse with a parent context: back-row appears and is clickable.
 // The viewed subagent stays in the list — leaving it out is what made the count
 // drop by one and left the green "viewing" highlight with nothing to land on.
@@ -490,6 +506,10 @@ check("tick returns to the agent default", tickReset?.style.left === "94%" && !t
 check("reset keeps the popover open", flyout.className.includes("visible"), flyout.className);
 flyout.closest(".context-meter")?.classList.remove("visible");
 document.body.click();
+// A later status without an agent default is a new session's truth, not an
+// instruction to keep painting the previous session's 94% tick.
+hostMessage({ type: "status", status: { ...baseStatus, compactDefaultPercent: null, compactThresholdPercent: null } });
+check("missing compact default clears the previous session tick", !meter.querySelector(".context-tick"));
 
 // --- install prompt banner ---
 check("install banner hidden initially", !document.querySelector(".install-banner.visible"));
@@ -507,13 +527,13 @@ hostMessage({
 	children: [
 		{ id: "sub-a", activeSessionId: "aaaa1111", name: "verify-threads", runtimeKind: "subagent", created: "2026-08-07T15:00:00Z", isStreaming: true, attachedClients: 0, rlmDepth: 1 },
 	],
-	spawned: [{ activeSessionId: "aaaa1111", name: "verify-threads", created: "2026-08-07T15:00:00Z" }],
+	spawned: [{ activeSessionId: "aaaa1111", browseRef: "browse-spawn-verify", name: "verify-threads", created: "2026-08-07T15:00:00Z" }],
 });
 const spawnCard = document.querySelector(".spawned-card");
 check("spawn card visible with name", !!spawnCard && spawnCard.textContent.includes("Subagent spawned — verify-threads"), spawnCard?.textContent ?? "");
 posted.length = 0;
 spawnCard.querySelector(".spawned-view").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("spawn card click posts browseChild", posted.some((m) => m.type === "browseChild" && m.activeSessionId === "aaaa1111"));
+check("spawn card click posts its host-issued child reference", posted.some((m) => m.type === "browseChild" && m.browseRef === "browse-spawn-verify"));
 // seeded baseline (second payload): ended child gets NO card at all; running one keeps theirs
 hostMessage({
 	type: "sessionChildren",
@@ -575,6 +595,7 @@ hostMessage({
 });
 const runRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("live worker"));
 check("running row shows the animated mark", !!runRow.querySelector(".running-dot"));
+check("history actions are siblings of its resume control", !!runRow.querySelector(".history-item-top > .history-resume + .history-actions") && !runRow.querySelector(".history-resume button"));
 const idleRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("quiet archive"));
 check("idle row has no running mark", !idleRow.querySelector(".running-dot"));
 const actTitles = [...runRow.querySelectorAll(".history-action")].map((b) => b.title);
@@ -603,6 +624,9 @@ titleInput.value = "shiny-browser-app";
 titleInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 check("enter posts renameSession", posted.some((m) => m.type === "renameSession" && m.name === "shiny-browser-app"));
 check("input restores to the span after commit", !!document.querySelector(".session-title-wrap .session-title"));
+hostMessage({ type: "uiState", title: "title supplied by agent" });
+check("uiState title updates the header", document.querySelector(".session-title")?.textContent === "title supplied by agent",
+	document.querySelector(".session-title")?.textContent ?? "<none>");
 
 // --- history row pencil rename ---
 posted.length = 0;
@@ -612,6 +636,7 @@ check("history row has pencil action", !!pencil);
 pencil.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const renameInput = hRow.querySelector(".history-rename-input");
 check("history rename input appears", !!renameInput);
+check("history rename input is not inside a button", !renameInput.closest("button"));
 renameInput.value = "local-chat-updated";
 renameInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 check("enter posts renameHistorySession", posted.some((m) => m.type === "renameHistorySession" && m.sessionId === "hist-a" && m.name === "local-chat-updated"), "payload=" + JSON.stringify(posted.filter((m) => m.type === "renameHistorySession")));
@@ -687,6 +712,19 @@ const reqLic = posted.filter((m) => m.type === "searchFiles").at(-1);
 hostMessage({ type: "fileSearchResults", requestId: reqLic.requestId, files: [{ path: "LICENSE", isDir: false }] });
 [...document.querySelectorAll(".ac-item")][0].dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true }));
 check("extensionless mention pilled once accepted", [...document.querySelectorAll(".composer-mirror .mm")].some((m) => m.textContent === "@LICENSE"), textarea.value);
+// A workspace filename is host input. Quotes in an accepted path must not end
+// the mirror's data-path attribute when its highlighted HTML is rebuilt.
+posted.length = 0;
+textarea.value = "@quoted";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+const reqQuoted = posted.filter((m) => m.type === "searchFiles").at(-1);
+const quotedPath = 'quoted" data-injected="yes';
+hostMessage({ type: "fileSearchResults", requestId: reqQuoted.requestId, files: [{ path: quotedPath, isDir: false }] });
+document.querySelector(".ac-item").dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true }));
+const quotedMention = document.querySelector(".composer-mirror .mm");
+check("quoted mention keeps its complete path in data-path", quotedMention?.dataset.path === quotedPath, quotedMention?.outerHTML ?? "<none>");
+check("quoted mention cannot inject a mirror attribute", !quotedMention?.hasAttribute("data-injected"), quotedMention?.outerHTML ?? "<none>");
 textarea.value = "look at @.github/workflows/publish.yml now";
 textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
 textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
@@ -726,6 +764,58 @@ check("draft restored into the composer", textarea.value === "remember to check 
 hostMessage({ type: "draft", text: "" });
 check("empty draft clears the box so it can't follow into the next thread", textarea.value === "", textarea.value);
 
+// --- A host-confirmed session boundary owns the entire unsent composer state.
+// A status can arrive ahead of its replacement snapshot, so exercise both
+// message shapes. No stale draft timer, optimistic rejection, attachment, picker,
+// or file-search response may cross from A into B/C.
+const boundaryStatusA = { ...baseStatus, sessionId: "session-boundary-a", sessionName: "boundary A" };
+const boundaryStatusB = { ...baseStatus, sessionId: "session-boundary-b", sessionName: "boundary B" };
+const boundaryStatusC = { ...baseStatus, sessionId: "session-boundary-c", sessionName: "boundary C" };
+hostMessage({ type: "status", status: boundaryStatusA });
+posted.length = 0;
+textarea.value = "old optimistic prompt";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const oldSessionPrompt = posted.find((m) => m.type === "prompt");
+textarea.value = "@old-session-file";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+const oldSessionSearch = posted.filter((m) => m.type === "searchFiles").at(-1);
+hostMessage({ type: "fileSearchResults", requestId: oldSessionSearch.requestId, files: [{ path: "src/old-session.ts", isDir: false }] });
+const oldSessionImageRequest = requestImageFromPicker();
+hostMessage({ type: "imagePicked", requestId: oldSessionImageRequest.requestId, images: [{ data: "aGk=", mimeType: "image/png", name: "old-session.png" }] });
+hostMessage({ type: "insertSelection", selection: { path: "src/old-session.ts", startLine: 1, endLine: 2, text: "old", languageId: "typescript" } });
+const boundaryModelBtn = document.querySelector(".rail-pill.model");
+boundaryModelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("session-boundary setup has stale chips, autocomplete, and a picker", document.querySelectorAll(".composer-chips .compose-chip").length === 2 && document.querySelector(".autocomplete.visible") && document.querySelector(".dropdown"));
+hostMessage({ type: "status", status: boundaryStatusB });
+check("status boundary clears unsent text and attachments", textarea.value === "" && document.querySelectorAll(".composer-chips .compose-chip").length === 0,
+	`text=${JSON.stringify(textarea.value)} chips=${document.querySelectorAll(".composer-chips .compose-chip").length}`);
+check("status boundary closes stale autocomplete and picker", !document.querySelector(".autocomplete.visible") && !document.querySelector(".dropdown"));
+hostMessage({ type: "imagePicked", requestId: oldSessionImageRequest.requestId, images: [{ data: "aGk=", mimeType: "image/png", name: "stale-session.png" }] });
+check("old image picker result is ignored after a session boundary", document.querySelectorAll(".composer-chips .compose-chip.image").length === 0);
+hostMessage({ type: "fileSearchResults", requestId: oldSessionSearch.requestId, files: [{ path: "src/stale-response.ts", isDir: false }] });
+check("old file-search result is ignored after status boundary", !document.querySelector(".autocomplete.visible") && !document.querySelector(".ac-item"));
+hostMessage({ type: "promptRejected", error: "old session rejected", clientRequestId: oldSessionPrompt?.payload?.clientRequestId });
+check("old optimistic rejection cannot restore a draft into the new session", textarea.value === "", textarea.value);
+await new Promise((resolve) => setTimeout(resolve, 350));
+check("cancelled old draft debounce cannot write into the new session", !posted.some((m) => m.type === "draftChanged" && m.text === "@old-session-file"), JSON.stringify(posted.filter((m) => m.type === "draftChanged")));
+
+textarea.value = "@snapshot-session-file";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+const snapshotSessionSearch = posted.filter((m) => m.type === "searchFiles").at(-1);
+hostMessage({ type: "fileSearchResults", requestId: snapshotSessionSearch.requestId, files: [{ path: "src/snapshot-session.ts", isDir: false }] });
+const snapshotImageRequest = requestImageFromPicker();
+hostMessage({ type: "imagePicked", requestId: snapshotImageRequest.requestId, images: [{ data: "aGk=", mimeType: "image/png", name: "snapshot-session.png" }] });
+hostMessage({ type: "insertSelection", selection: { path: "src/snapshot-session.ts", startLine: 3, endLine: 4, text: "snapshot", languageId: "typescript" } });
+boundaryModelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+hostMessage({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" }, status: boundaryStatusC });
+check("snapshot boundary clears all composer-local session state", textarea.value === "" && document.querySelectorAll(".composer-chips .compose-chip").length === 0 && !document.querySelector(".autocomplete.visible") && !document.querySelector(".dropdown"));
+hostMessage({ type: "fileSearchResults", requestId: snapshotSessionSearch.requestId, files: [{ path: "src/stale-snapshot-response.ts", isDir: false }] });
+check("old file-search result is ignored after snapshot boundary", !document.querySelector(".autocomplete.visible") && !document.querySelector(".ac-item"));
+
 // --- paste image on a text-only model shows a composer hint ---
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 posted.length = 0;
@@ -743,12 +833,16 @@ check("paste did not post a prompt", !posted.some((m) => m.type === "prompt"));
 
 // --- imagePicked on a text-only model is refused with a hint; on vision it attaches ---
 posted.length = 0;
-hostMessage({ type: "imagePicked", images: [{ data: "aGk=", mimeType: "image/png", name: "pic.png" }] });
+hostMessage({ type: "status", status: { ...baseStatus } });
+const textOnlyImageRequest = requestImageFromPicker();
+hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
+hostMessage({ type: "imagePicked", requestId: textOnlyImageRequest.requestId, images: [{ data: "aGk=", mimeType: "image/png", name: "pic.png" }] });
 check("image pick refused on text-only model", document.querySelectorAll(".composer-chips .compose-chip.image").length === 0);
 check("refusal hint visible", pasteHint.classList.contains("visible") && pasteHint.textContent.includes("text-only"), pasteHint.textContent);
 // switch back to a vision model: the chip now attaches
 hostMessage({ type: "status", status: { ...baseStatus } });
-hostMessage({ type: "imagePicked", images: [{ data: "aGk=", mimeType: "image/png", name: "pic.png" }] });
+const visionImageRequest = requestImageFromPicker();
+hostMessage({ type: "imagePicked", requestId: visionImageRequest.requestId, images: [{ data: "aGk=", mimeType: "image/png", name: "pic.png" }] });
 check("image chip rendered on vision model", document.querySelectorAll(".composer-chips .compose-chip.image").length === 1);
 // then switching to a text-only model strips + warns on send
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
@@ -762,6 +856,17 @@ check("send guard hint visible", pasteHint.classList.contains("visible") && past
 	pasteHint.textContent);
 check("chips cleared after guarded send", document.querySelectorAll(".composer-chips .compose-chip").length === 0);
 check("optimistic bubble has no image strip", !document.querySelector(".bubble-images"));
+// Reattach one image, then prove the guard does not turn an image-only send on
+// a text-only model into an empty prompt.
+hostMessage({ type: "status", status: { ...baseStatus } });
+const onlyImageRequest = requestImageFromPicker();
+hostMessage({ type: "imagePicked", requestId: onlyImageRequest.requestId, images: [{ data: "aGk=", mimeType: "image/png", name: "only-image.png" }] });
+hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
+posted.length = 0;
+textarea.value = "";
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("text-only image-only send does not post an empty prompt", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted));
+check("image-only guard clears the unusable chip", document.querySelectorAll(".composer-chips .compose-chip.image").length === 0);
 hostMessage({ type: "status", status: { ...baseStatus } });
 
 // --- @-mention chips in user bubbles ---
@@ -781,6 +886,53 @@ posted.length = 0;
 chips[0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const openFileMsg = posted.find((m) => m.type === "openFile");
 check("chip click posts openFile", !!openFileMsg && openFileMsg.path === "src/a.ts", JSON.stringify(openFileMsg));
+
+// --- full-history user ordinals survive transcript windowing, and snapshot
+// boundaries clear stale changed-file state from the session that just left. ---
+hostMessage({ type: "changedFiles", files: ["src/from-old-session.ts"] });
+check("changed-files strip is visible before a replacement snapshot", document.querySelector(".changed-files").classList.contains("visible"));
+const longMessages = Array.from({ length: 100 }, (_, index) => [
+	{ role: "user", content: `question ${index}` },
+	{ role: "assistant", model: "kimi", content: [{ type: "text", text: `answer ${index}` }] },
+]).flat();
+hostMessage({
+	type: "snapshot",
+	messages: longMessages,
+	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
+	status: baseStatus,
+});
+check("replacement snapshot clears stale changed-files strip", !document.querySelector(".changed-files").classList.contains("visible"));
+const windowedUserRows = [...scroller.querySelectorAll(".row-user")];
+check("long snapshot renders a bounded user window", windowedUserRows.length < 100 && windowedUserRows.length > 0, String(windowedUserRows.length));
+posted.length = 0;
+const lastWindowedFork = [...(windowedUserRows.at(-1)?.querySelectorAll(".uf-icon") ?? [])].find((button) => button.title === "Fork the session starting from this message");
+lastWindowedFork?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("fork uses the full-session user ordinal after windowing",
+	posted.some((m) => m.type === "forkFromUser" && m.ordinal === 99), JSON.stringify(posted));
+
+// --- Prompt rejection must remove only the exact optimistic bubble. Multiple
+// queued sends can be settled out of order, so text alone is not a safe key. ---
+hostMessage({ type: "snapshot", messages: [], state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" }, status: baseStatus });
+posted.length = 0;
+textarea.value = "first optimistic prompt";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const firstOptimisticPrompt = posted.find((m) => m.type === "prompt");
+textarea.value = "second optimistic prompt";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const secondOptimisticPrompt = posted.filter((m) => m.type === "prompt").at(-1);
+check("separate sends carry separate client request ids",
+	!!firstOptimisticPrompt?.payload?.clientRequestId &&
+		firstOptimisticPrompt?.payload?.clientRequestId !== secondOptimisticPrompt?.payload?.clientRequestId,
+	JSON.stringify(posted.filter((m) => m.type === "prompt").map((m) => m.payload.clientRequestId)));
+check("two optimistic rows render before either verdict", scroller.querySelectorAll(".row-user").length === 2, String(scroller.querySelectorAll(".row-user").length));
+hostMessage({ type: "promptRejected", error: "transport disconnected", clientRequestId: firstOptimisticPrompt?.payload?.clientRequestId });
+check("rejection removes the exact optimistic row", !scroller.textContent.includes("first optimistic prompt") && scroller.textContent.includes("second optimistic prompt"), scroller.textContent);
+check("rejection restores the rejected draft when no newer draft exists", textarea.value === "first optimistic prompt", textarea.value);
+textarea.value = "";
+hostMessage({ type: "event", event: { type: "message_start", message: { role: "user", content: "second optimistic prompt" } } });
+check("confirmed second prompt does not duplicate its optimistic row", scroller.querySelectorAll(".row-user").length === 1, String(scroller.querySelectorAll(".row-user").length));
 
 // --- history delete: inline confirm posts deleteSession ---
 const historyBtnAgain = [...document.querySelectorAll(".icon-btn")].find((b) => b.title === "Sessions in this workspace");
@@ -884,11 +1036,16 @@ const tdPaths = [...document.querySelectorAll(".td-path")].map((n) => n.textCont
 check("expanded list shows the changed files", tdPaths.join("|") === "src/a.ts|src/b.ts", tdPaths.join("|"));
 check("subagent named on the row it edited", [...document.querySelectorAll(".td-file")][1].textContent.includes("verify-vault"));
 check("coverage footnote states what the panel cannot show", (document.querySelector(".td-foot")?.textContent ?? "").includes("changed-files strip"));
-[...document.querySelectorAll(".td-row")][0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+[...document.querySelectorAll(".td-toggle")][0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const tdDetail = document.querySelector(".td-detail");
 check("hunk lines render red/green", tdDetail.querySelectorAll(".diff-line.del").length === 1 && tdDetail.querySelectorAll(".diff-line.add").length === 2);
 const byLabels = [...tdDetail.querySelectorAll(".td-by")].map((n) => n.textContent);
 check("a file two agents touched attributes every block", byLabels.join("|") === "this session|subagent verify-vault", byLabels.join("|"));
+check("thread-diff file action is separate from its disclosure control",
+	!!document.querySelector(".td-row > .td-toggle + .td-open") && !document.querySelector(".td-toggle .td-open"));
+check("rendered webview has no nested native interactive controls",
+	document.querySelectorAll("button button, button input, button select, button textarea").length === 0,
+	[...document.querySelectorAll("button button, button input, button select, button textarea")].map((node) => node.outerHTML).join("\n"));
 
 // --- C12: the two links the operator asked for, and the butterfly on the entry ---
 posted.length = 0;

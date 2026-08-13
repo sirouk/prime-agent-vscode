@@ -12,3 +12,4 @@ test/smoke.mjs
 test/smoke.mjs.map
 
 test/preview-*.png
+test/e2e-shots/

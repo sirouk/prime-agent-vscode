@@ -6,11 +6,13 @@
 # Mirrors the chutes-dropzone release discipline, adapted for this repo:
 # - repo/branch/remote checks (must be on master, tree clean, remote in sync)
 # - tag proposal from prior vX.Y.Z tags (+optional override)
-# - version consistency: package.json is bumped to the tag and the [Unreleased]
-#   changelog entries are promoted into a [X.Y.Z] section
+# - version consistency: package.json and package-lock.json are bumped to the
+#   tag and the [Unreleased] changelog entries are promoted into a [X.Y.Z]
+#   section
 # - FULL verification battery before anything is allowed to publish:
-#     tsc, build, webview harness, export-md, recent-sessions, activation,
-#     host e2e, smoke, screenshot matrix (each must pass)
+#     tsc, build, activation, webview, thread-diffs, export-md,
+#     recent-sessions, daemon parity, host e2e, smoke, screenshot matrix
+#     (each must pass)
 # - package the .vsix via `npm run package`
 # - commit release commit, tag, push master+tag, publish GitHub release with the vsix
 #
@@ -26,7 +28,7 @@ cd "$SCRIPT_DIR"
 
 ALLOW_NON_MASTER="${ALLOW_NON_MASTER:-0}"
 # The script bumps package.json to the chosen tag by design; set this to 0 to
-# demand the bump was made by hand first.
+# demand the package metadata bump was made by hand first.
 ALLOW_VERSION_BUMP="${ALLOW_VERSION_BUMP:-1}"
 
 REQUIRED_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo master)"
@@ -83,11 +85,20 @@ preferred_remote() {
 # missing repo secret is visible before the release is cut, not after it red-Xes.
 repo_secret_state() {
     have gh || { printf 'gh is not installed, so this run cannot check it'; return; }
-    local names
+    local names environment_names
     names="$(gh secret list --json name -q '.[].name' 2>/dev/null || true)"
-    if [ -z "$names" ]; then printf 'this run could not read the repo secrets'; return; fi
     if printf '%s\n' "$names" | grep -qx VSCE_PAT; then
         printf 'VSCE_PAT repo secret is set'
+        return
+    fi
+    # publish.yml deliberately scopes VSCE_PAT to the CI environment so pull
+    # requests cannot access it. Check that scope too; otherwise the release
+    # plan would incorrectly warn about a secret the publish job can use.
+    environment_names="$(gh secret list --env CI --json name -q '.[].name' 2>/dev/null || true)"
+    if printf '%s\n' "$environment_names" | grep -qx VSCE_PAT; then
+        printf 'VSCE_PAT CI environment secret is set'
+    elif [ -z "$names" ] && [ -z "$environment_names" ]; then
+        printf 'this run could not read the repo or CI environment secrets'
     else
         printf 'VSCE_PAT repo secret is NOT set — that run will fail'
     fi
@@ -183,9 +194,14 @@ gate_remote_sync() {
 
 gate_tag_conformity() {
     local chosen="$1"
-    local pkg_version section
+    local pkg_version lock_version lock_root_version section
     pkg_version="$(node -p 'require("./package.json").version' 2>/dev/null || true)"
     if [ -z "$pkg_version" ]; then fail "could not read package.json version"; fi
+    lock_version="$(node -p 'require("./package-lock.json").version' 2>/dev/null || true)"
+    lock_root_version="$(node -p 'require("./package-lock.json").packages?.[""]?.version || ""' 2>/dev/null || true)"
+    if [ "$lock_version" != "$pkg_version" ] || [ "$lock_root_version" != "$pkg_version" ]; then
+        fail "package-lock.json version metadata ($lock_version/$lock_root_version) does not match package.json ($pkg_version)"
+    fi
     if [ "$pkg_version" != "${chosen#v}" ] && [ "$ALLOW_VERSION_BUMP" != "1" ]; then
         fail "package.json version ($pkg_version) does not match the release tag ($chosen); bump it first"
     fi
@@ -215,12 +231,20 @@ apply_release_changes() {
     if [ "$pkg_version" != "${chosen#v}" ]; then
         VERSION_STATUS="$bumped $pkg_version -> ${chosen#v}"
         if [ "$dry" != true ]; then
-            log "bumping package.json version $pkg_version -> ${chosen#v}"
+            log "bumping package metadata $pkg_version -> ${chosen#v}"
             node -e "
 const fs = require('fs');
 const pj = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-pj.version = '${chosen#v}';
+const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+const version = '${chosen#v}';
+if (lock.name !== pj.name || !lock.packages || !lock.packages['']) {
+  throw new Error('package-lock.json does not describe the root package');
+}
+pj.version = version;
+lock.version = version;
+lock.packages[''].version = version;
 fs.writeFileSync('package.json', JSON.stringify(pj, null, 2) + '\n');
+fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
 "
         fi
     fi
@@ -248,7 +272,11 @@ gate_tests() {
     local failures=0
     run_gate "tsc --noEmit" "npm exec -- tsc --noEmit" || failures=$((failures+1))
     run_gate "esbuild build" "node esbuild.config.mjs" || failures=$((failures+1))
-    for layer in test/webview.test.mjs test/export-md.test.mjs test/recent-sessions-tail.test.mjs test/activate.test.mjs test/host-e2e.mjs test/smoke.mjs; do
+    for layer in test/activate.test.mjs test/chat-view-message.test.mjs test/session-controller-boundary.test.mjs test/session-actions.test.mjs test/webview.test.mjs test/thread-diffs.test.mjs test/export-md.test.mjs test/recent-sessions-tail.test.mjs test/transport-regression.test.mjs; do
+        run_gate "$layer" "node $layer" || failures=$((failures+1))
+    done
+    run_gate "daemon parity" "node test/daemon-parity.mjs --require-daemon" || failures=$((failures+1))
+    for layer in test/host-e2e.mjs test/smoke.mjs; do
         run_gate "$layer" "node $layer" || failures=$((failures+1))
     done
     run_gate "preview screenshot matrix" "node test/preview-shot.mjs" || failures=$((failures+1))
@@ -416,7 +444,7 @@ fi
 # test/preview-*.png are regenerated by the screenshot gate above and are now
 # untracked (.gitignore). Folding their byte churn into the release commit is
 # what used to leave the tree dirty and abort the NEXT cut at gate_clean_tree.
-git add package.json CHANGELOG.md
+git add package.json package-lock.json CHANGELOG.md
 git commit -m "$commit_title" >/dev/null || fail "release commit failed"
 git tag -a "$chosen_tag" -m "$commit_title"
 

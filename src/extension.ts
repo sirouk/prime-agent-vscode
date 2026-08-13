@@ -44,6 +44,16 @@ export function activate(context: vscode.ExtensionContext): void {
 			() => provider.reveal(),
 		);
 	};
+	// VS Code does not await command callbacks. Keep their rejection boundary at
+	// the registration point so a transport failure cannot become an unhandled
+	// extension-host rejection with no operator-visible explanation.
+	const runCommand = (label: string, action: () => Promise<void>) => {
+		void action().catch((err) => {
+			const detail = err instanceof Error ? err.message : String(err);
+			output.appendLine(`[prime-agent] ${label} failed: ${detail}`);
+			controller?.showErrorNotice(`${label} failed: ${detail}`);
+		});
+	};
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("primeAgent.focusChat", () => {
@@ -53,11 +63,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand("primeAgent.openChat", () => {
 			ChatPanel.createOrShow(context.extensionUri, controller!);
 		}),
-		vscode.commands.registerCommand("primeAgent.newSession", () => void controller!.newSession()),
-		vscode.commands.registerCommand("primeAgent.abort", () => void controller!.abort()),
-		vscode.commands.registerCommand("primeAgent.compact", () => void controller!.compact()),
-		vscode.commands.registerCommand("primeAgent.exportChat", () => void controller!.exportChat()),
-		vscode.commands.registerCommand("primeAgent.restart", () => void controller!.restart()),
+		vscode.commands.registerCommand("primeAgent.newSession", () => runCommand("New session", () => controller!.newSession())),
+		vscode.commands.registerCommand("primeAgent.abort", () => runCommand("Stop", () => controller!.abort())),
+		vscode.commands.registerCommand("primeAgent.compact", () => runCommand("Compact", () => controller!.compact())),
+		vscode.commands.registerCommand("primeAgent.exportChat", () => runCommand("Export chat", () => controller!.exportChat())),
+		vscode.commands.registerCommand("primeAgent.restart", () => runCommand("Restart", () => controller!.restart())),
 		vscode.commands.registerCommand("primeAgent.history", () => {
 			reveal();
 			controller!.showHistoryView();

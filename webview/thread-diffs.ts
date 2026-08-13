@@ -75,28 +75,30 @@ export class ThreadDiffsPanel {
 	private renderFile(file: ThreadDiffFile): HTMLElement {
 		const wrap = el("div", "td-file");
 		const open = this.openPaths.has(file.path);
-		const row = el("button", "td-row") as HTMLButtonElement;
+		const row = el("div", "td-row");
+		const toggle = el("button", "td-toggle") as HTMLButtonElement;
+		toggle.setAttribute("aria-expanded", String(open));
 		const agents = distinctAgents(file);
 		const authors = file.hunks.some((hunk) => !hunk.agent) ? ["this session", ...agents] : agents;
-		row.title =
+		toggle.title =
 			agents.length > 0
 				? `${file.path} — edited by ${authors.join(", ")}; click to ${open ? "hide" : "show"} changes`
 				: `${file.path} — click to ${open ? "hide" : "show"} changes`;
-		row.append(
+		toggle.append(
 			el("span", "td-row-caret", open ? "▾" : "▸"),
 			el("span", `td-via ${file.viaSource}`, file.viaSource),
 			el("span", "td-path", file.path),
 		);
 		// Attribution belongs on the collapsed row too: a file a subagent rewrote
 		// must not read as the main agent's work at a glance.
-		for (const agent of agents.slice(0, 2)) row.appendChild(el("span", "td-agent", agent));
-		if (agents.length > 2) row.appendChild(el("span", "td-agent", `+${agents.length - 2}`));
+		for (const agent of agents.slice(0, 2)) toggle.appendChild(el("span", "td-agent", agent));
+		if (agents.length > 2) toggle.appendChild(el("span", "td-agent", `+${agents.length - 2}`));
 
 		const counts = countLines([file]);
 		if (counts.added > 0 || counts.removed > 0) {
 			const badge = el("span", "td-counts");
 			badge.append(el("span", "add", `+${counts.added}`), el("span", "del", `−${counts.removed}`));
-			row.appendChild(badge);
+			toggle.appendChild(badge);
 		}
 		const openBtn = el("button", "td-open", "Open file") as HTMLButtonElement;
 		openBtn.title = `Open ${file.path}`;
@@ -104,12 +106,12 @@ export class ThreadDiffsPanel {
 			event.stopPropagation();
 			this.deps.onOpenFile(file.path);
 		});
-		row.appendChild(openBtn);
-		row.addEventListener("click", () => {
+		toggle.addEventListener("click", () => {
 			if (this.openPaths.has(file.path)) this.openPaths.delete(file.path);
 			else this.openPaths.add(file.path);
 			this.render();
 		});
+		row.append(toggle, openBtn);
 		wrap.appendChild(row);
 		if (open) wrap.appendChild(this.renderDetail(file));
 		return wrap;

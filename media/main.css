@@ -603,6 +603,15 @@ details.thinking .thinking-body {
 	background: var(--pa-accent-dim);
 }
 
+.tool-toggle {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	min-width: 0;
+	flex: 1;
+	text-align: left;
+}
+
 .tool-chevron {
 	color: var(--pa-dim);
 	transition: transform 0.12s ease;
@@ -797,6 +806,15 @@ details.thinking .thinking-body {
 	align-items: baseline;
 	justify-content: space-between;
 	gap: 8px;
+}
+
+.history-resume {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	min-width: 0;
+	flex: 1;
+	text-align: left;
 }
 
 .history-item-name {
@@ -1303,15 +1321,25 @@ details.thinking .thinking-body {
 	display: flex;
 	align-items: center;
 	gap: 7px;
-	width: 100%;
-	padding: 5px 8px;
 	border-radius: 6px;
 	text-align: left;
 	font-size: 11.5px;
 }
 
-.dropdown-item.selected,
-.dropdown-item:hover {
+.dropdown-select {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	width: 100%;
+	min-width: 0;
+	padding: 5px 8px;
+	border-radius: 6px;
+	text-align: left;
+	font-size: inherit;
+}
+
+.dropdown-item.selected .dropdown-select,
+.dropdown-item:hover .dropdown-select {
 	background: var(--pa-accent-dim);
 }
 
@@ -1365,6 +1393,7 @@ details.thinking .thinking-body {
 	color: var(--pa-dim);
 	flex-shrink: 0;
 	opacity: 0.55;
+	margin-right: 5px;
 }
 
 .dropdown-star:hover {
@@ -1604,11 +1633,16 @@ body.vscode-light pre.term {
 }
 
 .history-item:hover .history-actions,
+.history-item:focus-within .history-actions,
 .history-item.confirming .history-actions {
 	display: inline-flex;
 }
 
 .history-item:hover .history-item-time {
+	visibility: hidden;
+}
+
+.history-item:focus-within .history-item-time {
 	visibility: hidden;
 }
 

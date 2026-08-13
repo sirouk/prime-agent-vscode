@@ -9,7 +9,9 @@ import { Transcript } from "./transcript.js";
 import type {
 	AgentEvent,
 	HostToWebview,
+	ImageAttachment,
 	RpcModel,
+	SelectionAttachment,
 	SessionChild,
 	StatusSnapshot,
 	WebviewToHost,
@@ -158,20 +160,49 @@ const scroller = el("div", "messages");
 const changedFilesBar = el("div", "changed-files");
 chatView.append(scroller, changedFilesBar);
 
+// Scope IDs to this webview instance: a late rejection from a panel that was
+// closed and reopened must never match a new panel's first `prompt-1` row.
+const promptClientScope =
+	typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+		? crypto.randomUUID()
+		: `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let nextPromptClientRequestId = 0;
+const pendingPrompts = new Map<string, { text: string; images: ImageAttachment[]; selections: SelectionAttachment[] }>();
+// Native image pickers resolve later and the controller is shared by sidebar
+// and editor panels, so replies need a per-document correlation id.
+const imageRequestScope = Math.floor(Math.random() * 4_000_000_000);
+let nextImageRequestId = 0;
+const pendingImageRequests = new Set<number>();
+const fileSearchRequestScope = Math.floor(Math.random() * 4_000_000_000);
+let nextFileSearchRequestId = 0;
+const pendingFileSearches = new Map<number, number>();
+/** Last host-confirmed session identity displayed in this panel. */
+let authoritativeSessionId: string | undefined;
 const composerDeps = {
 	onSend: (text: string, images: import("../src/protocol.js").ImageAttachment[], selections: import("../src/protocol.js").SelectionAttachment[]) => {
-		console.info("[prime-agent] composer send:", text.slice(0, 60));
-		transcript.showOptimisticUserMessage(text, images);
+		const clientRequestId = `${promptClientScope}-${++nextPromptClientRequestId}`;
+		pendingPrompts.set(clientRequestId, { text, images: [...images], selections: [...selections] });
+		transcript.showOptimisticUserMessage(clientRequestId, text, images);
 		post({
 			type: "prompt",
-			payload: { text, images, selections, streamingBehavior: composer.streamingBehavior },
+			payload: { text, images, selections, streamingBehavior: composer.streamingBehavior, clientRequestId },
 		});
 	},
 	onStop: () => post({ type: "abort" }),
-	onSearchFiles: (query: string, requestId: number) => post({ type: "searchFiles", query, requestId }),
-	onDraftChanged: (text: string) => post({ type: "draftChanged", text }),
+	onSearchFiles: (query: string, requestId: number) => {
+		const hostRequestId = fileSearchRequestScope * 1_000_000 + ++nextFileSearchRequestId;
+		pendingFileSearches.set(hostRequestId, requestId);
+		post({ type: "searchFiles", query, requestId: hostRequestId });
+	},
+	onDraftChanged: (text: string) => {
+		if (authoritativeSessionId) post({ type: "draftChanged", text, sessionId: authoritativeSessionId });
+	},
 	onSetCompactThreshold: (percent: number | null) => post({ type: "setCompactThreshold", percent }),
-	onPickImage: () => post({ type: "pickImage", requestId: Date.now() }),
+	onPickImage: () => {
+		const requestId = imageRequestScope * 1_000_000 + ++nextImageRequestId;
+		pendingImageRequests.add(requestId);
+		post({ type: "pickImage", requestId });
+	},
 	onAttachSelection: () => post({ type: "attachSelection" }),
 	onAttachActiveFile: () => post({ type: "attachActiveFile" }),
 	onSetModel: (provider: string, modelId: string) => post({ type: "setModel", provider, modelId }),
@@ -186,7 +217,7 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 	onOpenFile: (path, startLine, endLine) => post({ type: "openFile", path, startLine, endLine }),
 	onOpenDiff: (path) => post({ type: "openDiff", path }),
 	onForkFromUser: (ordinal) => post({ type: "forkFromUser", ordinal }),
-	onSpawnedCardClick: (activeSessionId) => post({ type: "browseChild", activeSessionId }),
+	onSpawnedCardClick: (browseRef) => post({ type: "browseChild", browseRef }),
 	onNewSession: () => post({ type: "newSession" }),
 	onShowHistory: () => {
 		showView("history");
@@ -194,6 +225,7 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 		post({ type: "requestHistory" });
 	},
 	onFocusComposer: () => composer.focus(),
+	onOptimisticConfirmed: (clientRequestId) => pendingPrompts.delete(clientRequestId),
 });
 
 const historyView = new HistoryView({
@@ -330,7 +362,7 @@ function renderSubagentsStrip(): void {
 		row.append(dot, name, badge, suffix);
 		row.addEventListener("click", (event) => {
 			event.stopPropagation();
-			if (!viewing) post({ type: "browseChild", activeSessionId: child.activeSessionId, parentSessionId: child.id });
+			if (!viewing && child.browseRef) post({ type: "browseChild", browseRef: child.browseRef });
 		});
 		return row;
 	};
@@ -448,6 +480,24 @@ historyBtn.addEventListener("click", () => {
 
 let currentStatus: StatusSnapshot | null = null;
 let observing = false;
+/** Agent-provided titles survive ordinary status refreshes, but never a session change. */
+let extensionTitle: { sessionId?: string; title: string; provisional: boolean } | null = null;
+
+/**
+ * A status/snapshot only establishes a boundary when it names a session. An
+ * offline or restoring status without an id is not evidence that the operator
+ * changed threads, so it must not discard their in-progress draft.
+ */
+function adoptAuthoritativeSession(sessionId: string | undefined): boolean {
+	if (!sessionId || sessionId === authoritativeSessionId) return false;
+	authoritativeSessionId = sessionId;
+	pendingPrompts.clear();
+	pendingImageRequests.clear();
+	pendingFileSearches.clear();
+	composer.resetForSessionBoundary();
+	menu.classList.remove("visible");
+	return true;
+}
 
 // Boot splash: until the FIRST live connection, hide the composer and show the
 // breathing Prime Agent mark. Disconnections after that only touch the status strip.
@@ -482,7 +532,29 @@ setTimeout(() => {
 // from here, and the composer stays disabled until a status says otherwise.
 setTimeout(retireBootSplash, 18_000);
 
-function applyStatus(status: StatusSnapshot): void {
+function applyStatus(incomingStatus: StatusSnapshot): void {
+	adoptAuthoritativeSession(incomingStatus.sessionId);
+	const previousSessionId = currentStatus?.sessionId;
+	// A title can arrive before the first snapshot. It is useful to paint then,
+	// but the snapshot's own non-empty title is the first authoritative session
+	// identity and must replace that provisional display.
+	if (!currentStatus && extensionTitle?.provisional) {
+		if (incomingStatus.sessionName) {
+			extensionTitle = null;
+		} else {
+			extensionTitle = { ...extensionTitle, sessionId: incomingStatus.sessionId, provisional: false };
+		}
+	}
+	if (previousSessionId !== incomingStatus.sessionId && extensionTitle?.sessionId !== undefined && extensionTitle.sessionId !== incomingStatus.sessionId) {
+		extensionTitle = null;
+	}
+	const pendingTitle = extensionTitle;
+	if (pendingTitle && pendingTitle.sessionId === undefined && incomingStatus.sessionId) {
+		pendingTitle.sessionId = incomingStatus.sessionId;
+	}
+	const status = extensionTitle && extensionTitle.sessionId === incomingStatus.sessionId
+		? { ...incomingStatus, sessionName: extensionTitle.title }
+		: incomingStatus;
 	if (!everConnected && status.connected) {
 		everConnected = true;
 		retireBootSplash();
@@ -537,7 +609,7 @@ function applyStatus(status: StatusSnapshot): void {
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	// The strip says "offline"; the composer has to mean it, or the operator's
 	// prompt disappears into a 120s timeout with a green dot above it.
-	composer.setEnabled(status.connected);
+	composer.setEnabled(status.connected && !status.restoring);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
 	// Unconditional: skipping this on a status that carries no override left the
 	// previous session's tick painted on the bar of the session now on screen.
@@ -601,6 +673,8 @@ window.addEventListener("message", (messageEvent) => {
 function dispatchHostMessage(message: HostToWebview): void {
 	switch (message.type) {
 		case "snapshot":
+			adoptAuthoritativeSession(message.status.sessionId);
+			pendingPrompts.clear();
 			transcript.clearSpawnCards?.();
 			spawnSeenBaseline = false;
 			transcript.renderSnapshot(message.messages ?? []);
@@ -644,7 +718,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			sessionSiblings = message.siblings ?? [];
 			const spawnedList = message.spawned ?? [];
 			for (const spawn of spawnedList) {
-				transcript.injectSpawnCard({ id: spawn.activeSessionId, name: spawn.name, created: spawn.created });
+				transcript.injectSpawnCard({ id: spawn.activeSessionId, browseRef: spawn.browseRef, name: spawn.name, created: spawn.created });
 			}
 			// Seed cards ONLY for currently-running children; finished and idle ones
 			// stay in the collapsible strip. Spams nothing on resume. `status` is what
@@ -654,7 +728,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 				spawnSeenBaseline = true;
 				for (const child of sessionChildren) {
 					if (childStatus(child) === "running" && child.created) {
-						transcript.injectSpawnCard({ id: child.activeSessionId, name: child.name, created: child.created });
+						transcript.injectSpawnCard({ id: child.activeSessionId, browseRef: child.browseRef, name: child.name, created: child.created });
 					}
 				}
 			}
@@ -671,6 +745,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			showView("history");
 			break;
 		case "observedSession":
+			adoptAuthoritativeSession(message.sessionId);
 			setObserving(true);
 			transcript.renderSnapshot(message.messages);
 			showView("chat");
@@ -679,7 +754,8 @@ function dispatchHostMessage(message: HostToWebview): void {
 			transcript.handleEvent(message.event);
 			break;
 		case "observedClosed":
-			setObserving(false);
+			// The host sends a status after it has repainted our own session. Keep the
+			// composer read-only until then so the visible transcript and target match.
 			addNotice("info", "Stopped watching the live session.");
 			break;
 		case "notice":
@@ -694,14 +770,35 @@ function dispatchHostMessage(message: HostToWebview): void {
 			renderInstallBanner(message.url, message.reason);
 			break;
 		case "uiState":
-			if (message.statusText && currentStatus) {
-				applyStatus({ ...currentStatus, statusText: message.statusText });
+			if (message.title !== undefined) {
+				extensionTitle = { sessionId: currentStatus?.sessionId, title: message.title, provisional: !currentStatus };
+			}
+			if (currentStatus && (message.statusText !== undefined || message.title !== undefined)) {
+				applyStatus({
+					...currentStatus,
+					...(message.statusText !== undefined ? { statusText: message.statusText } : {}),
+				});
+			} else if (!currentStatus) {
+				// An agent can set its title before the first state snapshot arrives.
+				// Paint that useful state now instead of silently dropping it.
+				if (message.statusText !== undefined) liveLabel.textContent = message.statusText;
+				if (message.title !== undefined && !titleEditing) {
+					sessionTitle.textContent = message.title;
+					sessionTitleWrap.style.display = message.title ? "" : "none";
+					sessionTitle.title = message.title
+						? `${message.title} — click the pencil to rename`
+						: "Unnamed session — click the pencil to name it";
+				}
 			}
 			break;
 		case "fileSearchResults":
-			composer.onFileSearchResults(message.requestId, message.files);
+			const composerRequestId = pendingFileSearches.get(message.requestId);
+			if (composerRequestId === undefined) break;
+			pendingFileSearches.delete(message.requestId);
+			composer.onFileSearchResults(composerRequestId, message.files);
 			break;
 		case "imagePicked":
+			if (!pendingImageRequests.delete(message.requestId)) break;
 			if (message.images.length > 0) composer.addImages(message.images);
 			break;
 		case "insertSelection":
@@ -721,9 +818,12 @@ function dispatchHostMessage(message: HostToWebview): void {
 			composer.focus();
 			break;
 		case "promptRejected":
-			// The echo we drew will never be confirmed by an event; leaving the key
-			// armed would silently swallow the next message with the same text.
-			transcript.clearOptimistic();
+			// The echo we drew will never be confirmed by an event. Use the host's
+			// correlation id so rejecting one queued send cannot erase another one.
+			const rejected = message.clientRequestId ? pendingPrompts.get(message.clientRequestId) : undefined;
+			const removed = transcript.rejectOptimistic(message.clientRequestId);
+			if (message.clientRequestId) pendingPrompts.delete(message.clientRequestId);
+			if (removed && rejected) composer.restoreRejectedPayload(rejected.text, rejected.images, rejected.selections);
 			addNotice("error", `Prompt rejected: ${message.error}`);
 			break;
 	}

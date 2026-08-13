@@ -33,7 +33,7 @@ NODE_MAJOR=$(echo "$NODE_VERSION" | sed 's/^v//' | cut -d. -f1)
 case $NODE_MAJOR in
     ''|*[!0-9]*) fail "could not parse node version '$NODE_VERSION'." ;;
 esac
-[ "$NODE_MAJOR" -ge 20 ] || fail "node >= 20 required (found $NODE_VERSION)."
+[ "$NODE_MAJOR" -ge 22 ] || fail "node >= 22 required (found $NODE_VERSION)."
 
 # --- source tree ---------------------------------------------------------------
 

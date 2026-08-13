@@ -5,6 +5,9 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
@@ -27,7 +30,7 @@ import type {
 } from "./protocol.js";
 import { DebugFileLog } from "./debug-log.js";
 import { listRecentSessions, normalizeFsPath } from "./recent-sessions.js";
-import { archiveSessionFile, deleteSession, isSessionActive } from "./session-actions.js";
+import { archiveSessionFile, deleteSession, isSessionActive, renameSessionOffline } from "./session-actions.js";
 import { RpcClient } from "./rpc-client.js";
 
 const execFileAsync = promisify(execFile);
@@ -82,12 +85,19 @@ interface AttachRef {
 	/** Daemon attach handle (12-char active id). Addresses every daemon command. */
 	activeSessionId: string;
 	sessionPath: string;
-	/** Session-file uuid, when the daemon told us one. What history rows key on. */
+	/** Daemon/session UUID, when available. What history rows and UI identity key on. */
 	sessionId?: string;
+}
+
+/** A catalog capability plus the immutable JSONL filename it authorizes. */
+interface ResolvedHistorySession extends RecentSession {
+	/** File-stem identity used only by offline file operations and artifacts. */
+	fileId: string;
 }
 
 export class SessionController implements vscode.Disposable {
 	private client: RpcClient | null = null;
+	private disposed = false;
 	/**
 	 * "The agent actually answers", not "a process object exists". Only a
 	 * completed RPC round-trip sets it; start/stop/exit clear it. A binary that
@@ -110,22 +120,44 @@ export class SessionController implements vscode.Disposable {
 	private startingPromise: Promise<void> | null = null;
 	private intentionalStop = false;
 	private observingId: string | null = null;
+	/** Identity of the read-only session, kept separately from the hidden RPC state. */
+	private observedSession: { activeSessionId: string; sessionId?: string; sessionPath?: string } | null = null;
+	/** A just-closed observed session stays non-interactive until our own view repaints. */
+	private observationRestoring = false;
 	/** Daemon sidecar for resident-session parity (attach/prompt/abort on live sessions). */
 	private sidecar: DaemonSidecar | null = null;
+	/** Serialize release/attach hand-offs for one daemon handle. */
+	private pendingDaemonDetaches = new Map<string, Promise<void>>();
 	/**
 	 * `activeSessionId` is the daemon's 12-char attach handle; `sessionId` is the
-	 * session-file uuid the rest of the UI (history rows, delete/rename guards)
-	 * keys on. They are never equal, so both have to be carried.
+	 * daemon's durable session UUID used by history/UI. Neither is necessarily the
+	 * transcript filename stem, so file operations derive that only from a verified
+	 * catalog path.
 	 */
 	private attached: AttachRef | null = null;
+	/** View generation that owns the currently attached daemon session. */
+	private attachedEpoch: number | null = null;
 	/** Attach attempt remembered across socket drops so a reconnect can re-anchor seamlessly. */
 	private attachAttempt: AttachRef | null = null;
-	/** Where browsing-into-a-child should return to. null → the baseline RPC session. */
-	private returnTarget: { kind: "rpc" } | ({ kind: "attached" } & AttachRef) = { kind: "rpc" };
+	/** View generation that owned the reconnect attempt. */
+	private attachAttemptEpoch: number | null = null;
+	/** Breadcrumbs for nested subagent browsing; each Back returns exactly one level. */
+	private returnTargets: Array<{ kind: "rpc" } | ({ kind: "attached" } & AttachRef)> = [];
 	private rentedState: RpcSessionState | null = null;
 	/** Last history answer, replayed instantly so a reopened sidebar never flashes empty. */
 	private lastHistory: RecentSession[] | null = null;
+	/** Latest rendered history capability set, including catalog-search-only rows. */
+	private actionHistory: RecentSession[] | null = null;
 	private savedCatalog: { at: number; rows: SavedSessionInfo[] } | null = null;
+	/** Monotonic navigation ownership: late session RPCs cannot repaint a newer view. */
+	private viewEpoch = 0;
+	/** Supersedes slow history/search answers so they cannot repaint a newer query. */
+	private historyRequestGeneration = 0;
+	/** Opaque, host-issued capabilities for the currently rendered child strip. */
+	private browseableChildren = new Map<string, { activeSessionId: string; parentId?: string; contextId: number }>();
+	private browseRefByActiveId = new Map<string, string>();
+	/** Invalidates child capabilities only when the displayed session actually changes. */
+	private childrenContext = 0;
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -135,7 +167,28 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	get workspaceRoot(): string {
-		return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+		return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+	}
+
+	/** This extension is deliberately single-root until paths carry a root id. */
+	private isInWorkspaceRoot(uri: vscode.Uri): boolean {
+		if (uri.scheme !== "file" || !this.workspaceRoot) return false;
+		try {
+			// A lexical prefix is not enough: VS Code follows workspace symlinks,
+			// which otherwise lets a webview read an arbitrary target through a
+			// friendly-looking in-root path.
+			const root = realpathSync(this.workspaceRoot);
+			const resolved = realpathSync(uri.fsPath);
+			const relative = path.relative(root, resolved);
+			return relative !== "" && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+		} catch {
+			return false;
+		}
+	}
+
+	private workspaceRelativePath(uri: vscode.Uri): string | null {
+		if (!this.isInWorkspaceRoot(uri)) return null;
+		return path.relative(this.workspaceRoot, uri.fsPath).split(path.sep).join("/");
 	}
 
 	// ------------------------------------------------------------------
@@ -143,6 +196,7 @@ export class SessionController implements vscode.Disposable {
 	// ------------------------------------------------------------------
 
 	attach(sink: WebviewSink): vscode.Disposable {
+		if (this.disposed) return new vscode.Disposable(() => {});
 		this.sinks.add(sink);
 		// Seed the rebuilt document with the last history we computed. The sidebar
 		// webview is destroyed on every hide, so without this the operator's next
@@ -152,6 +206,7 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	private broadcast(message: HostToWebview): void {
+		if (this.disposed) return;
 		if (this.sinks.size === 0) this.debugLog.append(`broadcast ${message.type} with no sinks`);
 		for (const sink of this.sinks) {
 			sink.post(message);
@@ -179,6 +234,11 @@ export class SessionController implements vscode.Disposable {
 	// ------------------------------------------------------------------
 
 	async ensureStarted(): Promise<void> {
+		if (this.disposed) return;
+		if (!this.workspaceRoot) {
+			this.broadcast({ type: "notice", level: "warning", text: "Open a workspace folder before starting Prime Agent." });
+			return;
+		}
 		this.debugLog.append("ensureStarted");
 		if (this.client?.running) return;
 		if (this.startingPromise) return this.startingPromise;
@@ -220,6 +280,7 @@ export class SessionController implements vscode.Disposable {
 		if (this.installWatchdog) clearTimeout(this.installWatchdog);
 		this.installWatchdog = setTimeout(() => {
 			this.installWatchdog = null;
+			if (this.disposed) return;
 			// Reachability, not process liveness: "sees it but cannot connect" is a
 			// binary that spawns fine and then never answers a single RPC, which
 			// `client.running` reports as perfectly healthy forever.
@@ -235,9 +296,16 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	private async start(): Promise<void> {
+		if (!this.workspaceRoot) throw new Error("Open a workspace folder before starting Prime Agent.");
 		const config = vscode.workspace.getConfiguration("primeAgent");
-		const command = config.get<string>("command", "prime-agent");
-		const extraArgs = config.get<string[]>("args", []);
+		const configuredCommand = config.get<unknown>("command", "prime-agent");
+		const command = typeof configuredCommand === "string" && configuredCommand.trim() ? configuredCommand.trim() : "prime-agent";
+		if (command.includes("\0")) throw new Error("primeAgent.command contains an invalid character");
+		const configuredArgs = config.get<unknown>("args", []);
+		if (!Array.isArray(configuredArgs) || configuredArgs.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
+			throw new Error("primeAgent.args must be an array of strings");
+		}
+		const extraArgs = configuredArgs as string[];
 		const model = config.get<string>("model", "").trim();
 
 		const args = [...extraArgs];
@@ -246,19 +314,29 @@ export class SessionController implements vscode.Disposable {
 		const envArgs = process.env.PRIME_AGENT_ARGS?.trim();
 		if (envArgs) args.push(...envArgs.split(/\s+/));
 
-		this.output.appendLine(`[prime-agent] starting: ${command} --mode rpc ${args.join(" ")}`);
+		this.output.appendLine(`[prime-agent] starting: ${command} --mode rpc (${args.length} configured argument${args.length === 1 ? "" : "s"})`);
 		const client = new RpcClient({ command, args, cwd: this.workspaceRoot, onWire: (s) => this.debugLog.append(s) });
 		this.client = client;
 		this.reachable = false;
 		this.intentionalStop = false;
 
-		client.on("event", (raw) => this.onAgentEvent(raw as AgentEvent));
-		client.on("extensionUiRequest", (raw) => void this.onExtensionUiRequest(raw as RpcExtensionUIRequest));
-		client.on("message", (raw) => this.onOtherMessage(raw as Record<string, unknown>));
-		client.on("stderr", (chunk: string) => this.output.append(chunk));
+	client.on("event", (raw) => {
+			if (this.isForegroundRpcClient(client)) this.onAgentEvent(raw as AgentEvent);
+		});
+		client.on("extensionUiRequest", (raw) => {
+			if (this.client === client && !this.disposed) void this.onExtensionUiRequest(client, raw as RpcExtensionUIRequest);
+		});
+		client.on("message", (raw) => {
+			if (this.client === client && !this.disposed) this.onOtherMessage(client, raw as Record<string, unknown>);
+		});
+		client.on("stderr", (chunk: string) => {
+			if (this.client === client && !this.disposed) this.output.append(chunk);
+		});
 		client.on("spawnError", (err: Error) => {
+			if (this.client !== client || this.disposed) return;
 			this.output.appendLine(`[prime-agent] spawn error: ${err.message}`);
 			this.reachable = false;
+			if (!this.isForegroundRpcClient(client)) return;
 			this.broadcast({
 				type: "notice",
 				level: "error",
@@ -274,10 +352,13 @@ export class SessionController implements vscode.Disposable {
 			this.pushStatus();
 		});
 		client.on("exit", (code: number | null) => {
+			if (this.client !== client || this.disposed) return;
 			this.output.appendLine(`[prime-agent] exited with code ${code ?? "?"}`);
 			this.reachable = false;
+			this.state = null;
+			if (!this.isForegroundRpcClient(client)) return;
 			this.clearRunFlags();
-			this.changedFiles.clear();
+			this.clearChangedFiles();
 			this.clearThreadDiffs();
 			if (!this.intentionalStop) {
 				this.broadcast({ type: "notice", level: "warning", text: `Agent process exited (code ${code ?? "?"}). Use Restart to start it again.` });
@@ -293,7 +374,13 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async restart(): Promise<void> {
+		// A restart can race an in-flight startup. `ensureStarted()` intentionally
+		// coalesces callers, so let that retiring attempt settle before starting its
+		// replacement instead of awaiting it and ending up offline.
+		const retiringStart = this.startingPromise;
 		this.stop();
+		if (retiringStart) await retiringStart;
+		if (this.disposed) return;
 		await this.ensureStarted();
 	}
 
@@ -304,7 +391,11 @@ export class SessionController implements vscode.Disposable {
 		this.state = null;
 		this.reachable = false;
 		this.clearRunFlags();
-		this.pushStatus();
+		if (this.installWatchdog) {
+			clearTimeout(this.installWatchdog);
+			this.installWatchdog = null;
+		}
+		if (!this.disposed) this.pushStatus();
 	}
 
 	/**
@@ -319,18 +410,29 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
 		this.stop();
 		// Drop the attach intent before tearing the socket down, or the close
 		// handler restarts the re-attach backoff against a dead controller.
 		this.attached = null;
+		this.attachedEpoch = null;
 		this.attachAttempt = null;
+		this.attachAttemptEpoch = null;
 		this.clearReattachTimer();
 		// A pending strip refresh would fire against a disposed sidecar.
 		if (this.childrenTimer) clearTimeout(this.childrenTimer);
 		this.childrenTimer = null;
+		if (this.historyRefreshTimer) clearTimeout(this.historyRefreshTimer);
+		this.historyRefreshTimer = null;
+		if (this.statsTimer) clearTimeout(this.statsTimer);
+		this.statsTimer = null;
+		this.clearThreadDiffs();
 		this.sidecar?.dispose();
 		this.watcher?.dispose();
 		for (const d of this.disposables) d.dispose();
+		this.sinks.clear();
+		this.debugLog.dispose();
 	}
 
 	// ------------------------------------------------------------------
@@ -396,11 +498,13 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
-	private onOtherMessage(raw: Record<string, unknown>): void {
+	private onOtherMessage(client: RpcClient, raw: Record<string, unknown>): void {
 		// Non-response, non-event messages (e.g. extension_bus events). Surface notable ones.
 		const type = raw.type as string;
 		if (type === "extension_error") {
-			this.broadcast({ type: "notice", level: "error", text: `Extension error: ${JSON.stringify(raw.error ?? raw)}` });
+			if (this.isForegroundRpcClient(client)) {
+				this.broadcast({ type: "notice", level: "error", text: `Extension error: ${JSON.stringify(raw.error ?? raw)}` });
+			}
 		} else if (type === "observed_session_event") {
 			const sessionId = raw.activeSessionId as string;
 			if (sessionId === this.observingId) {
@@ -410,10 +514,22 @@ export class SessionController implements vscode.Disposable {
 			const sessionId = raw.activeSessionId as string;
 			if (sessionId === this.observingId) {
 				this.observingId = null;
+				this.observedSession = null;
+				this.observationRestoring = true;
+				const epoch = ++this.viewEpoch;
 				this.broadcast({ type: "observedClosed", sessionId });
 				this.pushStatus();
+				// The observed transcript is still on screen. Keep the composer disabled
+				// until a fresh snapshot of this window's session has replaced it.
+				void this.restoreAfterObservationClosed(epoch);
 			}
 		}
+	}
+
+	private async restoreAfterObservationClosed(epoch: number): Promise<void> {
+		if (this.disposed || this.attached || this.observingId || epoch !== this.viewEpoch) return;
+		this.beginRpcRestore();
+		if (await this.restoreOwnRpcView(epoch)) this.scheduleChildrenRefresh();
 	}
 
 	private onBusySettled(): void {
@@ -423,12 +539,35 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
+	/** Clear the session-scoped strip in both host state and every visible webview. */
+	private clearChangedFiles(): void {
+		this.changedFiles.clear();
+		this.broadcast({ type: "changedFiles", files: [] });
+	}
+
 	// ------------------------------------------------------------------
 	// Extension UI requests -> native VS Code dialogs
 	// ------------------------------------------------------------------
 
-	private async onExtensionUiRequest(request: RpcExtensionUIRequest): Promise<void> {
-		const respond = (body: Record<string, unknown>) => this.client?.sendRaw({ type: "extension_ui_response", id: request.id, ...body });
+	private async onExtensionUiRequest(client: RpcClient, request: RpcExtensionUIRequest): Promise<void> {
+		// Native dialogs may resolve after a restart. Their response belongs only to
+		// the client and view that opened the dialog; never send an approval into a
+		// replacement or now-hidden session. We still answer cancellation so the
+		// original client cannot remain blocked on a dialog it no longer owns.
+		const requestEpoch = this.viewEpoch;
+		const respond = (body: Record<string, unknown>) => {
+			if (!this.disposed && this.client === client && client.running) {
+				const current = this.isCurrentRpcView(client, requestEpoch);
+				client.sendRaw({ type: "extension_ui_response", id: request.id, ...(current ? body : { cancelled: true }) });
+			}
+		};
+		// The background RPC keeps running while this window follows a daemon or
+		// observed session. Its extension requests must not mutate or prompt over
+		// the session on screen; explicitly cancel so it can unwind rather than wait.
+		if (!this.isCurrentRpcView(client, requestEpoch)) {
+			respond({ cancelled: true });
+			return;
+		}
 		switch (request.method) {
 			case "select": {
 				const picked = await vscode.window.showQuickPick(request.options, { title: request.title, ignoreFocusOut: true });
@@ -494,29 +633,174 @@ export class SessionController implements vscode.Disposable {
 	// High-level operations
 	// ------------------------------------------------------------------
 
-	async prompt(payload: PromptPayload): Promise<void> {
-		if (this.attached) {
-			const sidecar = await this.ensureSidecar();
+	private isReattaching(): boolean {
+		return this.attached === null && this.attachAttempt !== null && this.attachAttemptEpoch === this.viewEpoch;
+	}
+
+	/** Claim a new displayed-session intent before any validation or startup await. */
+	private beginNavigation(): number {
+		const epoch = ++this.viewEpoch;
+		// A socket-drop reconnect belongs to the view that dropped. Once the user
+		// chooses another view, it must never resurrect the old one underneath it.
+		this.attachAttempt = null;
+		this.attachAttemptEpoch = null;
+		this.clearReattachTimer();
+		return epoch;
+	}
+
+	/** Block operations that would otherwise silently address the hidden RPC session. */
+	private guardObservedReadOnly(action: string): boolean {
+		if (this.attached && this.attachedEpoch !== this.viewEpoch) {
+			this.broadcast({ type: "notice", level: "warning", text: `Please wait for the session switch to finish before ${action}.` });
+			return true;
+		}
+		if (!this.observingId && !this.observationRestoring) return false;
+		this.broadcast({
+			type: "notice",
+			level: "warning",
+			text: this.observationRestoring
+				? `Please wait while your session view is restored before ${action}.`
+				: `You are watching another live session read-only. Stop watching it before ${action}.`,
+		});
+		return true;
+	}
+
+	private isCurrentAttachment(attached: AttachRef): boolean {
+		return !this.disposed && this.attached === attached && this.attachedEpoch === this.viewEpoch;
+	}
+
+	/** Put a failed navigation back on the prior attached view without reviving its old async work. */
+	private restoreAttachedView(attached: AttachRef | null, epoch: number): void {
+		if (this.disposed || epoch !== this.viewEpoch || !attached) return;
+		// The socket can close while an explicit navigation is still resolving. Its
+		// old attachment is no longer usable, so recover the hidden RPC view rather
+		// than reviving a disconnected reference or letting actions fall through.
+		if (this.observationRestoring && this.attached === null) {
+			void this.restoreAfterObservationClosed(epoch);
+			return;
+		}
+		if (this.attached !== attached) return;
+		this.attached = { ...attached };
+		this.attachedEpoch = epoch;
+		this.pushStatus();
+	}
+
+	/** Whether the subprocess is the session currently represented by this window. */
+	private isForegroundRpcClient(client: RpcClient): boolean {
+		return (
+			this.client === client &&
+			!this.disposed &&
+			this.attached === null &&
+			this.observingId === null &&
+			!this.observationRestoring &&
+			!this.isReattaching()
+		);
+	}
+
+	/** A background-RPC reply may only update the same un-attached view that asked. */
+	private isCurrentRpcView(client: RpcClient, epoch: number, allowRestoring = false): boolean {
+		return (
+			this.client === client &&
+			!this.disposed &&
+			this.attached === null &&
+			this.observingId === null &&
+			!this.isReattaching() &&
+			(allowRestoring || !this.observationRestoring) &&
+			epoch === this.viewEpoch
+		);
+	}
+
+	private resetViewedSessionState(): void {
+		this.extensionStatusText = undefined;
+		this.lastStatsText = "";
+		this.lastUsage = {};
+		this.autoCompactSent = false;
+		this.clearChangedFiles();
+	}
+
+	/**
+	 * A successful navigation changes the RPC target before its fresh transcript
+	 * arrives. Clear the old view and keep controls disabled until that response
+	 * proves which session is now on screen.
+	 */
+	private beginRpcRestore(): void {
+		this.observationRestoring = true;
+		this.resetChildrenBaseline();
+		this.resetViewedSessionState();
+		this.cachedMessages = [];
+		this.state = null;
+		this.rentedState = null;
+		this.clearRunFlags();
+		this.clearThreadDiffs();
+		this.broadcast({ type: "sessionChildren", children: [] });
+		this.broadcast({
+			type: "snapshot",
+			messages: [],
+			state: null,
+			status: this.buildStatus(),
+			steerDefault: vscode.workspace.getConfiguration("primeAgent").get<"steer" | "followUp">("defaultStreamingBehavior", "steer"),
+		});
+		this.pushStatus();
+	}
+
+	/** Restore this window's own RPC session; a failed read stays non-interactive. */
+	private async restoreOwnRpcView(epoch: number): Promise<boolean> {
+		const restored = await this.refreshSnapshot({ epoch, allowRestoring: true });
+		if (!restored || this.disposed || this.observingId || epoch !== this.viewEpoch) return false;
+		this.observationRestoring = false;
+		this.pushStatus();
+		return true;
+	}
+
+	private rejectPrompt(payload: PromptPayload, error: string, reply: (message: HostToWebview) => void = (message) => this.broadcast(message)): void {
+		reply({ type: "promptRejected", error, clientRequestId: payload.clientRequestId });
+	}
+
+	async prompt(payload: PromptPayload, reply: (message: HostToWebview) => void = (message) => this.broadcast(message)): Promise<void> {
+		if (this.guardObservedReadOnly("sending a prompt")) {
+			this.rejectPrompt(payload, "The observed session is read-only in this window.", reply);
+			return;
+		}
+		const attached = this.attached;
+		if (attached) {
+			let sidecar: DaemonSidecar;
+			try {
+				sidecar = await this.ensureSidecar();
+			} catch (err) {
+				if (this.isCurrentAttachment(attached)) this.rejectPrompt(payload, err instanceof Error ? err.message : "daemon prompt failed", reply);
+				return;
+			}
+			if (!this.isCurrentAttachment(attached)) {
+				this.rejectPrompt(payload, "The viewed session changed before the prompt could be sent.", reply);
+				return;
+			}
 			const text = this.composeMessageText(payload);
 			const images = payload.images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 			// Attaching mid-turn never delivers agent_start, so `this.streaming`
 			// alone would silently downgrade a queued follow-up into a steer.
 			const behavior = this.effectiveStreaming() ? payload.streamingBehavior : "steer";
 			try {
-				await sidecar.prompt(this.attached.activeSessionId, text, behavior, images);
+				await sidecar.prompt(attached.activeSessionId, text, behavior, images);
+				if (!this.isCurrentAttachment(attached)) return;
 				this.broadcast({ type: "promptAccepted", kind: "prompt" });
 			} catch (err) {
-				this.broadcast({
-					type: "promptRejected",
-					error: err instanceof Error ? err.message : "daemon prompt failed",
-				});
+				if (this.isCurrentAttachment(attached)) this.rejectPrompt(payload, err instanceof Error ? err.message : "daemon prompt failed", reply);
 			}
 			return;
 		}
+		if (this.isReattaching()) {
+			this.rejectPrompt(payload, "The live session is reconnecting. Please wait for it to re-attach.", reply);
+			return;
+		}
+		const epoch = this.viewEpoch;
 		await this.ensureStarted();
-		if (!this.client) throw new Error("agent unavailable");
-		this.output.appendLine(`[prime-agent] prompt: streaming=${this.streaming} behavior=${payload.streamingBehavior} text="${payload.text.slice(0, 60)}"`);
-		this.debugLog.append(`prompt entered: streaming=${this.streaming} behavior=${payload.streamingBehavior} text="${payload.text.slice(0, 60)}"`);
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch)) {
+			this.rejectPrompt(payload, "Agent is unavailable.", reply);
+			return;
+		}
+		this.output.appendLine(`[prime-agent] prompt: streaming=${this.streaming} behavior=${payload.streamingBehavior}`);
+		this.debugLog.append(`prompt entered: streaming=${this.streaming} behavior=${payload.streamingBehavior}`);
 
 		const text = this.composeMessageText(payload);
 		const images = payload.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType }));
@@ -535,18 +819,21 @@ export class SessionController implements vscode.Disposable {
 		}
 
 		try {
-			const response = await this.client.request(command);
-			this.debugLog.append(`prompt response: success=${response.success} error=${response.error ?? ""}`);
-			this.output.appendLine(`[prime-agent] prompt response: success=${response.success}${response.error ? ` error="${response.error}"` : ""}`);
+			const response = await client.request(command);
+			if (!this.isCurrentRpcView(client, epoch)) return;
+			this.debugLog.append(`prompt response: success=${response.success}`);
+			this.output.appendLine(`[prime-agent] prompt response: success=${response.success}`);
 			if (response.success) {
 				this.broadcast({ type: "promptAccepted", kind });
 			} else {
-				this.broadcast({ type: "promptRejected", error: response.error ?? "prompt rejected" });
+				this.rejectPrompt(payload, response.error ?? "prompt rejected", reply);
 			}
 		} catch (err) {
-			this.debugLog.append(`prompt failed: ${err instanceof Error ? err.message : String(err)}`);
-			this.output.appendLine(`[prime-agent] prompt request failed: ${err instanceof Error ? err.message : String(err)}`);
-			this.broadcast({ type: "notice", level: "error", text: `Prompt failed: ${err instanceof Error ? err.message : String(err)}` });
+			if (!this.isCurrentRpcView(client, epoch)) return;
+			const error = err instanceof Error ? err.message : String(err);
+			this.debugLog.append("prompt request failed");
+			this.output.appendLine("[prime-agent] prompt request failed");
+			this.rejectPrompt(payload, error, reply);
 		}
 	}
 
@@ -564,11 +851,15 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async abort(): Promise<void> {
-		if (this.attached) {
+		if (this.guardObservedReadOnly("stopping a run")) return;
+		const attached = this.attached;
+		if (attached) {
 			try {
 				const sidecar = await this.ensureSidecar();
-				await sidecar.abort(this.attached.activeSessionId);
+				if (!this.isCurrentAttachment(attached)) return;
+				await sidecar.abort(attached.activeSessionId);
 			} catch (err) {
+				if (!this.isCurrentAttachment(attached)) return;
 				this.output.appendLine(`[prime-agent] attached abort failed: ${String(err)}`);
 				// Silence here means the operator keeps clicking Stop on a run that
 				// is still going, with no way to know the request never left us.
@@ -580,22 +871,8 @@ export class SessionController implements vscode.Disposable {
 			}
 			return;
 		}
-		if (this.observingId) {
-			// The RPC `abort` command carries no session target — it would abort our
-			// own idle background session while the observed run streams on. Only the
-			// daemon can address someone else's session.
-			const id = this.observingId;
-			try {
-				const sidecar = await this.ensureSidecar();
-				await sidecar.abort(id);
-			} catch (err) {
-				this.output.appendLine(`[prime-agent] observed abort failed: ${String(err)}`);
-				this.broadcast({
-					type: "notice",
-					level: "warning",
-					text: "You are watching this session read-only and it could not be stopped from here — stop it in the client that owns it.",
-				});
-			}
+		if (this.isReattaching()) {
+			this.broadcast({ type: "notice", level: "warning", text: "The live session is reconnecting; Stop is unavailable until it re-attaches." });
 			return;
 		}
 		if (!this.client?.running) return;
@@ -607,22 +884,40 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async newSession(): Promise<void> {
+		if (this.guardObservedReadOnly("starting a new session")) return;
+		const previousAttachment = this.attached;
+		const epoch = this.beginNavigation();
+		const observedAtStart = this.observingId;
 		await this.ensureStarted();
-		if (!this.client) return;
-		await this.detachFromDaemon();
-		await this.clearObservation();
-		this.resetChildrenBaseline();
-		const response = await this.client.request({ type: "new_session" });
+		if (!this.client || this.disposed || epoch !== this.viewEpoch) {
+			this.restoreAttachedView(previousAttachment, epoch);
+			return;
+		}
+		const client = this.client;
+		let response;
+		try {
+			response = await client.request({ type: "new_session" });
+		} catch (err) {
+			if (this.client === client && !this.disposed && epoch === this.viewEpoch) {
+				this.broadcast({ type: "notice", level: "error", text: `New session failed: ${err instanceof Error ? err.message : String(err)}` });
+				this.restoreAttachedView(previousAttachment, epoch);
+			}
+			return;
+		}
+		if (this.client !== client || this.disposed || epoch !== this.viewEpoch) return;
 		if (response.success) {
-			this.clearRunFlags();
-			this.changedFiles.clear();
-			this.clearThreadDiffs();
-			this.cachedMessages = [];
-			this.broadcast({ type: "sessionChildren", children: [] });
-			await this.refreshSnapshot();
-			this.scheduleChildrenRefresh();
+			if (!(await this.detachFromDaemon()) || epoch !== this.viewEpoch) return;
+			if (!(await this.clearObservation(observedAtStart, epoch))) return;
+			// History and New Session start a new top-level view. A breadcrumb into
+			// a prior session would make Back cross an explicit session boundary.
+			this.returnTargets = [];
+			this.resetChildrenBaseline();
+			this.resetViewedSessionState();
+			this.beginRpcRestore();
+			if (await this.restoreOwnRpcView(epoch)) this.scheduleChildrenRefresh();
 		} else {
 			this.broadcast({ type: "notice", level: "error", text: `New session failed: ${response.error ?? "unknown error"}` });
+			this.restoreAttachedView(previousAttachment, epoch);
 		}
 	}
 
@@ -634,28 +929,40 @@ export class SessionController implements vscode.Disposable {
 	 * await because a turn can start while we are connecting.
 	 */
 	async compact(instructions?: string, opts?: { betweenTurnsOnly?: boolean }): Promise<void> {
+		if (this.guardObservedReadOnly("compacting")) return;
 		const wouldAbortARun = (): boolean => opts?.betweenTurnsOnly === true && this.effectiveStreaming();
 		if (wouldAbortARun()) return;
-		if (this.attached) {
-			const sidecar = await this.ensureSidecar();
-			if (wouldAbortARun()) return;
+		const attached = this.attached;
+		if (attached) {
 			try {
-				await sidecar.compact(this.attached.activeSessionId);
+				const sidecar = await this.ensureSidecar();
+				if (!this.isCurrentAttachment(attached) || wouldAbortARun()) return;
+				await sidecar.compact(attached.activeSessionId);
 			} catch (err) {
-				this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${err instanceof Error ? err.message : String(err)}` });
+				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${err instanceof Error ? err.message : String(err)}` });
 			}
 			return;
 		}
+		if (this.isReattaching()) return;
+		const epoch = this.viewEpoch;
 		await this.ensureStarted();
-		if (!this.client || wouldAbortARun()) return;
-		const response = await this.client.request(
-			instructions ? { type: "compact", customInstructions: instructions } : { type: "compact" },
-			300_000,
-		);
-		if (!response.success) {
-			this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${response.error ?? "unknown error"}` });
-		} else {
-			await this.refreshSnapshot();
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch) || wouldAbortARun()) return;
+		try {
+			const response = await client.request(
+				instructions ? { type: "compact", customInstructions: instructions } : { type: "compact" },
+				300_000,
+			);
+			if (!this.isCurrentRpcView(client, epoch)) return;
+			if (!response.success) {
+				this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${response.error ?? "unknown error"}` });
+			} else {
+				await this.refreshSnapshot();
+			}
+		} catch (err) {
+			if (this.isCurrentRpcView(client, epoch)) {
+				this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${err instanceof Error ? err.message : String(err)}` });
+			}
 		}
 	}
 
@@ -665,39 +972,56 @@ export class SessionController implements vscode.Disposable {
 	 */
 	/** Rename the active session: daemon set_session_name on attached mode, RPC otherwise. */
 	async renameSession(name: string): Promise<void> {
+		if (this.guardObservedReadOnly("renaming a session")) return;
 		const trimmed = name.trim();
-		if (this.attached) {
-			const sidecar = await this.ensureSidecar();
+		const attached = this.attached;
+		if (attached) {
 			try {
-				await sidecar.request({ type: "set_session_name", activeSessionId: this.attached.activeSessionId, name: trimmed }, 15_000);
+				const sidecar = await this.ensureSidecar();
+				if (!this.isCurrentAttachment(attached)) return;
+				await sidecar.request({ type: "set_session_name", activeSessionId: attached.activeSessionId, name: trimmed }, 15_000);
+				if (!this.isCurrentAttachment(attached)) return;
 				if (this.rentedState) this.rentedState.sessionName = trimmed || undefined;
 				this.pushStatus();
 				this.broadcast({ type: "notice", level: "info", text: trimmed ? `Session renamed to "${trimmed}".` : "Session name cleared." });
 			} catch (err) {
-				this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${err instanceof Error ? err.message : String(err)}` });
+				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${err instanceof Error ? err.message : String(err)}` });
 			}
 			return;
 		}
+		const epoch = this.viewEpoch;
 		await this.ensureStarted();
-		if (!this.client) return;
-		const response = await this.client.request({ type: "set_session_name", name: trimmed }, 30_000);
-		if (response.success) {
-			if (this.state) this.state.sessionName = trimmed || undefined;
-			this.pushStatusLight();
-			this.broadcast({ type: "notice", level: "info", text: trimmed ? `Session renamed to "${trimmed}".` : "Session name cleared." });
-		} else {
-			this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${response.error ?? "unknown error"}` });
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch)) return;
+		try {
+			const response = await client.request({ type: "set_session_name", name: trimmed }, 30_000);
+			if (!this.isCurrentRpcView(client, epoch)) return;
+			if (response.success) {
+				if (this.state) this.state.sessionName = trimmed || undefined;
+				this.pushStatusLight();
+				this.broadcast({ type: "notice", level: "info", text: trimmed ? `Session renamed to "${trimmed}".` : "Session name cleared." });
+			} else {
+				this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${response.error ?? "unknown error"}` });
+			}
+		} catch (err) {
+			if (this.isCurrentRpcView(client, epoch)) {
+				this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${err instanceof Error ? err.message : String(err)}` });
+			}
 		}
 	}
 
 	/** Rename any history session: live sessions go through their owner; offline files get a session_info entry. */
 	async renameHistorySession(sessionPath: string, sessionId: string, name: string): Promise<void> {
+		if (this.guardObservedReadOnly("renaming a session")) return;
+		const session = await this.resolveHistorySession(sessionPath, sessionId);
+		if (!session) return;
+		sessionPath = session.path;
+		sessionId = session.id;
 		// History rows carry the session-file uuid, never the 12-char attach
 		// handle — comparing only the handle sent the operator to the "rename it
 		// from the terminal" refusal for the session they are browsing.
 		if (
-			this.state?.sessionId === sessionId ||
-			this.attached?.activeSessionId === sessionId ||
+			(!this.attached && this.state?.sessionId === sessionId) ||
 			this.attached?.sessionId === sessionId ||
 			(this.attached?.sessionPath !== undefined && normalizeFsPath(this.attached.sessionPath) === normalizeFsPath(sessionPath))
 		) {
@@ -719,7 +1043,7 @@ export class SessionController implements vscode.Disposable {
 		} catch (err) {
 			// Daemon down, or it has no record of this file — fall through to the
 			// file append, which is exactly what the daemon does for an offline row.
-			if (isSessionActive(sessionPath)) {
+			if (await isSessionActive(sessionPath)) {
 				this.broadcast({
 					type: "notice",
 					level: "error",
@@ -728,8 +1052,7 @@ export class SessionController implements vscode.Disposable {
 				return;
 			}
 		}
-		const { renameSessionOffline } = await import("./session-actions.js");
-		const result = await renameSessionOffline(sessionPath, name);
+		const result = await renameSessionOffline(sessionPath, session.fileId, name);
 		if (result.ok) {
 			this.broadcast({ type: "notice", level: "info", text: `Session renamed to "${trimmed}".` });
 			this.savedCatalog = null;
@@ -740,37 +1063,45 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async forkFromUser(ordinal: number): Promise<void> {
+		if (this.guardObservedReadOnly("forking")) return;
 		// Fork what is on screen. Against the RPC subprocess this would fork our
 		// idle background session and still report "Forked the session".
 		if (this.effectiveStreaming()) {
 			this.broadcast({ type: "notice", level: "error", text: "Wait for the current run to finish before forking." });
 			return;
 		}
-		if (this.attached) {
-			const id = this.attached.activeSessionId;
+		const attached = this.attached;
+		if (attached) {
+			const id = attached.activeSessionId;
 			try {
 				const sidecar = await this.ensureSidecar();
+				if (!this.isCurrentAttachment(attached)) return;
 				const data = await sidecar.request<{ messages?: Array<{ entryId: string; text: string }> }>(
 					{ type: "get_user_messages_for_forking", activeSessionId: id },
 					30_000,
 				);
+				if (!this.isCurrentAttachment(attached)) return;
 				const target = (data.messages ?? [])[ordinal];
 				if (!target) {
 					this.broadcast({ type: "notice", level: "error", text: `No forkable message at position ${ordinal + 1} (${(data.messages ?? []).length} available).` });
 					return;
 				}
 				await sidecar.request({ type: "fork", activeSessionId: id, entryId: target.entryId }, 60_000);
+				if (!this.isCurrentAttachment(attached)) return;
 				this.broadcast({ type: "notice", level: "info", text: "Forked the session from that message." });
 				await this.refreshSnapshot();
 				void this.listHistory();
 			} catch (err) {
-				this.broadcast({ type: "notice", level: "error", text: `Fork failed: ${err instanceof Error ? err.message : String(err)}` });
+				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `Fork failed: ${err instanceof Error ? err.message : String(err)}` });
 			}
 			return;
 		}
+		const epoch = this.viewEpoch;
 		await this.ensureStarted();
-		if (!this.client) return;
-		const list = await this.client.request({ type: "get_fork_messages" }, 30_000);
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch)) return;
+		const list = await client.request({ type: "get_fork_messages" }, 30_000);
+		if (!this.isCurrentRpcView(client, epoch)) return;
 		if (!list.success) {
 			this.broadcast({ type: "notice", level: "error", text: `Fork failed: ${list.error ?? "unknown error"}` });
 			return;
@@ -781,7 +1112,8 @@ export class SessionController implements vscode.Disposable {
 			this.broadcast({ type: "notice", level: "error", text: `No forkable message at position ${ordinal + 1} (${messages.length} available).` });
 			return;
 		}
-		const response = await this.client.request({ type: "fork", entryId: target.entryId }, 60_000);
+		const response = await client.request({ type: "fork", entryId: target.entryId }, 60_000);
+		if (!this.isCurrentRpcView(client, epoch)) return;
 		if (response.success) {
 			this.broadcast({ type: "notice", level: "info", text: "Forked the session from that message." });
 			await this.refreshSnapshot();
@@ -797,22 +1129,29 @@ export class SessionController implements vscode.Disposable {
 	 * different (usually empty) conversation under the header they can see.
 	 */
 	private async messagesForExport(): Promise<{ messages: Array<Record<string, unknown>>; state: RpcSessionState | null } | null> {
-		if (this.attached) {
+		if (this.guardObservedReadOnly("exporting or copying this conversation")) return null;
+		const attached = this.attached;
+		if (attached) {
 			try {
 				const sidecar = await this.ensureSidecar();
-				return { messages: await sidecar.getMessages(this.attached.activeSessionId), state: this.rentedState };
+				const messages = await sidecar.getMessages(attached.activeSessionId);
+				if (!this.isCurrentAttachment(attached)) return null;
+				return { messages, state: this.rentedState };
 			} catch (err) {
-				this.broadcast({ type: "notice", level: "error", text: `Could not load the attached session: ${err instanceof Error ? err.message : String(err)}` });
+				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `Could not load the attached session: ${err instanceof Error ? err.message : String(err)}` });
 				return null;
 			}
 		}
+		const epoch = this.viewEpoch;
 		try {
 			await this.ensureStarted();
 		} catch {
 			return null;
 		}
-		if (!this.client) return null;
-		const messagesRes = await this.client.request({ type: "get_messages" }, 90_000);
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch)) return null;
+		const messagesRes = await client.request({ type: "get_messages" }, 90_000);
+		if (!this.isCurrentRpcView(client, epoch)) return null;
 		if (!messagesRes.success) return null;
 		return { messages: (messagesRes.data as { messages?: Array<Record<string, unknown>> })?.messages ?? [], state: this.state };
 	}
@@ -842,8 +1181,12 @@ export class SessionController implements vscode.Disposable {
 		return `pa-draft:${this.sessionKey()}`;
 	}
 
-	persistDraft(text: string): void {
-		void this.context.globalState.update(this.draftKey(), text && text.trim() ? text : undefined);
+	persistDraft(text: string, sessionId: string): void {
+		// The webview sends debounced changes. Refuse a late message from the
+		// outgoing thread rather than writing it under the new thread's key.
+		if (sessionId !== this.sessionKey()) return;
+		const bounded = text.slice(0, 16_000);
+		void this.context.globalState.update(this.draftKey(), bounded && bounded.trim() ? bounded : undefined);
 	}
 
 	private restoreDraft(): void {
@@ -862,6 +1205,7 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	setCompactThreshold(percent: number | null): void {
+		if (this.guardObservedReadOnly("changing the compaction threshold")) return;
 		// Floor 20% is the operator's own constraint. The ceiling matches
 		// defaultCompactPercent()'s: the agent's own default is ~94% on a 262k
 		// window, and refusing anything above 80 made that default unreachable —
@@ -925,6 +1269,9 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async exportChat(): Promise<void> {
+		if (this.guardObservedReadOnly("exporting this conversation")) return;
+		const epoch = this.viewEpoch;
+		const attached = this.attached;
 		const picked = await vscode.window.showQuickPick(
 			[
 				{ label: "Markdown, tool calls summarized", detail: "Compact .md for humans — one line per tool call", mode: "md-tools" },
@@ -933,13 +1280,16 @@ export class SessionController implements vscode.Disposable {
 			] as Array<{ label: string; detail: string; mode: string }>,
 			{ title: "Export chat" },
 		);
-		if (!picked) return;
+		if (!picked || this.disposed || epoch !== this.viewEpoch || this.attached !== attached || this.observingId || this.observationRestoring) return;
 		if (picked.mode === "html") return this.exportHtml();
 		await this.exportMarkdown(picked.mode === "md-tools");
 	}
 
 	/** Export the current transcript as Markdown, generated client-side. */
 	async exportMarkdown(includeTools: boolean): Promise<void> {
+		if (this.guardObservedReadOnly("exporting this conversation")) return;
+		const epoch = this.viewEpoch;
+		const attached = this.attached;
 		const source = await this.messagesForExport();
 		if (!source) {
 			this.broadcast({ type: "notice", level: "error", text: "Could not load messages for export" });
@@ -948,51 +1298,72 @@ export class SessionController implements vscode.Disposable {
 		const md = buildMarkdownExport(source.messages, includeTools, source.state);
 		const target = vscode.Uri.file(path.join(this.workspaceRoot, `prime-agent-session-${Date.now()}.md`));
 		const picked = await vscode.window.showSaveDialog({ defaultUri: target, filters: { Markdown: ["md"] } });
-		if (!picked) return;
+		if (!picked || this.disposed || epoch !== this.viewEpoch || this.attached !== attached || this.observingId || this.observationRestoring) return;
 		await vscode.workspace.fs.writeFile(picked, Buffer.from(md, "utf8"));
 		void vscode.window.showInformationMessage(`Chat exported to ${picked.fsPath}`);
 	}
 
 	async exportHtml(): Promise<void> {
+		if (this.guardObservedReadOnly("exporting this conversation")) return;
+		if (!this.workspaceRoot) return;
+		const epoch = this.viewEpoch;
+		const attached = this.attached;
 		const target = vscode.Uri.file(path.join(this.workspaceRoot, `prime-agent-session-${Date.now()}.html`));
 		const picked = await vscode.window.showSaveDialog({ defaultUri: target, filters: { HTML: ["html"] } });
-		if (!picked) return;
-		if (this.attached) {
+		if (!picked || this.disposed || epoch !== this.viewEpoch || this.attached !== attached || this.observingId || this.observationRestoring) return;
+		if (attached) {
 			try {
 				const sidecar = await this.ensureSidecar();
-				await sidecar.request({ type: "export_html", activeSessionId: this.attached.activeSessionId, outputPath: picked.fsPath }, 60_000);
+				if (!this.isCurrentAttachment(attached)) return;
+				await sidecar.request({ type: "export_html", activeSessionId: attached.activeSessionId, outputPath: picked.fsPath }, 60_000);
+				if (!this.isCurrentAttachment(attached)) return;
 				void vscode.window.showInformationMessage(`Chat exported to ${picked.fsPath}`);
-			} catch (err) {
-				this.broadcast({ type: "notice", level: "error", text: `Export failed: ${err instanceof Error ? err.message : String(err)}` });
+				} catch (err) {
+					if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `Export failed: ${err instanceof Error ? err.message : String(err)}` });
 			}
 			return;
 		}
 		await this.ensureStarted();
-		if (!this.client) return;
-		const response = await this.client.request({ type: "export_html", outputPath: picked.fsPath }, 60_000);
-		if (response.success) {
-			void vscode.window.showInformationMessage(`Chat exported to ${picked.fsPath}`);
-		} else {
-			this.broadcast({ type: "notice", level: "error", text: `Export failed: ${response.error ?? "unknown error"}` });
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch)) return;
+		try {
+			const response = await client.request({ type: "export_html", outputPath: picked.fsPath }, 60_000);
+			if (!this.isCurrentRpcView(client, epoch)) return;
+			if (response.success) {
+				void vscode.window.showInformationMessage(`Chat exported to ${picked.fsPath}`);
+			} else {
+				this.broadcast({ type: "notice", level: "error", text: `Export failed: ${response.error ?? "unknown error"}` });
+			}
+		} catch (err) {
+			if (this.isCurrentRpcView(client, epoch)) {
+				this.broadcast({ type: "notice", level: "error", text: `Export failed: ${err instanceof Error ? err.message : String(err)}` });
+			}
 		}
 	}
 
 	async setModel(provider: string, modelId: string): Promise<void> {
+		if (this.guardObservedReadOnly("changing the model")) return;
 		// Attached sessions are owned by the daemon, not by our RPC subprocess.
 		// Sending set_model to the subprocess would retarget a session the
 		// operator isn't looking at, while the pill claims the switch landed.
-		if (this.attached) {
+		const attached = this.attached;
+		if (attached) {
 			try {
 				const sidecar = await this.ensureSidecar();
-				await sidecar.request({ type: "set_model", activeSessionId: this.attached.activeSessionId, provider, modelId }, 30_000);
+				if (!this.isCurrentAttachment(attached)) return;
+				await sidecar.request({ type: "set_model", activeSessionId: attached.activeSessionId, provider, modelId }, 30_000);
+				if (!this.isCurrentAttachment(attached)) return;
 				await this.refreshAttachedState();
 			} catch (err) {
-				this.broadcast({ type: "notice", level: "error", text: `set_model failed: ${err instanceof Error ? err.message : String(err)}` });
+				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `set_model failed: ${err instanceof Error ? err.message : String(err)}` });
 			}
 			return;
 		}
-		if (!this.client?.running) return;
-		const response = await this.client.request({ type: "set_model", provider, modelId });
+		const client = this.client;
+		const epoch = this.viewEpoch;
+		if (!client?.running) return;
+		const response = await client.request({ type: "set_model", provider, modelId });
+		if (!this.isCurrentRpcView(client, epoch)) return;
 		if (response.success) {
 			await this.refreshStateAndStats();
 		} else {
@@ -1001,27 +1372,55 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async setThinkingLevel(level: string): Promise<void> {
-		if (this.attached) {
+		if (this.guardObservedReadOnly("changing the thinking level")) return;
+		const attached = this.attached;
+		if (attached) {
 			try {
 				const sidecar = await this.ensureSidecar();
-				await sidecar.request({ type: "set_thinking_level", activeSessionId: this.attached.activeSessionId, level }, 30_000);
+				if (!this.isCurrentAttachment(attached)) return;
+				await sidecar.request({ type: "set_thinking_level", activeSessionId: attached.activeSessionId, level }, 30_000);
+				if (!this.isCurrentAttachment(attached)) return;
 				await this.refreshAttachedState();
 			} catch (err) {
-				this.broadcast({ type: "notice", level: "error", text: `set_thinking_level failed: ${err instanceof Error ? err.message : String(err)}` });
+				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `set_thinking_level failed: ${err instanceof Error ? err.message : String(err)}` });
 			}
 			return;
 		}
-		if (!this.client?.running) return;
-		const response = await this.client.request({ type: "set_thinking_level", level });
+		const client = this.client;
+		const epoch = this.viewEpoch;
+		if (!client?.running) return;
+		const response = await client.request({ type: "set_thinking_level", level });
+		if (!this.isCurrentRpcView(client, epoch)) return;
 		if (response.success) {
 			await this.refreshStateAndStats();
 		}
 	}
 
 	async listModels(): Promise<void> {
+		if (this.guardObservedReadOnly("listing models")) return;
+		const attached = this.attached;
+		if (attached) {
+			try {
+				const sidecar = await this.ensureSidecar();
+				if (!this.isCurrentAttachment(attached)) return;
+				const data = await sidecar.request<{ models?: RpcModel[] }>(
+					{ type: "get_available_models", activeSessionId: attached.activeSessionId },
+					60_000,
+				);
+				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "models", models: data.models ?? [] });
+			} catch (err) {
+				if (this.isCurrentAttachment(attached)) {
+					this.broadcast({ type: "notice", level: "error", text: `Could not list attached-session models: ${err instanceof Error ? err.message : String(err)}` });
+				}
+			}
+			return;
+		}
+		const epoch = this.viewEpoch;
 		await this.ensureStarted();
-		if (!this.client) return;
-		const response = await this.client.request({ type: "get_available_models" }, 60_000);
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch)) return;
+		const response = await client.request({ type: "get_available_models" }, 60_000);
+		if (!this.isCurrentRpcView(client, epoch)) return;
 		if (response.success) {
 			// Forwarded verbatim: the payload is the agent's whole Model object, and
 			// the webview needs the fields this cast used to hide (thinkingLevelMap).
@@ -1031,9 +1430,13 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async listCommands(): Promise<void> {
+		if (this.guardObservedReadOnly("listing commands")) return;
+		const epoch = this.viewEpoch;
 		await this.ensureStarted();
-		if (!this.client) return;
-		const response = await this.client.request({ type: "get_commands" }, 30_000);
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch)) return;
+		const response = await client.request({ type: "get_commands" }, 30_000);
+		if (!this.isCurrentRpcView(client, epoch)) return;
 		if (response.success) {
 			const data = response.data as { commands?: RpcSlashCommand[] };
 			this.broadcast({ type: "commands", commands: data.commands ?? [] });
@@ -1045,21 +1448,66 @@ export class SessionController implements vscode.Disposable {
 		void this.listHistory();
 	}
 
+	/**
+	 * History actions are capabilities, not arbitrary file operations. A webview
+	 * may only act on a session record the host generated from its catalog. If a
+	 * sidebar was reloaded, refresh once before rejecting the stale row.
+	 */
+	private async resolveHistorySession(sessionPath: string, sessionId: string): Promise<ResolvedHistorySession | null> {
+		if (typeof sessionPath !== "string" || typeof sessionId !== "string" || !sessionId || !/^[A-Za-z0-9_-]+$/.test(sessionId)) {
+			this.broadcast({ type: "notice", level: "error", text: "Invalid session reference." });
+			return null;
+		}
+		const target = normalizeFsPath(sessionPath);
+		let rows = this.actionHistory ?? this.lastHistory;
+		let match = rows?.find((row) => row.id === sessionId && normalizeFsPath(row.path) === target);
+		if (!match) {
+			rows = await this.collectHistory();
+			this.lastHistory = rows;
+			match = rows.find((row) => row.id === sessionId && normalizeFsPath(row.path) === target);
+		}
+		if (!match) {
+			this.broadcast({ type: "notice", level: "warning", text: "That session is no longer available in history." });
+			return null;
+		}
+		try {
+			const stat = await fs.lstat(match.path);
+			const resolvedPath = path.resolve(match.path);
+			const fileId = path.basename(resolvedPath, ".jsonl");
+			if (!stat.isFile() || stat.isSymbolicLink() || !/^[A-Za-z0-9_-]+$/.test(fileId) || path.basename(resolvedPath) !== `${fileId}.jsonl`) {
+				throw new Error("not a regular session file");
+			}
+			// Daemon catalogs may expose a runtime/session UUID that differs from the
+			// transcript filename stem. Keep the former for view identity and derive
+			// the latter only after resolving this host-issued path for file actions.
+			return { ...match, path: resolvedPath, fileId };
+		} catch {
+			this.broadcast({ type: "notice", level: "warning", text: "That session file is no longer available." });
+			return null;
+		}
+	}
+
 	// ------------------------------------------------------------------
 	// Session deletion (same conventions as the CLI: trash-first + artifacts)
 	// ------------------------------------------------------------------
 
 	async deleteSessionByPath(sessionPath: string, sessionId: string): Promise<void> {
+		if (this.guardObservedReadOnly("deleting a session")) return;
+		const session = await this.resolveHistorySession(sessionPath, sessionId);
+		if (!session) return;
+		sessionPath = session.path;
+		sessionId = session.id;
+		const fileId = session.fileId;
 		// The attached session is one the operator is in, so it earns the honest
 		// refusal rather than "close it there first" — the sentence #19 rejected.
-		if (sessionId === this.state?.sessionId || sessionId === this.attached?.sessionId || sessionId === this.attached?.activeSessionId) {
+		if ((!this.attached && sessionId === this.state?.sessionId) || sessionId === this.attached?.sessionId) {
 			this.broadcast({ type: "notice", level: "warning", text: "You can't delete the session you're in. Start a new one first." });
 			return;
 		}
 		// The CLI refuses to delete a resident session too (delete_saved_session:
 		// "Cannot delete the currently active session") — but it offers Archive for
 		// exactly this case, so say that instead of stranding the operator.
-		if (isSessionActive(sessionPath)) {
+		if (await isSessionActive(sessionPath)) {
 			this.broadcast({
 				type: "notice",
 				level: "warning",
@@ -1067,11 +1515,12 @@ export class SessionController implements vscode.Disposable {
 			});
 			return;
 		}
-		const result = await deleteSession(sessionPath);
+		const result = await deleteSession(sessionPath, fileId);
 		if (result.ok) {
 			const method = result.method === "trash" ? "moved to Trash" : "deleted";
 			this.broadcast({ type: "notice", level: "info", text: `Session ${method} (artifacts removed).` });
 			this.forgetHistoryRow(sessionPath);
+			this.savedCatalog = null;
 			await this.listHistory();
 		} else {
 			this.broadcast({ type: "notice", level: "error", text: `Could not delete session: ${result.error ?? "unknown error"}` });
@@ -1183,12 +1632,23 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async listHistory(): Promise<void> {
+		const generation = ++this.historyRequestGeneration;
 		// Repaint the previous answer first. The sidebar webview is torn down on
 		// every hide, so without a host-side cache the list flashes "Loading…"
 		// through a full catalog fetch each time the operator comes back.
 		if (this.lastHistory) this.broadcast({ type: "history", sessions: this.lastHistory });
-		const sessions = await this.collectHistory();
+		let sessions: RecentSession[];
+		try {
+			sessions = await this.collectHistory();
+		} catch (err) {
+			if (!this.disposed && generation === this.historyRequestGeneration) {
+				this.broadcast({ type: "notice", level: "error", text: `Could not load history: ${err instanceof Error ? err.message : String(err)}` });
+			}
+			return;
+		}
+		if (this.disposed || generation !== this.historyRequestGeneration) return;
 		this.lastHistory = sessions;
+		this.actionHistory = sessions;
 		this.broadcast({ type: "history", sessions });
 	}
 
@@ -1203,10 +1663,19 @@ export class SessionController implements vscode.Disposable {
 	 * hand it, and a hit with no visible reason reads as a bug.
 	 */
 	async searchHistory(query: string): Promise<void> {
+		const generation = ++this.historyRequestGeneration;
 		const needle = query.trim().toLowerCase();
-		const base = await this.collectHistory();
+		let base: RecentSession[];
+		try {
+			base = await this.collectHistory();
+		} catch {
+			if (!this.disposed && generation === this.historyRequestGeneration) this.broadcast({ type: "history", sessions: [] });
+			return;
+		}
+		if (this.disposed || generation !== this.historyRequestGeneration) return;
 		this.lastHistory = base;
 		if (needle.length < 2) {
+			this.actionHistory = base;
 			this.broadcast({ type: "history", sessions: base });
 			return;
 		}
@@ -1218,6 +1687,7 @@ export class SessionController implements vscode.Disposable {
 			this.broadcast({ type: "history", sessions: base });
 			return;
 		}
+		if (this.disposed || generation !== this.historyRequestGeneration) return;
 		const snippetByPath = new Map<string, string>();
 		const hits: RecentSession[] = [];
 		const knownPaths = new Set(base.map((s) => normalizeFsPath(s.path)));
@@ -1258,7 +1728,9 @@ export class SessionController implements vscode.Disposable {
 			const snippet = snippetByPath.get(normalizeFsPath(s.path));
 			return snippet ? { ...s, matchSnippet: snippet } : s;
 		});
-		this.broadcast({ type: "history", sessions: [...decorated, ...hits] });
+		const results = [...decorated, ...hits];
+		this.actionHistory = results;
+		this.broadcast({ type: "history", sessions: results });
 	}
 
 	/** Drop a row from the replay cache so a deleted/archived session never flashes back. */
@@ -1266,6 +1738,7 @@ export class SessionController implements vscode.Disposable {
 		if (!this.lastHistory) return;
 		const target = normalizeFsPath(sessionPath);
 		this.lastHistory = this.lastHistory.filter((s) => normalizeFsPath(s.path) !== target);
+		if (this.actionHistory) this.actionHistory = this.actionHistory.filter((s) => normalizeFsPath(s.path) !== target);
 	}
 
 	private async savedSessionCatalog(): Promise<SavedSessionInfo[]> {
@@ -1278,10 +1751,22 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** Stop a live session from the history view (daemon abort on its active id). */
-	async stopSession(_sessionPath: string, activeSessionId: string): Promise<void> {
+	async stopSession(sessionPath: string, sessionId: string): Promise<void> {
+		if (this.guardObservedReadOnly("stopping a session")) return;
+		const session = await this.resolveHistorySession(sessionPath, sessionId);
+		if (!session) return;
 		try {
 			const sidecar = await this.ensureSidecar();
-			await sidecar.abort(activeSessionId);
+			const resident = (await sidecar.list(true)).find(
+				(row) =>
+					row.activeSessionId &&
+					(row.sessionId === session.id || (row.sessionFile && normalizeFsPath(row.sessionFile) === normalizeFsPath(session.path))),
+			);
+			if (!resident?.activeSessionId) {
+				this.broadcast({ type: "notice", level: "warning", text: "That session is no longer running." });
+				return;
+			}
+			await sidecar.abort(resident.activeSessionId);
 			this.broadcast({ type: "notice", level: "info", text: "Stop requested for that session." });
 			void this.listHistory();
 		} catch (err) {
@@ -1298,7 +1783,13 @@ export class SessionController implements vscode.Disposable {
 	 * rewrite the file from its own entry list and drop our entry.
 	 */
 	async archiveSession(sessionPath: string, sessionId: string): Promise<void> {
-		if (sessionId === this.state?.sessionId || sessionId === this.attached?.sessionId || sessionId === this.attached?.activeSessionId) {
+		if (this.guardObservedReadOnly("archiving a session")) return;
+		const session = await this.resolveHistorySession(sessionPath, sessionId);
+		if (!session) return;
+		sessionPath = session.path;
+		sessionId = session.id;
+		const fileId = session.fileId;
+		if ((!this.attached && sessionId === this.state?.sessionId) || sessionId === this.attached?.sessionId) {
 			this.broadcast({ type: "notice", level: "warning", text: "You can't archive the session you're in. Start a new one first." });
 			return;
 		}
@@ -1309,11 +1800,21 @@ export class SessionController implements vscode.Disposable {
 			);
 			if (resident?.activeSessionId) {
 				await sidecar.request({ type: "kill", activeSessionId: resident.activeSessionId }, 30_000);
+				const stillResident = (await sidecar.list(true)).some(
+					(row) => row.activeSessionId === resident.activeSessionId,
+				);
+				if (stillResident) throw new Error("session is still stopping; try Archive again once it is inactive");
 			}
-		} catch {
-			// Daemon down means nothing is resident; the file append below stands alone.
+		} catch (err) {
+			// If the daemon is unavailable, a live lease is evidence enough that a
+			// file append could be overwritten by its owner. Refuse rather than claim
+			// an archive that the daemon can immediately undo.
+			if (await isSessionActive(sessionPath)) {
+				this.broadcast({ type: "notice", level: "error", text: `Could not archive the live session: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
 		}
-		const result = await archiveSessionFile(sessionPath);
+		const result = await archiveSessionFile(sessionPath, fileId);
 		if (result.ok) {
 			this.broadcast({ type: "notice", level: "info", text: "Session archived — the transcript is kept, and it stays resumable from the CLI." });
 			this.savedCatalog = null;
@@ -1325,9 +1826,45 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async pickModelQuickPick(): Promise<void> {
+		if (this.guardObservedReadOnly("choosing a model")) return;
+		const attached = this.attached;
+		if (attached) {
+			try {
+				const sidecar = await this.ensureSidecar();
+				if (!this.isCurrentAttachment(attached)) return;
+				const [modelData, state] = await Promise.all([
+					sidecar.request<{ models?: RpcModel[] }>({ type: "get_available_models", activeSessionId: attached.activeSessionId }, 60_000),
+					sidecar.getState(attached.activeSessionId),
+				]);
+				if (!this.isCurrentAttachment(attached)) return;
+				this.rentedState = state as RpcSessionState;
+				const models = modelData.models ?? [];
+				const current = this.rentedState.model;
+				const picked = await vscode.window.showQuickPick(
+					models.map((model) => ({
+						label: `${model.provider}/${model.id}`,
+						description: model.id === current?.id && model.provider === current?.provider ? "(current)" : model.name,
+						model,
+					})),
+					{ title: "Select model", placeHolder: `${models.length} models available` },
+				);
+				// Native quick-picks may stay open while the user navigates. A choice
+				// made for the old attached session must never retarget the new view.
+				if (!picked || !this.isCurrentAttachment(attached)) return;
+				await this.setModel(picked.model.provider, picked.model.id);
+			} catch (err) {
+				if (this.isCurrentAttachment(attached)) {
+					this.broadcast({ type: "notice", level: "error", text: `Could not list attached-session models: ${err instanceof Error ? err.message : String(err)}` });
+				}
+			}
+			return;
+		}
+		const epoch = this.viewEpoch;
 		await this.ensureStarted();
-		if (!this.client) return;
-		const response = await this.client.request({ type: "get_available_models" }, 60_000);
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch) || this.observationRestoring) return;
+		const response = await client.request({ type: "get_available_models" }, 60_000);
+		if (!this.isCurrentRpcView(client, epoch) || this.observationRestoring) return;
 		if (!response.success) {
 			this.broadcast({ type: "notice", level: "error", text: `Could not list models: ${response.error ?? "unknown error"}` });
 			return;
@@ -1342,14 +1879,40 @@ export class SessionController implements vscode.Disposable {
 			})),
 			{ title: "Select model", placeHolder: `${models.length} models available` },
 		);
-		if (picked) {
+		if (picked && this.isCurrentRpcView(client, epoch) && !this.observationRestoring) {
 			await this.setModel(picked.model.provider, picked.model.id);
 		}
 	}
 
 	async pickThinkingQuickPick(): Promise<void> {
+		if (this.guardObservedReadOnly("choosing a thinking level")) return;
+		const attached = this.attached;
+		if (attached) {
+			try {
+				const sidecar = await this.ensureSidecar();
+				if (!this.isCurrentAttachment(attached)) return;
+				const state = (await sidecar.getState(attached.activeSessionId)) as RpcSessionState;
+				if (!this.isCurrentAttachment(attached)) return;
+				this.rentedState = state;
+				const levels = supportedThinkingLevels(state.model) ?? THINKING_LEVELS.slice(0, 5);
+				const current = state.thinkingLevel ?? "off";
+				const picked = await vscode.window.showQuickPick(
+					levels.map((level) => ({ label: level, description: level === current ? "(current)" : undefined })),
+					{ title: "Select thinking level" },
+				);
+				if (!picked || !this.isCurrentAttachment(attached)) return;
+				await this.setThinkingLevel(picked.label);
+			} catch (err) {
+				if (this.isCurrentAttachment(attached)) {
+					this.broadcast({ type: "notice", level: "error", text: `Could not load attached-session thinking levels: ${err instanceof Error ? err.message : String(err)}` });
+				}
+			}
+			return;
+		}
+		const epoch = this.viewEpoch;
 		await this.ensureStarted();
-		if (!this.client) return;
+		const client = this.client;
+		if (!client || !this.isCurrentRpcView(client, epoch) || this.observationRestoring) return;
 		// Same source as the brain popout: offering a level the model rejects only
 		// buys the operator a silent clamp to something they did not pick.
 		const levels = supportedThinkingLevels(this.state?.model) ?? THINKING_LEVELS.slice(0, 5);
@@ -1358,37 +1921,86 @@ export class SessionController implements vscode.Disposable {
 			levels.map((level) => ({ label: level, description: level === current ? "(current)" : undefined })),
 			{ title: "Select thinking level" },
 		);
-		if (picked) {
+		if (picked && this.isCurrentRpcView(client, epoch) && !this.observationRestoring) {
 			await this.setThinkingLevel(picked.label);
 		}
 	}
 
-	async switchSession(sessionPath: string, sessionId?: string): Promise<void> {
+	async switchSession(sessionPath: string, sessionId: string): Promise<void> {
+		// Claim navigation ownership before validating the host-issued capability:
+		// a slow filesystem validation for an old click must never win over a newer
+		// history selection.
+		const previousAttachment = this.attached;
+		const epoch = this.beginNavigation();
+		const observedAtStart = this.observingId;
+		const session = await this.resolveHistorySession(sessionPath, sessionId);
+		if (!session || this.disposed || epoch !== this.viewEpoch) {
+			this.restoreAttachedView(previousAttachment, epoch);
+			return;
+		}
+		sessionPath = session.path;
+		sessionId = session.id;
+		// Re-attaching an already attached session and then releasing the previous
+		// attachment would release the attachment we just refreshed. Treat this as
+		// the no-op the history row represents instead.
+		if (this.attached && normalizeFsPath(this.attached.sessionPath) === normalizeFsPath(sessionPath)) {
+			this.broadcast({ type: "notice", level: "info", text: "You are already viewing that session." });
+			this.restoreAttachedView(previousAttachment, epoch);
+			return;
+		}
 		await this.ensureStarted();
-		if (!this.client) return;
-		await this.detachFromDaemon();
-		await this.clearObservation();
-		const response = await this.client.request({ type: "switch_session", sessionPath }, 60_000);
+		if (!this.client || this.disposed || epoch !== this.viewEpoch) {
+			this.restoreAttachedView(previousAttachment, epoch);
+			return;
+		}
+		const client = this.client;
+		let response;
+		try {
+			response = await client.request({ type: "switch_session", sessionPath }, 60_000);
+		} catch (err) {
+			if (this.client === client && !this.disposed && epoch === this.viewEpoch) {
+				this.broadcast({ type: "notice", level: "error", text: `Could not resume session: ${err instanceof Error ? err.message : String(err)}` });
+				this.restoreAttachedView(previousAttachment, epoch);
+			}
+			return;
+		}
+		if (this.client !== client || this.disposed || epoch !== this.viewEpoch) return;
 		if (response.success) {
-			this.clearRunFlags();
-			this.changedFiles.clear();
-			this.clearThreadDiffs();
+			if (!(await this.detachFromDaemon(previousAttachment)) || epoch !== this.viewEpoch) return;
+			if (!(await this.clearObservation(observedAtStart, epoch))) return;
+			this.returnTargets = [];
+			this.resetViewedSessionState();
 			// Reset the spawn baseline with the strip: without this the next
 			// children refresh reads every subagent of the resumed session as
 			// "newly spawned" and blasts a card for each into the transcript.
 			this.resetChildrenBaseline();
-			this.broadcast({ type: "sessionChildren", children: [] });
-			await this.refreshSnapshot();
-			this.scheduleChildrenRefresh();
+			this.beginRpcRestore();
+			if (await this.restoreOwnRpcView(epoch)) this.scheduleChildrenRefresh();
 			return;
 		}
 		const error = response.error ?? "unknown error";
 		if (/already active/i.test(error)) {
-			const id = sessionId ?? path.basename(sessionPath, ".jsonl");
-			const attached = await this.attachViaDaemon(id, sessionPath);
-			if (attached) return;
-			const observed = await this.startObserving(id);
+			const id = sessionId;
+			const attached = await this.attachViaDaemon(id, sessionPath, epoch);
+			if (this.disposed || epoch !== this.viewEpoch) return;
+			if (attached) {
+				const currentAttachment = this.attached;
+				if (!currentAttachment || epoch !== this.viewEpoch) return;
+				if (previousAttachment && currentAttachment !== previousAttachment && this.sidecar?.connected) {
+					try {
+						await this.detachDaemonSession(this.sidecar, previousAttachment.activeSessionId);
+					} catch {
+						// The daemon may already have released the prior viewer.
+					}
+				}
+				if (!(await this.clearObservation(observedAtStart, epoch))) return;
+				this.returnTargets = [];
+				return;
+			}
+			const observed = await this.startObserving(id, previousAttachment, epoch, sessionPath, observedAtStart);
+			if (this.disposed || epoch !== this.viewEpoch) return;
 			if (observed) return;
+			this.restoreAttachedView(previousAttachment, epoch);
 			this.broadcast({
 				type: "notice",
 				level: "warning",
@@ -1399,15 +2011,48 @@ export class SessionController implements vscode.Disposable {
 			return;
 		}
 		this.broadcast({ type: "notice", level: "error", text: `Could not resume session: ${error}` });
+		this.restoreAttachedView(previousAttachment, epoch);
 	}
 
 	/** Attach to a resident session read-only through the daemon observe channel. */
-	private async startObserving(sessionId: string): Promise<boolean> {
+	private async startObserving(
+		sessionId: string,
+		previousAttachment: AttachRef | null = this.attached,
+		epoch = this.viewEpoch,
+		sessionPath?: string,
+		observedAtStart: string | null = this.observingId,
+	): Promise<boolean> {
 		if (!this.client) return false;
-		const response = await this.client.request({ type: "observe", activeSessionId: sessionId }, 30_000);
+		const client = this.client;
+		const response = await client.request({ type: "observe", activeSessionId: sessionId }, 30_000);
+		if (
+			this.client !== client ||
+			this.disposed ||
+			epoch !== this.viewEpoch ||
+			this.attached !== previousAttachment ||
+			this.observingId !== observedAtStart
+		)
+			return false;
 		if (!response.success) return false;
+		// Do not retain a writable attachment beneath an observed transcript. If
+		// attaching B failed after we were attached to A, leaving A here made every
+		// action that fell through to `attached` silently operate on A.
+		if (!(await this.detachFromDaemon(previousAttachment)) || epoch !== this.viewEpoch) return false;
+		if (!(await this.clearObservation(observedAtStart, epoch))) return false;
+		// A daemon reconnect belongs to the writable attachment that just gave way
+		// to this read-only view. Do not let its already-in-flight attach complete
+		// underneath observation and start delivering a second event stream.
+		this.attachAttempt = null;
+		this.attachAttemptEpoch = null;
+		this.clearReattachTimer();
+		this.returnTargets = [];
+		this.resetChildrenBaseline();
+		this.resetViewedSessionState();
+		this.observationRestoring = false;
 		this.observingId = sessionId;
+		this.observedSession = { activeSessionId: sessionId, sessionId, sessionPath };
 		const messages = (response.data as { messages?: AgentMessage[] })?.messages ?? [];
+		this.cachedMessages = messages;
 		this.broadcast({ type: "observedSession", sessionId, messages });
 		this.pushStatus();
 		return true;
@@ -1418,22 +2063,35 @@ export class SessionController implements vscode.Disposable {
 	// Daemon sidecar: attached live sessions (terminal parity)
 	// ----------------------------------------------------------------
 
-	private async ensureSidecar(): Promise<DaemonSidecar> {
+	private async ensureSidecar(options: { reattach?: boolean } = {}): Promise<DaemonSidecar> {
 		if (!this.sidecar) {
 			this.sidecar = new DaemonSidecar();
 			this.sidecar.onEvent = (message) => this.onDaemonEvent(message);
-			this.sidecar.onAnyLine = (line) => this.debugLog.append(`sidecar-line: ${line.slice(0, 100)}`);
+			this.sidecar.onAnyLine = (byteLength) => this.debugLog.append(`sidecar-line bytes=${byteLength}`);
 			this.sidecar.onClose = () => {
 				if (this.attached) {
-					this.attachAttempt = { ...this.attached };
+					const attachment = this.attached;
+					const attachmentEpoch = this.attachedEpoch;
 					// The daemon dropped our attach registration with the socket, so we
 					// are NOT following this session any more. Leaving `attached` set
 					// makes the re-attach guard below permanently false and the notice
 					// below a lie: prompts would still land but no events would return.
 					this.attached = null;
-					this.broadcast({ type: "notice", level: "warning", text: "Daemon connection dropped — re-attaching when it comes back." });
+					this.attachedEpoch = null;
+					if (attachmentEpoch === this.viewEpoch) {
+						this.attachAttempt = { ...attachment };
+						this.attachAttemptEpoch = attachmentEpoch;
+						this.broadcast({ type: "notice", level: "warning", text: "Daemon connection dropped — re-attaching when it comes back." });
+					} else {
+						this.attachAttempt = null;
+						this.attachAttemptEpoch = null;
+						// A newer explicit navigation owns the display. Keep it
+						// non-interactive until that navigation either completes or
+						// restores an authoritative RPC snapshot.
+						this.observationRestoring = true;
+					}
 					this.pushStatus();
-					this.scheduleReattach(0);
+					if (attachmentEpoch === this.viewEpoch) this.scheduleReattach(0);
 				}
 			};
 		}
@@ -1441,12 +2099,41 @@ export class SessionController implements vscode.Disposable {
 			await this.sidecar.connect();
 		}
 		// Seamless re-attach after a drop: pick up exactly where the user was.
-		if (this.sidecar.connected && this.attachAttempt && !this.attached) {
+		if (options.reattach !== false && this.sidecar.connected && this.attachAttempt && !this.attached) {
 			const attempt = this.attachAttempt;
+			const attemptEpoch = this.attachAttemptEpoch;
+			if (attemptEpoch === null || attemptEpoch !== this.viewEpoch) {
+				if (this.attachAttempt === attempt) {
+					this.attachAttempt = null;
+					this.attachAttemptEpoch = null;
+					this.clearReattachTimer();
+				}
+				return this.sidecar;
+			}
 			try {
 				const result = await this.sidecar.attach(attempt.activeSessionId);
+				// The user may have switched, stopped observing, or disposed the panel
+				// while the daemon was answering. A late reattach must never reclaim the
+				// view (and therefore later prompts) from that newer navigation.
+				if (
+					this.disposed ||
+					this.viewEpoch !== attemptEpoch ||
+					this.attachAttempt !== attempt ||
+					this.attachAttemptEpoch !== attemptEpoch ||
+					this.attached !== null ||
+					this.observingId !== null
+				) {
+					try {
+						await this.detachDaemonSession(this.sidecar, attempt.activeSessionId);
+					} catch {
+						// The daemon may already have released the stale viewer.
+					}
+					return this.sidecar;
+				}
 				this.attached = attempt;
+				this.attachedEpoch = attemptEpoch;
 				this.clearReattachTimer();
+				this.observationRestoring = false;
 				this.applyAttachedSnapshot(result.snapshot);
 				this.broadcast({
 					type: "notice",
@@ -1455,11 +2142,54 @@ export class SessionController implements vscode.Disposable {
 				});
 			} catch {
 				// keep the attempt saved? user closed it in the meantime — drop
-				this.attachAttempt = null;
-				this.clearReattachTimer();
+				if (
+					!this.disposed &&
+					this.attachAttempt === attempt &&
+					this.attachAttemptEpoch === attemptEpoch &&
+					this.viewEpoch === attemptEpoch &&
+					this.attached === null
+				) {
+					this.attachAttempt = null;
+					this.attachAttemptEpoch = null;
+					this.clearReattachTimer();
+					// The shared transcript is still painted. Never make it writable-looking
+					// by falling through to the hidden RPC session before that session has
+					// produced a fresh snapshot.
+					this.observationRestoring = true;
+					const epoch = this.beginNavigation();
+					this.pushStatus();
+					void this.restoreAfterObservationClosed(epoch);
+				}
 			}
 		}
 		return this.sidecar;
+	}
+
+	/** Wait for an earlier release of this daemon handle before attaching it again. */
+	private async waitForDaemonDetach(activeSessionId: string): Promise<void> {
+		const pending = this.pendingDaemonDetaches.get(activeSessionId);
+		if (!pending) return;
+		try {
+			await pending;
+		} catch {
+			// A failed release leaves no daemon registration to wait on.
+		}
+	}
+
+	/**
+	 * Serialize detach calls by active handle. Without this, Browse can start
+	 * releasing parent A just as Back re-attaches A, and its late detach tears
+	 * down the fresh parent subscription.
+	 */
+	private async detachDaemonSession(sidecar: DaemonSidecar, activeSessionId: string): Promise<void> {
+		const prior = this.pendingDaemonDetaches.get(activeSessionId);
+		const chained = (prior ? prior.catch(() => {}) : Promise.resolve()).then(() => sidecar.detach(activeSessionId));
+		this.pendingDaemonDetaches.set(activeSessionId, chained);
+		try {
+			await chained;
+		} finally {
+			if (this.pendingDaemonDetaches.get(activeSessionId) === chained) this.pendingDaemonDetaches.delete(activeSessionId);
+		}
 	}
 
 	private reattachTimer: NodeJS.Timeout | null = null;
@@ -1479,15 +2209,15 @@ export class SessionController implements vscode.Disposable {
 	 */
 	private scheduleReattach(step: number): void {
 		this.clearReattachTimer();
-		if (!this.attachAttempt || this.attached) return;
+		if (this.disposed || !this.isReattaching()) return;
 		const delay = SessionController.REATTACH_BACKOFF[Math.min(step, SessionController.REATTACH_BACKOFF.length - 1)];
 		this.reattachTimer = setTimeout(() => {
 			this.reattachTimer = null;
-			if (!this.attachAttempt || this.attached) return;
+			if (this.disposed || !this.isReattaching()) return;
 			void this.ensureSidecar()
 				.catch(() => {})
 				.finally(() => {
-					if (this.attachAttempt && !this.attached) this.scheduleReattach(step + 1);
+					if (!this.disposed && this.isReattaching()) this.scheduleReattach(step + 1);
 				});
 		}, delay);
 	}
@@ -1502,7 +2232,9 @@ export class SessionController implements vscode.Disposable {
 		const inFlight = snapshot?.summary?.streamingMessage as AgentMessage | undefined;
 		// A turn already under way has no agent_start left to send us; without this
 		// the header, the Stop button and the queue/steer toggle all read "idle".
-		if (inFlight) this.streaming = true;
+		this.clearRunFlags();
+		this.streaming = Boolean(inFlight ?? this.rentedState?.isStreaming);
+		this.compacting = this.rentedState?.isCompacting === true;
 		this.broadcast({
 			type: "snapshot",
 			messages: this.cachedMessages,
@@ -1529,9 +2261,9 @@ export class SessionController implements vscode.Disposable {
 	 * Attach to a session that is already live somewhere else (a terminal).
 	 * The daemon brokers it; both clients see the same stream, both can prompt.
 	 */
-	private async attachViaDaemon(activeSessionId: string, sessionPath: string): Promise<boolean> {
+	private async attachViaDaemon(activeSessionId: string, sessionPath: string, epoch = this.beginNavigation()): Promise<boolean> {
 		try {
-			const sidecar = await this.ensureSidecar();
+			const sidecar = await this.ensureSidecar({ reattach: false });
 			// Resolve the canonical activeSessionId: root-session uuids and 12-char
 			// active windows differ, and events are addressed to the canonical id.
 			let canonicalId = activeSessionId;
@@ -1547,16 +2279,33 @@ export class SessionController implements vscode.Disposable {
 			} catch {
 				// list failed — fall back to what was asked (attach may still succeed)
 			}
+			await this.waitForDaemonDetach(canonicalId);
+			if (this.disposed || epoch !== this.viewEpoch) return false;
 			const result = await sidecar.attach(canonicalId);
+			if (this.disposed || epoch !== this.viewEpoch) {
+				try {
+					await this.detachDaemonSession(sidecar, canonicalId);
+				} catch {
+					// Late attach belongs to an obsolete navigation.
+				}
+				return false;
+			}
 			const returnedId = (result.snapshot as { activeSessionId?: string } | undefined)?.activeSessionId;
 			const finalId = returnedId ?? canonicalId;
 			const snapshot = result.snapshot;
-			// History rows, the delete guard and the rename guard all key on the
-			// session-file uuid, never on the 12-char attach handle.
+			// History rows and visible-session guards key on the daemon UUID, never
+			// the 12-char attach handle. It may differ from the JSONL filename stem.
 			const uuid =
 				(snapshot?.state as { sessionId?: string } | undefined)?.sessionId ?? snapshot?.summary?.sessionId ?? undefined;
-			this.attached = { activeSessionId: finalId, sessionPath, sessionId: uuid };
-			this.attachAttempt = { activeSessionId: finalId, sessionPath, sessionId: uuid };
+			// Keep the identity presented to a webview stable for this attachment.
+			// The daemon may reveal its UUID only in a later get_state reply; changing
+			// `sessionId` mid-view otherwise looks like a new chat and clears its draft.
+			const stableSessionId = uuid ?? (sessionPath ? path.basename(sessionPath, ".jsonl") : finalId);
+			const attachment = { activeSessionId: finalId, sessionPath, sessionId: stableSessionId };
+			this.attached = attachment;
+			this.attachedEpoch = epoch;
+			this.attachAttempt = { activeSessionId: finalId, sessionPath, sessionId: stableSessionId };
+			this.attachAttemptEpoch = epoch;
 			// Clear the strip only now that the switch is real — a different session
 			// owns nothing from the last view, but a failed attach must leave the
 			// operator's current strip (and its back row) exactly where it was.
@@ -1568,11 +2317,15 @@ export class SessionController implements vscode.Disposable {
 			this.clearRunFlags();
 			if (!snapshot?.messages) {
 				try {
-					this.cachedMessages = (await sidecar.getMessages(finalId)) as AgentMessage[];
+					const messages = await sidecar.getMessages(finalId);
+					if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return false;
+					this.cachedMessages = messages as AgentMessage[];
 				} catch {
+					if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return false;
 					this.cachedMessages = [];
 				}
 			}
+			if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return false;
 			void this.refreshAttachedState();
 			this.broadcast({
 				type: "notice",
@@ -1580,11 +2333,13 @@ export class SessionController implements vscode.Disposable {
 				text: "Attached to the live session — you can work here and in the terminal simultaneously.",
 			});
 			this.scheduleChildrenRefresh();
-			this.changedFiles.clear();
+			this.resetViewedSessionState();
 			this.clearThreadDiffs();
 			// Stats before the first paint: otherwise the gauge shows the previous
 			// session's context until the throttled status push catches up.
 			await this.fetchAttachedStats();
+			if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return false;
+			this.observationRestoring = false;
 			this.applyAttachedSnapshot(snapshot);
 			return true;
 		} catch (error) {
@@ -1593,12 +2348,23 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
-	private async detachFromDaemon(): Promise<void> {
-		if (this.attached && this.sidecar?.connected) {
-			await this.sidecar.detach(this.attached.activeSessionId);
+	private async detachFromDaemon(expected: AttachRef | null = this.attached): Promise<boolean> {
+		if (expected && this.sidecar?.connected) {
+			await this.detachDaemonSession(this.sidecar, expected.activeSessionId);
+		}
+		// A concurrent navigation attached a different session while the detach was
+		// in flight. Its state belongs to that navigation and must remain intact.
+		if (this.attached !== expected) {
+			// A sidecar close has already released `expected` and cleared the local
+			// attachment. Let the navigation that owned it continue; its epoch guards
+			// still reject an obsolete caller, while treating this as failure would
+			// strand the requested switch behind a disconnected old view.
+			return this.attached === null;
 		}
 		this.attached = null;
+		this.attachedEpoch = null;
 		this.attachAttempt = null;
+		this.attachAttemptEpoch = null;
 		this.rentedState = null;
 		// The run we were following belongs to the session we just let go of.
 		this.clearRunFlags();
@@ -1607,6 +2373,7 @@ export class SessionController implements vscode.Disposable {
 		// never made; the snapshot that follows rebuilds the real ones.
 		this.clearThreadDiffs();
 		this.clearReattachTimer();
+		return true;
 	}
 
 	/**
@@ -1626,6 +2393,7 @@ export class SessionController implements vscode.Disposable {
 	 * webview rebuilding the strip (and losing its scroll position) mid-burst.
 	 */
 	private scheduleChildrenRefresh(): void {
+		if (this.disposed) return;
 		// A refresh already on the wire will not see events that arrive during it,
 		// so remember to run once more instead of racing a second list.
 		if (this.childrenRefreshInFlight) {
@@ -1641,6 +2409,7 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	private async runChildrenRefresh(): Promise<void> {
+		if (this.disposed) return;
 		this.childrenRefreshInFlight = true;
 		this.childrenRefreshPending = false;
 		try {
@@ -1651,7 +2420,7 @@ export class SessionController implements vscode.Disposable {
 		} finally {
 			this.childrenRefreshInFlight = false;
 			this.lastChildrenRefreshMs = Date.now();
-			if (this.childrenRefreshPending) this.scheduleChildrenRefresh();
+			if (!this.disposed && this.childrenRefreshPending) this.scheduleChildrenRefresh();
 		}
 	}
 
@@ -1669,18 +2438,39 @@ export class SessionController implements vscode.Disposable {
 	 * copy on a session change.
 	 */
 	private resetChildrenBaseline(): void {
+		this.childrenContext += 1;
 		this.previousChildIds = null;
 		this.lastChildrenPayload = null;
+		this.browseableChildren.clear();
+		this.browseRefByActiveId.clear();
+	}
+
+	/** Mint a stable opaque capability for a child that is actually in this strip. */
+	private browseRefFor(activeSessionId: string, parentId?: string, contextId = this.childrenContext): string | undefined {
+		if (!activeSessionId) return undefined;
+		let ref = this.browseRefByActiveId.get(activeSessionId);
+		if (!ref) {
+			ref = randomUUID();
+			this.browseRefByActiveId.set(activeSessionId, ref);
+		}
+		this.browseableChildren.set(ref, { activeSessionId, parentId, contextId });
+		return ref;
 	}
 
 	private async refreshChildren(): Promise<void> {
 		if (!this.sidecar?.connected) return;
+		const epoch = this.viewEpoch;
+		const attachment = this.attached;
+		// The observed transcript is intentionally read-only. Never mine the hidden
+		// RPC session for child capabilities while it is on screen.
+		if (this.observingId) return;
 		try {
 			const sessions = await this.sidecar.list(true);
+			if (this.disposed || epoch !== this.viewEpoch || this.attached !== attachment || this.observingId) return;
 			let parentActive: string;
 			let parentUuid: string | undefined;
-			if (this.attached) {
-				parentActive = this.attached.activeSessionId;
+			if (attachment) {
+				parentActive = attachment.activeSessionId;
 				parentUuid = undefined;
 			} else {
 				parentActive = "";
@@ -1693,11 +2483,13 @@ export class SessionController implements vscode.Disposable {
 			// its uuid — diffing on the attach target alone reads that transition as
 			// a brand-new subagent and fabricates a spawn card for it.
 			const stableId = (s: SessionSummaryRef): string => s.sessionId ?? s.activeSessionId ?? s.id ?? "";
-			const asChild = (c: SessionSummaryRef): SessionChild => {
+			const asChild = (c: SessionSummaryRef, parentId?: string): SessionChild => {
 				const rich = c as Rich;
+				const activeSessionId = byActive(c);
 				return {
 					id: c.id ?? "",
-					activeSessionId: byActive(c),
+					activeSessionId,
+					...(parentId ? { browseRef: this.browseRefFor(activeSessionId, parentId) } : {}),
 					name: rich.sessionName,
 					runtimeKind: rich.runtimeKind,
 					rlmDepth: rich.rlmDepth,
@@ -1715,7 +2507,7 @@ export class SessionController implements vscode.Disposable {
 			let children = sessions.filter((s) => {
 				const rich = s as Rich;
 				if (!isChildKind(rich)) return false;
-				if (this.attached) {
+				if (attachment) {
 					return (
 						(s.parentActiveSessionId && s.parentActiveSessionId === parentActive) ||
 						(rich.parentSessionId === parentActive)
@@ -1728,10 +2520,10 @@ export class SessionController implements vscode.Disposable {
 			// session has a parent of its own), plus the viewed id for the
 			// highlight. Works for browsed subagents and terminal-live sessions.
 			let parent: SessionChild | undefined;
-			let siblings: SessionChild[] | undefined;
-			const currentId = this.attached ? parentActive : undefined;
+			let siblingRefs: SessionSummaryRef[] | undefined;
+			const currentId = attachment ? parentActive : undefined;
 			const currentSummary = sessions.find((s) => byActive(s) === currentId) as (SessionSummaryRef & Rich) | undefined;
-			if (this.attached && currentSummary) {
+			if (attachment && currentSummary) {
 				const parentActiveId = currentSummary.parentActiveSessionId;
 				const parentSummaryRef = parentActiveId
 					? sessions.find((s) => byActive(s) === parentActiveId)
@@ -1741,14 +2533,30 @@ export class SessionController implements vscode.Disposable {
 					// The session being viewed stays in the list. Dropping it was what
 					// made the count fall by one on entry and left the green "currently
 					// viewing" highlight with no row to land on.
-					siblings = sessions
+					siblingRefs = sessions
 						.filter((s) => {
 							const rich = s as Rich;
 							return isChildKind(rich) && rich.parentActiveSessionId === parentActiveId;
 						})
-						.map(asChild);
 				}
 			}
+			const childRows = children.map((child) => {
+				const rich = child as Rich;
+				return asChild(child, child.parentActiveSessionId ?? rich.parentSessionId);
+			});
+			const siblings = siblingRefs?.map((sibling) => {
+				const rich = sibling as Rich;
+				return asChild(sibling, sibling.parentActiveSessionId ?? rich.parentSessionId);
+			});
+			// A row leaves the visual strip when its daemon relationship changes. Its
+			// old ref must stop being authority even if a stale webview still holds it.
+			const activeRefs = new Set([...childRows, ...(siblings ?? [])].flatMap((row) => (row.browseRef ? [row.browseRef] : [])));
+			for (const [ref, capability] of this.browseableChildren) {
+				if (activeRefs.has(ref)) continue;
+				this.browseableChildren.delete(ref);
+				if (this.browseRefByActiveId.get(capability.activeSessionId) === ref) this.browseRefByActiveId.delete(capability.activeSessionId);
+			}
+			if (this.disposed || epoch !== this.viewEpoch || this.attached !== attachment || this.observingId) return;
 			// The Changes panel is "main + subagents combined", and a child's edits
 			// live only in the child's own session file. Harvest before the
 			// unchanged-roster early return below: a stable roster still edits.
@@ -1759,15 +2567,19 @@ export class SessionController implements vscode.Disposable {
 				? []
 				: children
 						.filter((c) => !prev.has(stableId(c)))
-						.map((c) => ({
-							activeSessionId: byActive(c),
-							name: (c as Rich).sessionName,
-							created: (c as Rich).created,
-						}));
+						.map((c) => {
+							const row = childRows.find((candidate) => candidate.activeSessionId === byActive(c));
+							return {
+								activeSessionId: byActive(c),
+								browseRef: row?.browseRef,
+								name: (c as Rich).sessionName,
+								created: (c as Rich).created,
+							};
+						});
 			this.previousChildIds = flat;
 			const payload: Extract<HostToWebview, { type: "sessionChildren" }> = {
 				type: "sessionChildren",
-				children: children.map(asChild),
+				children: childRows,
 				parent,
 				siblings,
 				viewedActiveSessionId: currentId,
@@ -1786,61 +2598,103 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** Browse into a subagent (or any resident session): attach via the daemon. */
-	async browseChild(activeSessionId: string): Promise<boolean> {
+	async browseChild(browseRef: string): Promise<boolean> {
+		if (this.guardObservedReadOnly("browsing a subagent")) return false;
+		const capability = this.browseableChildren.get(browseRef);
+		if (!capability || capability.contextId !== this.childrenContext) {
+			this.broadcast({ type: "notice", level: "error", text: "Invalid subagent reference." });
+			return false;
+		}
+		// Claim the navigation before either daemon round-trip. A second click wins;
+		// this older lookup may still finish, but it cannot attach over the newer view.
 		const previous = this.attached;
+		const epoch = this.beginNavigation();
+		let sidecar: DaemonSidecar;
+		let child: SessionSummaryRef | undefined;
+		try {
+			sidecar = await this.ensureSidecar({ reattach: false });
+			child = (await sidecar.list(true)).find((candidate) => (candidate.activeSessionId ?? candidate.id) === capability.activeSessionId);
+		} catch {
+			if (epoch !== this.viewEpoch) return false;
+			this.restoreAttachedView(previous, epoch);
+			this.broadcast({ type: "notice", level: "error", text: "Could not verify that subagent session." });
+			return false;
+		}
+		if (this.disposed || epoch !== this.viewEpoch || capability.contextId !== this.childrenContext) return false;
+		const parentId = child?.parentActiveSessionId ?? (child as { parentSessionId?: string } | undefined)?.parentSessionId;
+		const rich = child as (SessionSummaryRef & { runtimeKind?: string }) | undefined;
+		if (!child || !rich || !rich.runtimeKind || rich.runtimeKind === "root" || parentId !== capability.parentId) {
+			this.broadcast({ type: "notice", level: "error", text: "That subagent is no longer part of this session." });
+			this.restoreAttachedView(previous, epoch);
+			return false;
+		}
+		// Install the breadcrumb before the target's final snapshot finishes. Back
+		// can then recover the parent if the user changes their mind mid-attach.
+		const breadcrumb = previous ? ({ kind: "attached", ...previous } as const) : ({ kind: "rpc" } as const);
+		this.returnTargets.push(breadcrumb);
 		// Attach FIRST, let go second. Tearing the current session down up front
 		// meant a subagent the daemon can no longer rehydrate left the operator
 		// detached, with the strip and its "‹ parent" row destroyed and nothing
 		// left to click — the freeze reported in the build thread.
-		const attached = await this.attachViaDaemon(activeSessionId, "");
+		const attached = await this.attachViaDaemon(capability.activeSessionId, child.sessionFile ?? "", epoch);
+		if (this.disposed || epoch !== this.viewEpoch) {
+			if (this.returnTargets.at(-1) === breadcrumb) this.returnTargets.pop();
+			return false;
+		}
 		if (!attached) {
 			this.broadcast({ type: "notice", level: "error", text: "Could not attach to that subagent session (it may be gone)." });
+			if (this.returnTargets.at(-1) === breadcrumb) this.returnTargets.pop();
+			this.restoreAttachedView(previous, epoch);
 			this.scheduleChildrenRefresh();
 			return false;
 		}
-		this.returnTarget = previous ? { kind: "attached", ...previous } : { kind: "rpc" };
-		if (previous && this.sidecar?.connected) {
+		if (previous && this.sidecar?.connected && epoch === this.viewEpoch && this.attached !== previous) {
 			try {
-				await this.sidecar.detach(previous.activeSessionId);
+				await this.detachDaemonSession(this.sidecar, previous.activeSessionId);
 			} catch {
-				// the daemon dropped it for us — nothing left to release
+			// the daemon dropped it for us — nothing left to release
 			}
 		}
+		if (epoch !== this.viewEpoch) return false;
 		this.scheduleChildrenRefresh();
 		return true;
 	}
 
 	async backToParent(): Promise<void> {
-		const target = this.returnTarget;
-		this.returnTarget = { kind: "rpc" };
+		const epoch = this.beginNavigation();
+		const target = this.returnTargets.at(-1) ?? { kind: "rpc" as const };
 		if (target.kind === "attached") {
 			const path = target.sessionPath;
 			const id = target.activeSessionId;
-			if (this.attached && this.sidecar?.connected) {
-				await this.sidecar.detach(this.attached.activeSessionId);
+			const current = this.attached;
+			if (!(await this.detachFromDaemon(current)) || epoch !== this.viewEpoch) return;
+			if (await this.attachViaDaemon(id, path, epoch)) {
+				if (epoch !== this.viewEpoch) return;
+				this.returnTargets.pop();
+				return;
 			}
-			this.attached = null;
-			if (await this.attachViaDaemon(id, path)) return;
+			if (epoch !== this.viewEpoch || this.attached !== null) return;
 			// The parent went away while we were inside the child. Land on our own
 			// session rather than on nothing — going up must never dead-end.
 			this.broadcast({ type: "notice", level: "warning", text: "The parent session is no longer live — returning to this window's session." });
 		}
 		// baseline: own RPC session
-		await this.detachFromDaemon();
+		if (epoch !== this.viewEpoch || this.attached !== null) return;
+		if (!(await this.detachFromDaemon(null)) || epoch !== this.viewEpoch || this.attached !== null) return;
+		this.returnTargets.pop();
 		// The strip belongs to whatever session we just landed on, and the spawn
 		// baseline still holds the child's (usually empty) set — leaving it would
 		// announce every one of the parent's subagents as freshly spawned.
 		this.resetChildrenBaseline();
-		await this.refreshSnapshot();
-		this.pushStatus();
-		this.scheduleChildrenRefresh();
+		this.beginRpcRestore();
+		if (await this.restoreOwnRpcView(epoch)) this.scheduleChildrenRefresh();
 	}
 
 	/** Route daemon events for the attached session into the normal pipeline. */
 	private onDaemonEvent(message: DaemonServerMessage): void {
 		this.debugLog.append(`daemon-event: type=${message.type} sid=${String(message.activeSessionId).slice(0, 20)}${this.attached ? ` attached=${this.attached.activeSessionId.slice(0, 20)}` : " no-attach"}`);
 		const attached = this.attached;
-		if (!attached) return;
+		if (!attached || !this.isCurrentAttachment(attached)) return;
 		const msgSessionId = message.activeSessionId;
 		if (message.type === "session_event" && msgSessionId === attached.activeSessionId && message.event) {
 			this.onAgentEvent(message.event as AgentEvent);
@@ -1866,16 +2720,23 @@ export class SessionController implements vscode.Disposable {
 			this.applyAttachedSnapshot(message.snapshot as AttachSnapshot | undefined);
 			return;
 		}
-		if (message.type === "session_closed" && msgSessionId === attached.activeSessionId) {
-			this.broadcast({ type: "notice", level: "warning", text: "The live session was closed by its other client." });
-			this.attached = null;
-			this.attachAttempt = null;
-			this.rentedState = null;
+			if (message.type === "session_closed" && msgSessionId === attached.activeSessionId) {
+				this.broadcast({ type: "notice", level: "warning", text: "The live session was closed by its other client." });
+					this.attached = null;
+					this.attachedEpoch = null;
+					this.attachAttempt = null;
+					this.attachAttemptEpoch = null;
+				this.rentedState = null;
 			// No agent_end is coming for a session that no longer exists.
-			this.clearRunFlags();
-			this.clearReattachTimer();
-			this.pushStatus();
-		}
+				this.clearRunFlags();
+				this.clearReattachTimer();
+				// The closed shared transcript must never become a writable-looking view
+				// of our hidden RPC session. Restore that session before controls return.
+				this.observationRestoring = true;
+				const epoch = ++this.viewEpoch;
+				this.pushStatus();
+				void this.restoreAfterObservationClosed(epoch);
+			}
 	}
 
 	private async refreshAttachedState(): Promise<void> {
@@ -1883,15 +2744,10 @@ export class SessionController implements vscode.Disposable {
 		if (!attached || !this.sidecar?.connected) return;
 		try {
 			const state = (await this.sidecar.getState(attached.activeSessionId)) as RpcSessionState;
+			if (!this.isCurrentAttachment(attached)) return;
 			this.rentedState = state;
 			// get_state answers with the daemon summary, which is where the uuid
 			// lives when the attach snapshot didn't carry one.
-			if (!attached.sessionId && state?.sessionId) {
-				attached.sessionId = state.sessionId;
-				if (this.attachAttempt?.activeSessionId === attached.activeSessionId) {
-					this.attachAttempt.sessionId = state.sessionId;
-				}
-			}
 			this.pushStatus();
 		} catch {
 			// keep current state
@@ -1900,51 +2756,67 @@ export class SessionController implements vscode.Disposable {
 
 	/** Effective model/status snapshot accounting for daemon-attached sessions. */
 
-private async clearObservation(): Promise<void> {
-		if (!this.observingId || !this.client) {
-			this.observingId = null;
-			return;
-		}
-		const id = this.observingId;
+	private async clearObservation(expectedId: string | null = this.observingId, epoch = this.viewEpoch): Promise<boolean> {
+		if (this.disposed || epoch !== this.viewEpoch) return false;
+		if (expectedId === null) return this.observingId === null;
+		if (this.observingId !== expectedId) return false;
+		const id = expectedId;
 		this.observingId = null;
-		try {
-			await this.client.request({ type: "unobserve", activeSessionId: id }, 10_000);
-		} catch {
-			// best effort
+		this.observedSession = null;
+		const client = this.client;
+		if (client) {
+			try {
+				await client.request({ type: "unobserve", activeSessionId: id }, 10_000);
+			} catch {
+				// best effort
+			}
 		}
+		if (this.disposed || epoch !== this.viewEpoch) return false;
 		this.broadcast({ type: "observedClosed", sessionId: id });
+		return true;
 	}
 
 	async stopObserving(): Promise<void> {
-		await this.clearObservation();
+		if (!this.observingId) return;
+		// Clearing `observingId` has to happen before the daemon reply so observed
+		// events stop routing here; keep a separate restore lock over that gap so a
+		// prompt cannot fall through to this window's hidden RPC session.
+		const observedAtStart = this.observingId;
+		const epoch = this.beginNavigation();
+		this.observationRestoring = true;
+		this.pushStatus();
+		if (!(await this.clearObservation(observedAtStart, epoch))) return;
 		// Same trap as backToParent: we land on a different session, so the strip
 		// and the spawn baseline both belong to the one we just left.
-		this.resetChildrenBaseline();
-		await this.refreshSnapshot();
-		this.pushStatus();
-		this.scheduleChildrenRefresh();
+		this.beginRpcRestore();
+		if (await this.restoreOwnRpcView(epoch)) this.scheduleChildrenRefresh();
 	}
 
 	// ------------------------------------------------------------------
 	// Snapshot / status
 	// ------------------------------------------------------------------
 
-	async refreshSnapshot(): Promise<void> {
+	async refreshSnapshot(options: { epoch?: number; allowRestoring?: boolean } = {}): Promise<boolean> {
 		// Hiding and re-showing the view reloads the webview, which asks for a
 		// fresh snapshot. Our own background RPC client is still running, so
 		// without this branch the attached transcript is repainted with the
 		// background session's (usually empty) messages and its sticky draft,
 		// while the header keeps naming the terminal session.
-		if (this.attached) {
-			const id = this.attached.activeSessionId;
+		const attached = this.attached;
+		if (attached) {
+			const id = attached.activeSessionId;
 			try {
 				const sidecar = await this.ensureSidecar();
-				this.cachedMessages = (await sidecar.getMessages(id)) as AgentMessage[];
-				this.rentedState = (await sidecar.getState(id)) as RpcSessionState;
+				const [messages, state] = await Promise.all([sidecar.getMessages(id), sidecar.getState(id)]);
+				if (!this.isCurrentAttachment(attached)) return false;
+				this.cachedMessages = messages as AgentMessage[];
+				this.rentedState = state as RpcSessionState;
 			} catch {
 				// daemon busy — repaint from what we already hold rather than blank
 			}
+			if (!this.isCurrentAttachment(attached)) return false;
 			await this.fetchAttachedStats();
+			if (!this.isCurrentAttachment(attached)) return false;
 			this.broadcast({
 				type: "snapshot",
 				messages: this.cachedMessages,
@@ -1956,23 +2828,35 @@ private async clearObservation(): Promise<void> {
 			this.rebuildThreadDiffsFromMessages(this.cachedMessages);
 			this.pushStatus();
 			this.repaintChildrenStrip();
-			return;
+			return true;
 		}
-		if (!this.client?.running) return;
+		if (this.observingId) {
+			// A reconstructed webview needs the observed transcript too. The RPC
+			// session below is intentionally hidden, so never repaint it here.
+			this.broadcast({ type: "observedSession", sessionId: this.observingId, messages: this.cachedMessages });
+			this.pushStatusLight();
+			return true;
+		}
+		const client = this.client;
+		const epoch = options.epoch ?? this.viewEpoch;
+		const allowRestoring = options.allowRestoring === true;
+		if (!client?.running || !this.isCurrentRpcView(client, epoch, allowRestoring)) return false;
 		try {
 			const [messagesRes, stateRes] = await Promise.all([
-				this.client.request({ type: "get_messages" }, 60_000),
-				this.client.request({ type: "get_state" }, 30_000),
+				client.request({ type: "get_messages" }, 60_000),
+				client.request({ type: "get_state" }, 30_000),
 			]);
-			// A reply — success or not — is proof the agent is answering us.
+			if (!this.isCurrentRpcView(client, epoch, allowRestoring)) return false;
+			if (!messagesRes.success || !stateRes.success) {
+				this.output.appendLine(`[prime-agent] snapshot failed: ${messagesRes.error ?? stateRes.error ?? "agent rejected snapshot request"}`);
+				return false;
+			}
+			// A complete snapshot proves the agent is answering this view.
 			this.reachable = true;
-			if (messagesRes.success) {
-				this.cachedMessages = ((messagesRes.data as { messages?: AgentMessage[] })?.messages ?? []) as AgentMessage[];
-			}
-			if (stateRes.success) {
-				this.state = stateRes.data as RpcSessionState;
-			}
-			const stats = await this.fetchStatsText();
+			this.cachedMessages = ((messagesRes.data as { messages?: AgentMessage[] })?.messages ?? []) as AgentMessage[];
+			this.state = stateRes.data as RpcSessionState;
+			const stats = await this.fetchStatsText(allowRestoring);
+			if (!this.isCurrentRpcView(client, epoch, allowRestoring)) return false;
 			const steerDefault = vscode.workspace
 				.getConfiguration("primeAgent")
 				.get<"steer" | "followUp">("defaultStreamingBehavior", "steer");
@@ -1984,12 +2868,15 @@ private async clearObservation(): Promise<void> {
 				steerDefault,
 			});
 		} catch (err) {
-			this.output.appendLine(`[prime-agent] snapshot failed: ${String(err)}`);
+			if (this.isCurrentRpcView(client, epoch, allowRestoring)) this.output.appendLine(`[prime-agent] snapshot failed: ${String(err)}`);
+			return false;
 		}
+		if (!this.isCurrentRpcView(client, epoch, allowRestoring)) return false;
 		this.restoreDraft();
 		this.rebuildThreadDiffsFromMessages(this.cachedMessages);
 		this.pushStatus();
 		this.repaintChildrenStrip();
+		return true;
 	}
 
 	/**
@@ -2008,15 +2895,18 @@ private async clearObservation(): Promise<void> {
 			await this.refreshAttachedState();
 			return;
 		}
-		if (!this.client?.running) return;
+		const client = this.client;
+		const epoch = this.viewEpoch;
+		if (!client?.running) return;
 		try {
-			const stateRes = await this.client.request({ type: "get_state" }, 30_000);
+			const stateRes = await client.request({ type: "get_state" }, 30_000);
+			if (!this.isCurrentRpcView(client, epoch)) return;
 			this.reachable = true;
 			if (stateRes.success) this.state = stateRes.data as RpcSessionState;
 		} catch {
 			// keep previous state
 		}
-		this.pushStatus();
+		if (this.isCurrentRpcView(client, epoch)) this.pushStatus();
 	}
 
 	private lastStatsText = "";
@@ -2028,10 +2918,13 @@ private async clearObservation(): Promise<void> {
 		this.broadcast({ type: "status", status: this.buildStatus(this.lastStatsText) });
 	}
 
-	private async fetchStatsText(): Promise<string> {
-		if (!this.client?.running) return "";
+	private async fetchStatsText(allowRestoring = false): Promise<string> {
+		const client = this.client;
+		const epoch = this.viewEpoch;
+		if (!client?.running) return "";
 		try {
-			const res = await this.client.request({ type: "get_session_stats" }, 30_000);
+			const res = await client.request({ type: "get_session_stats" }, 30_000);
+			if (!this.isCurrentRpcView(client, epoch, allowRestoring)) return "";
 			this.reachable = true;
 			if (!res.success) return "";
 			const data = res.data as {
@@ -2076,6 +2969,7 @@ private async clearObservation(): Promise<void> {
 				cost?: number;
 				contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 			};
+			if (!this.isCurrentAttachment(attached)) return this.lastStatsText;
 			this.lastUsage = {
 				usageTotal: data.tokens?.total,
 				costUsd: data.cost,
@@ -2104,10 +2998,57 @@ private async clearObservation(): Promise<void> {
 	}
 
 	private buildStatus(statsText = this.lastStatsText): StatusSnapshot {
+		if (this.observingId) {
+			const observed = this.observedSession;
+			return {
+				connected: true,
+				streaming: false,
+				compacting: false,
+				retrying: false,
+					restoring: false,
+				modelLabel: "observed session",
+				thinkingLevel: "off",
+				availableThinkingLevels: null,
+				sessionFile: observed?.sessionPath,
+				sessionId: observed?.sessionId ?? this.observingId,
+				statsText,
+				statusText: "watching another live session (read-only)",
+				observingId: this.observingId,
+				compactThresholdPercent: this.compactThreshold(),
+				compactDefaultPercent: this.defaultCompactPercent(),
+			};
+		}
+		if (this.isReattaching()) {
+			const attempt = this.attachAttempt!;
+			const state = this.rentedState;
+			const model = state?.model ?? null;
+			return {
+				connected: false,
+				streaming: false,
+				compacting: false,
+				retrying: false,
+				restoring: true,
+				modelLabel: model ? `${model.provider}/${model.id}` : "attached session",
+				thinkingLevel: state?.thinkingLevel ?? "off",
+				availableThinkingLevels: supportedThinkingLevels(model),
+				sessionName: state?.sessionName,
+				sessionFile: attempt.sessionPath,
+				sessionId: attempt.sessionId ?? path.basename(attempt.sessionPath, ".jsonl"),
+				statsText,
+				statusText: "reconnecting to shared session…",
+				modelProvider: model?.provider,
+				modelId: model?.id,
+				observingId: this.observingId,
+				compactThresholdPercent: this.compactThreshold(),
+				compactDefaultPercent: this.defaultCompactPercent(),
+				...this.lastUsage,
+			};
+		}
 		if (this.attached) {
 			const st = this.rentedState as (RpcSessionState & { model?: RpcSessionState["model"] }) | null;
 			const model = st?.model ?? null;
 			const label = model ? `${model.provider}/${model.id}` : "attached session";
+			const switching = this.attachedEpoch !== this.viewEpoch || this.observationRestoring;
 			// Attaching mid-turn never delivers agent_start, so the local flags alone
 			// would report idle: no running label, no Stop, no queue/steer toggle.
 			const streaming = this.streaming || (st?.isStreaming ?? false);
@@ -2117,7 +3058,7 @@ private async clearObservation(): Promise<void> {
 				streaming,
 				compacting,
 				retrying: this.retrying,
-				restoring: false,
+				restoring: switching,
 				modelLabel: label,
 				thinkingLevel: st?.thinkingLevel ?? "off",
 				availableThinkingLevels: supportedThinkingLevels(model),
@@ -2131,7 +3072,9 @@ private async clearObservation(): Promise<void> {
 				statsText,
 				// This label overwrites the running/live word in the header, so it has
 				// to carry the running state itself or the run becomes invisible.
-				statusText: compacting
+				statusText: switching
+					? "switching sessions…"
+					: compacting
 					? "compacting (shared with terminal)"
 					: streaming
 						? "running (shared with terminal)"
@@ -2154,7 +3097,7 @@ private async clearObservation(): Promise<void> {
 			streaming: this.streaming || (this.state?.isStreaming ?? false),
 			compacting: this.compacting || (this.state?.isCompacting ?? false),
 			retrying: this.retrying,
-			restoring: this.startingPromise !== null,
+			restoring: this.startingPromise !== null || this.observationRestoring,
 			modelLabel,
 			thinkingLevel: this.state?.thinkingLevel ?? "off",
 			availableThinkingLevels: supportedThinkingLevels(model),
@@ -2162,7 +3105,7 @@ private async clearObservation(): Promise<void> {
 			sessionFile: this.state?.sessionFile,
 			sessionId: this.state?.sessionId,
 			statsText,
-			statusText: this.extensionStatusText,
+			statusText: this.observationRestoring ? "restoring your session…" : this.extensionStatusText,
 			modelProvider: model?.provider,
 			modelId: model?.id,
 			observingId: this.observingId,
@@ -2178,12 +3121,16 @@ private async clearObservation(): Promise<void> {
 	 * so callers use pushStatusLight() on the hot path and this on transitions.
 	 */
 	pushStatus(): void {
+		if (this.disposed) return;
 		if (this.statsTimer) return;
 		this.statsTimer = setTimeout(() => {
 			this.statsTimer = null;
+			if (this.disposed) return;
 			// While attached, the RPC subprocess's stats belong to a session the
 			// operator is not looking at — ask the daemon about the one they are.
-			const attachedStats = this.attached && this.sidecar?.connected;
+			const attached = this.attached;
+			const epoch = this.viewEpoch;
+			const attachedStats = attached && this.sidecar?.connected;
 			if (this.statsFetching || (!attachedStats && !this.client?.running)) {
 				this.pushStatusLight();
 				return;
@@ -2191,6 +3138,7 @@ private async clearObservation(): Promise<void> {
 			this.statsFetching = true;
 			void (attachedStats ? this.fetchAttachedStats() : this.fetchStatsText())
 				.then((stats) => {
+					if (this.disposed || epoch !== this.viewEpoch || this.attached !== attached) return;
 					if (stats) this.lastStatsText = stats;
 					this.broadcast({ type: "status", status: this.buildStatus() });
 				})
@@ -2208,52 +3156,68 @@ private async clearObservation(): Promise<void> {
 		const editor = vscode.window.activeTextEditor;
 		if (!editor) return null;
 		const doc = editor.document;
-		if (doc.uri.scheme !== "file") return null;
+		if (!this.isInWorkspaceRoot(doc.uri)) return null;
 		const sel = editor.selection;
 		if (sel.isEmpty) return null;
+		const text = doc.getText(sel);
+		if (text.length > 100_000) return null;
+		const relativePath = this.workspaceRelativePath(doc.uri);
+		if (!relativePath) return null;
 		return {
-			path: vscode.workspace.asRelativePath(doc.uri, false),
+			path: relativePath,
 			startLine: sel.start.line + 1,
 			endLine: sel.end.line + 1,
-			text: doc.getText(sel),
+			text,
 			languageId: doc.languageId,
 		};
 	}
 
 	getActiveFilePath(): string | null {
 		const editor = vscode.window.activeTextEditor;
-		if (!editor || editor.document.uri.scheme !== "file") return null;
-		return vscode.workspace.asRelativePath(editor.document.uri, false);
+		if (!editor) return null;
+		return this.workspaceRelativePath(editor.document.uri);
 	}
 
-	async searchFiles(query: string, requestId: number): Promise<void> {
+	async searchFiles(query: string, requestId: number, reply: (message: HostToWebview) => void = (message) => this.broadcast(message)): Promise<void> {
+		const epoch = this.viewEpoch;
+		const attached = this.attached;
+		const observingId = this.observingId;
 		const config = vscode.workspace.getConfiguration("primeAgent");
-		const max = config.get<number>("maxFileSearchResults", 40);
-		const trimmed = query.trim();
-		const pattern = trimmed ? `**/*${trimmed.replace(/[\s]+/g, "*")}*` : "**/*";
+		const configuredMax = config.get<number>("maxFileSearchResults", 40);
+		const max = Math.max(1, Math.min(100, Number.isFinite(configuredMax) ? Math.floor(configuredMax) : 40));
+		const trimmed = query.trim().slice(0, 512);
+		// This is a filename filter, not a glob-expression input. Drop glob syntax
+		// before building the VS Code glob so a hostile webview cannot widen an
+		// otherwise bounded search into an unexpectedly expensive one.
+		const literal = trimmed.replace(/[{}\[\]*?!\\]/g, "");
+		const pattern = literal ? `**/*${literal.replace(/[\s]+/g, "*")}*` : "**/*";
 		const exclude = "**/{node_modules,.git,dist,out,.turbo,.next,coverage}/**";
 		try {
 			const uris = await vscode.workspace.findFiles(pattern, exclude, max);
-			const files = uris.map((uri) => vscode.workspace.asRelativePath(uri, false));
+			if (this.disposed || epoch !== this.viewEpoch || this.attached !== attached || this.observingId !== observingId) return;
+			const files = uris.map((uri) => this.workspaceRelativePath(uri)).filter((file): file is string => file !== null);
 			const dirs = await this.searchDirs(trimmed, Math.max(8, Math.floor(max / 4)));
+			if (this.disposed || epoch !== this.viewEpoch || this.attached !== attached || this.observingId !== observingId) return;
 			const combined = [
 				...dirs.map((path) => ({ path, isDir: true })),
 				...files.map((path) => ({ path, isDir: false })),
 			].sort((a, b) => a.path.localeCompare(b.path));
-			this.broadcast({ type: "fileSearchResults", requestId, files: combined });
+			reply({ type: "fileSearchResults", requestId, files: combined });
 		} catch {
-			this.broadcast({ type: "fileSearchResults", requestId, files: [] });
+			if (!this.disposed && epoch === this.viewEpoch && this.attached === attached && this.observingId === observingId) {
+				reply({ type: "fileSearchResults", requestId, files: [] });
+			}
 		}
 	}
 
 	/** Lightweight directory listing for @-folder mentions. Pruned, capped, fuzzy. */
 	private async searchDirs(query: string, max: number): Promise<string[]> {
-		const folders = vscode.workspace.workspaceFolders ?? [];
+		const folder = vscode.workspace.workspaceFolders?.[0];
+		if (!folder) return [];
 		const out: string[] = [];
 		const prune = new Set(["node_modules", ".git", "dist", "out", ".turbo", ".next", "coverage", ".vscode-test"]);
 		const needle = query.toLowerCase();
-		for (const folder of folders.slice(0, 2)) {
-			const visit = async (relDir: string, uri: vscode.Uri, depth: number): Promise<void> => {
+		const visit = async (relDir: string, uri: vscode.Uri, depth: number): Promise<void> => {
 				if (out.length >= max || depth > 5) return;
 				let entries: [string, vscode.FileType][];
 				try {
@@ -2270,20 +3234,24 @@ private async clearObservation(): Promise<void> {
 					await visit(rel, vscode.Uri.joinPath(uri, name), depth + 1);
 					if (out.length >= max) return;
 				}
-			};
-			await visit("", folder.uri, 0);
-		}
+		};
+		await visit("", folder.uri, 0);
 		return out;
 	}
 
-	async pickImages(requestId: number): Promise<void> {
+	async pickImages(requestId: number, reply: (message: HostToWebview) => void = (message) => this.broadcast(message)): Promise<void> {
+		const epoch = this.viewEpoch;
+		const attached = this.attached;
+		const observingId = this.observingId;
+		const stillCurrent = (): boolean =>
+			!this.disposed && epoch === this.viewEpoch && this.attached === attached && this.observingId === observingId && !this.observationRestoring;
 		const uris = await vscode.window.showOpenDialog({
 			canSelectMany: true,
 			filters: { Images: ["png", "jpg", "jpeg", "gif", "webp"] },
 			openLabel: "Attach image",
 		});
 		if (!uris || uris.length === 0) {
-			this.broadcast({ type: "imagePicked", requestId, images: [] });
+			if (stillCurrent()) reply({ type: "imagePicked", requestId, images: [] });
 			return;
 		}
 		const mimeByExt: Record<string, string> = {
@@ -2293,25 +3261,39 @@ private async clearObservation(): Promise<void> {
 			gif: "image/gif",
 			webp: "image/webp",
 		};
+		const MAX_IMAGES = 8;
+		const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+		const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
 		const images: ImageAttachment[] = [];
-		for (const uri of uris) {
+		let totalBytes = 0;
+		let skippedOversized = 0;
+		for (const uri of uris.slice(0, MAX_IMAGES)) {
 			try {
 				const bytes = await vscode.workspace.fs.readFile(uri);
+				if (bytes.byteLength > MAX_IMAGE_BYTES || totalBytes + bytes.byteLength > MAX_TOTAL_IMAGE_BYTES) {
+					skippedOversized += 1;
+					continue;
+				}
 				const ext = path.extname(uri.fsPath).slice(1).toLowerCase();
 				images.push({
 					data: Buffer.from(bytes).toString("base64"),
 					mimeType: mimeByExt[ext] ?? "image/png",
 					name: path.basename(uri.fsPath),
 				});
+				totalBytes += bytes.byteLength;
 			} catch {
 				// skip unreadable files
 			}
 		}
-		this.broadcast({ type: "imagePicked", requestId, images });
+		if (!stillCurrent()) return;
+		if (uris.length > MAX_IMAGES || skippedOversized > 0) {
+			reply({ type: "notice", level: "warning", text: "Some images were skipped (maximum 8 images, 8 MiB each, 16 MiB total)." });
+		}
+		reply({ type: "imagePicked", requestId, images });
 	}
 
 	async openFile(relPath: string, startLine?: number, endLine?: number): Promise<void> {
-		const uri = this.resolveWorkspaceUri(relPath.replace(/\/$/, ""));
+		const uri = await this.resolveWorkspaceUri(relPath.replace(/\/$/, ""));
 		if (!uri) return;
 		try {
 			const stat = await vscode.workspace.fs.stat(uri);
@@ -2332,15 +3314,22 @@ private async clearObservation(): Promise<void> {
 		}
 	}
 
-	private resolveWorkspaceUri(relPath: string): vscode.Uri | null {
-		if (path.isAbsolute(relPath)) return vscode.Uri.file(relPath);
+	private async resolveWorkspaceUri(relPath: string): Promise<vscode.Uri | null> {
+		if (!relPath || path.isAbsolute(relPath) || relPath.split(/[\\/]+/).some((part) => part === "..")) return null;
 		const folder = vscode.workspace.workspaceFolders?.[0];
 		if (!folder) return null;
-		return vscode.Uri.joinPath(folder.uri, relPath);
+		const candidate = vscode.Uri.joinPath(folder.uri, relPath);
+		try {
+			const [root, resolved] = await Promise.all([fs.realpath(folder.uri.fsPath), fs.realpath(candidate.fsPath)]);
+			const relative = path.relative(root, resolved);
+			return relative && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) ? vscode.Uri.file(resolved) : null;
+		} catch {
+			return null;
+		}
 	}
 
 	async openDiff(relPath: string): Promise<void> {
-		const uri = this.resolveWorkspaceUri(relPath);
+		const uri = await this.resolveWorkspaceUri(relPath);
 		if (!uri) return;
 		const left = uri.with({ scheme: "prime-agent-git-head" });
 		const title = `${relPath} (changes since HEAD)`;
@@ -2360,11 +3349,20 @@ private async clearObservation(): Promise<void> {
 		const track = (uri: vscode.Uri) => {
 			if (!this.streaming) return;
 			const rel = vscode.workspace.asRelativePath(uri, false);
-			if (rel.startsWith("..") || rel.includes("node_modules/") || rel.includes("/.git/")) return;
+			if (
+				rel.startsWith("..") ||
+				rel === ".git" ||
+				rel.startsWith(".git/") ||
+				rel.includes("/.git/") ||
+				rel === "node_modules" ||
+				rel.startsWith("node_modules/") ||
+				rel.includes("/node_modules/")
+			) return;
 			this.changedFiles.add(rel);
 		};
 		this.watcher.onDidCreate(track, null, this.disposables);
 		this.watcher.onDidChange(track, null, this.disposables);
+		this.watcher.onDidDelete(track, null, this.disposables);
 	}
 
 	private trackChangedFilesDone(_event: AgentEvent): void {
@@ -2557,7 +3555,7 @@ private async clearObservation(): Promise<void> {
 		try {
 			for (const child of children.slice(0, THREAD_DIFF_MAX_CHILD_FILES)) {
 				if (this.threadDiffGeneration !== generation) return;
-				const file = child.sessionFile;
+				const file = await this.validChildSessionFile(child.sessionFile);
 				if (!file) continue;
 				const label = child.sessionName?.trim() || (child.sessionId ?? child.activeSessionId ?? child.id ?? "").slice(0, 8);
 				if (await this.harvestChildDiffFile(file, label || "subagent", generation)) committed = true;
@@ -2566,6 +3564,25 @@ private async clearObservation(): Promise<void> {
 			this.subagentHarvestInFlight = false;
 		}
 		if (committed && this.threadDiffGeneration === generation) this.postThreadDiffs();
+	}
+
+	/**
+	 * A daemon roster is transport data, not authority to read arbitrary local
+	 * files. Child transcripts share the current transcript directory; reject
+	 * paths outside it, symlinks, and non-session files before opening anything.
+	 */
+	private async validChildSessionFile(candidate: string | undefined): Promise<string | null> {
+		const current = this.attached?.sessionPath ?? this.rentedState?.sessionFile ?? this.state?.sessionFile;
+		if (!candidate || !current || !candidate.endsWith(".jsonl") || !current.endsWith(".jsonl")) return null;
+		const directory = path.dirname(path.resolve(current));
+		const file = path.resolve(candidate);
+		if (path.dirname(file) !== directory) return null;
+		try {
+			const stat = await fs.lstat(file);
+			return stat.isFile() && !stat.isSymbolicLink() ? file : null;
+		} catch {
+			return null;
+		}
 	}
 
 	private async harvestChildDiffFile(file: string, agent: string, generation: number): Promise<boolean> {
@@ -2630,6 +3647,7 @@ private async clearObservation(): Promise<void> {
 	}
 
 	private queueThreadDiffsBroadcast(): void {
+		if (this.disposed) return;
 		if (this.threadDiffsTimer) return;
 		this.threadDiffsTimer = setTimeout(() => {
 			this.threadDiffsTimer = null;
@@ -2638,6 +3656,7 @@ private async clearObservation(): Promise<void> {
 	}
 
 	private postThreadDiffs(): void {
+		if (this.disposed) return;
 		// One row per file, own edits first then each subagent's — the hunks carry
 		// their own author, so a file both touched reads as one file, not two.
 		const byPath = new Map<string, { source: ThreadDiffSource; hunks: ThreadDiffHunk[] }>();
@@ -2661,8 +3680,7 @@ private async clearObservation(): Promise<void> {
 				})),
 			});
 		}
-		const message: HostToWebview = { type: "threadDiffs", files };
-		for (const sink of this.sinks) sink.post(message);
+		this.broadcast({ type: "threadDiffs", files });
 	}
 }
 
@@ -2824,7 +3842,6 @@ function buildMarkdownExport(
 // edits stay strictly append-only).
 // ---------------------------------------------------------------------------
 
-import * as fs from "node:fs/promises";
 import type { ThreadDiffFile, ThreadDiffHunk, ThreadDiffSource, ThreadDiffsMessage, ToolResultMessage } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
@@ -2863,7 +3880,7 @@ function splitCleanLines(text: string): string[] {
 
 /** Workspace-relative display form when the path resolves inside the root. */
 function normalizeToolPath(rawPath: unknown, workspaceRoot: string): string | null {
-	if (typeof rawPath !== "string") return null;
+	if (typeof rawPath !== "string" || !workspaceRoot) return null;
 	let display = rawPath.trim();
 	if (display.startsWith("./")) display = display.slice(2);
 	if (!display) return null;
@@ -2871,14 +3888,15 @@ function normalizeToolPath(rawPath: unknown, workspaceRoot: string): string | nu
 		const rel = path.relative(workspaceRoot, display);
 		if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
 			display = rel.split(path.sep).join("/");
-		}
+		} else return null;
 	}
+	if (display.split(/[\\/]+/).some((part) => part === "..")) return null;
 	return display;
 }
 
 /** Watcher parity: never surface vendored or git-internal paths on the panel. */
 function isThreadDiffPathWorthy(display: string): boolean {
-	return !display.includes("node_modules/") && !display.includes("/.git/") && !display.startsWith(".git/");
+	return !display.includes("node_modules/") && display !== ".git" && !display.includes("/.git/") && !display.startsWith(".git/");
 }
 
 /** Truncate a hunk side and produce the gutter note when truncated. */
@@ -2897,4 +3915,3 @@ function capHunkSides(removed: string[], added: string[], sideCap: number): Thre
 	}
 	return { removed: keptRemoved, added: keptAdded, ...(notes.length > 0 ? { note: notes.join(" ") } : {}) };
 }
-

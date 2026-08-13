@@ -29,6 +29,14 @@ interface PendingRequest {
 	timer: NodeJS.Timeout;
 }
 
+interface LaunchSpec {
+	command: string;
+	args: string[];
+}
+
+/** A peer that never sends a newline must not grow the extension host forever. */
+const MAX_JSONL_FRAME_BYTES = 4 * 1024 * 1024;
+
 export interface RpcReply {
 	command?: string;
 	success: boolean;
@@ -59,35 +67,61 @@ export class RpcClient extends EventEmitter {
 		if (this.process) return;
 		const command = this.resolveCommand(this.options.command ?? "prime-agent");
 		const args = ["--mode", "rpc", ...(this.options.args ?? [])];
+		const launch = this.launchSpec(command, args);
 		this._stderr = "";
-
-		this.process = spawn(command, args, {
+		// A stopped child can emit its final close/error event after a replacement
+		// has already started. Keep every handler bound to the child that created it
+		// so an old process cannot take the new transport offline.
+		this.buffer = "";
+		const proc = spawn(launch.command, launch.args, {
 			cwd: this.options.cwd,
-			env: { ...process.env, ...this.options.env },
+			// This flag makes Electron applications (including a configured
+			// prime-agent wrapper) run as Node, not as their normal binary. It can
+			// be inherited from automation hosts, so never leak it into the agent.
+			env: (() => {
+				const env = { ...process.env, ...this.options.env };
+				delete env.ELECTRON_RUN_AS_NODE;
+				return env;
+			})(),
 			stdio: ["pipe", "pipe", "pipe"],
 		});
+		this.process = proc;
 
-		this.process.stdout?.setEncoding("utf8");
-		this.process.stdout?.on("data", (chunk: string) => this.onStdout(chunk));
-		this.process.stderr?.setEncoding("utf8");
-		this.process.stderr?.on("data", (chunk: string) => {
+		proc.stdout?.setEncoding("utf8");
+		proc.stdout?.on("data", (chunk: string) => {
+			if (this.process !== proc) return;
+			this.onStdout(chunk);
+		});
+		proc.stderr?.setEncoding("utf8");
+		proc.stderr?.on("data", (chunk: string) => {
+			if (this.process !== proc) return;
 			this._stderr += chunk;
 			if (this._stderr.length > 64_000) {
 				this._stderr = this._stderr.slice(-32_000);
 			}
 			this.emit("stderr", chunk);
 		});
-		this.process.on("error", (err) => {
+		proc.stdin?.on("error", (err) => {
+			if (this.process !== proc) return;
+			// A broken stdin can no longer carry any command. Do not leave the
+			// controller believing a live process is a usable RPC transport.
+			this.failProtocol(err instanceof Error ? err : new Error(String(err)));
+		});
+		proc.on("error", (err) => {
 			// A spawn failure (ENOENT/EACCES) emits "error" + "close" and never
 			// "exit", so without this `running` latches true over a child that
 			// never existed — and every later write is silently swallowed by its
 			// destroyed stdin until the request times out.
+			if (this.process !== proc) return;
 			this.process = null;
+			this.buffer = "";
 			this.failAll(err);
 			this.emit("spawnError", err);
 		});
-		this.process.on("exit", (code, signal) => {
+		proc.on("exit", (code, signal) => {
+			if (this.process !== proc) return;
 			this.process = null;
+			this.buffer = "";
 			this.failAll(new Error(`prime-agent exited (code ${code ?? "?"}, signal ${signal ?? "none"})`));
 			this.emit("exit", code, signal);
 		});
@@ -114,6 +148,23 @@ export class RpcClient extends EventEmitter {
 		return command;
 	}
 
+	/**
+	 * Node cannot directly spawn Windows .cmd/.bat shims. Route those through
+	 * cmd.exe with a single quoted command line, while rejecting the shell
+	 * metacharacters that would make a machine setting execute a second command.
+	 */
+	private launchSpec(command: string, args: string[]): LaunchSpec {
+		if (process.platform !== "win32" || !/\.(?:cmd|bat)$/i.test(command)) return { command, args };
+		const unsafe = /[\r\n%!?^&|<>()"]/;
+		if ([command, ...args].some((value) => unsafe.test(value))) {
+			throw new Error("Windows .cmd/.bat launch arguments cannot contain cmd.exe metacharacters; configure an executable command instead");
+		}
+		const quote = (value: string): string => `"${value}"`;
+		const commandLine = [quote(command), ...args.map(quote)].join(" ");
+		const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
+		return { command: comspec, args: ["/d", "/s", "/c", `"${commandLine}"`] };
+	}
+
 	private onStdout(chunk: string): void {
 		this.buffer += chunk;
 		// Strict JSONL framing: split on \n only (per rpc.md), tolerate trailing \r.
@@ -121,20 +172,52 @@ export class RpcClient extends EventEmitter {
 		while (newline >= 0) {
 			let line = this.buffer.slice(0, newline);
 			this.buffer = this.buffer.slice(newline + 1);
+			if (Buffer.byteLength(line, "utf8") > MAX_JSONL_FRAME_BYTES) {
+				this.failProtocol(new Error("prime-agent RPC frame exceeded 4 MiB"));
+				return;
+			}
 			if (line.endsWith("\r")) line = line.slice(0, -1);
 			if (line.trim().length > 0) {
 				this.handleLine(line);
 			}
 			newline = this.buffer.indexOf("\n");
 		}
+		if (Buffer.byteLength(this.buffer, "utf8") > MAX_JSONL_FRAME_BYTES) {
+			this.failProtocol(new Error("prime-agent RPC frame exceeded 4 MiB"));
+		}
+	}
+
+	/** A framing violation makes the transport unusable; never leave callers to time out. */
+	private failProtocol(error: Error): void {
+		const proc = this.process;
+		this.buffer = "";
+		this.emit("protocolError", error);
+		this.failAll(error);
+		if (!proc) return;
+		this.process = null;
+		try {
+			proc.kill("SIGTERM");
+		} catch {
+			// The pipe may already be gone.
+		}
+		// The child exit handler is intentionally identity-guarded, so surface the
+		// terminal state once here for hosts that drive their UI from `exit`.
+		this.emit("exit", null, "protocol_error");
 	}
 
 	private handleLine(line: string): void {
 		let parsed: Record<string, unknown>;
 		try {
-			parsed = JSON.parse(line) as Record<string, unknown>;
+			const value: unknown = JSON.parse(line);
+			if (!value || typeof value !== "object" || Array.isArray(value) || typeof (value as { type?: unknown }).type !== "string") {
+				throw new Error("RPC record must be an object with a string type");
+			}
+			parsed = value as Record<string, unknown>;
 		} catch {
-			this.emit("protocolError", line);
+			// JSONL is the whole transport contract. Keeping a pending request alive
+			// after a malformed peer record only turns a deterministic protocol fault
+			// into an opaque two-minute timeout (and risks logging prompt fragments).
+			this.failProtocol(new Error("prime-agent RPC received a malformed JSONL record"));
 			return;
 		}
 		this.options.onWire?.(
@@ -142,20 +225,22 @@ export class RpcClient extends EventEmitter {
 		);
 
 		if (parsed.type === "response") {
-			const id = parsed.id as string | undefined;
-			if (id) {
-				const entry = this.pending.get(id);
-				if (entry) {
-					this.pending.delete(id);
-					clearTimeout(entry.timer);
-					entry.resolve({
-						command: parsed.command as string | undefined,
-						success: parsed.success === true,
-						data: parsed.data,
-						error: typeof parsed.error === "string" ? parsed.error : undefined,
-					});
-					return;
-				}
+			const id = parsed.id;
+			if (typeof id !== "string" || typeof parsed.success !== "boolean") {
+				this.failProtocol(new Error("prime-agent RPC received an invalid response envelope"));
+				return;
+			}
+			const entry = this.pending.get(id);
+			if (entry) {
+				this.pending.delete(id);
+				clearTimeout(entry.timer);
+				entry.resolve({
+					command: typeof parsed.command === "string" ? parsed.command : undefined,
+					success: parsed.success,
+					data: parsed.data,
+					error: typeof parsed.error === "string" ? parsed.error : undefined,
+				});
+				return;
 			}
 			this.emit("response", parsed);
 			return;
@@ -174,30 +259,40 @@ export class RpcClient extends EventEmitter {
 		if (!this.process) {
 			return Promise.reject(new Error("Agent process is not running"));
 		}
+		const proc = this.process;
 		const id = `req-${++this.nextId}`;
 		const body = { ...command, id };
+		this.options.onWire?.(`-> ${String(command.type ?? "command")}`);
 		return new Promise<RpcReply>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
 				reject(new Error(`Request ${command.type} timed out after ${timeoutMs}ms`));
 			}, timeoutMs);
 			this.pending.set(id, { resolve, reject, timer });
-			this.writeLine(JSON.stringify(body));
+			if (!this.writeLine(JSON.stringify(body), proc)) {
+				this.pending.delete(id);
+				clearTimeout(timer);
+				reject(new Error("Agent process stopped before the request could be sent"));
+			}
 		});
 	}
 
 	/** Fire-and-forget message (used for extension_ui_response and abort). */
 	sendRaw(message: Record<string, unknown>): void {
-		if (!this.process) return;
-		this.writeLine(JSON.stringify(message));
+		const proc = this.process;
+		if (!proc) return;
+		this.options.onWire?.(`-> ${String(message.type ?? "message")}`);
+		this.writeLine(JSON.stringify(message), proc);
 	}
 
-	private writeLine(line: string): void {
+	private writeLine(line: string, proc: ChildProcess): boolean {
+		if (this.process !== proc || !proc.stdin?.writable) return false;
 		try {
-			this.options.onWire?.(`-> ${line.slice(0, 140)}`);
-			this.process?.stdin?.write(`${line}\n`);
+			proc.stdin.write(`${line}\n`);
+			return true;
 		} catch (err) {
 			this.emit("protocolError", err);
+			return false;
 		}
 	}
 
@@ -213,6 +308,7 @@ export class RpcClient extends EventEmitter {
 		if (!this.process) return;
 		const proc = this.process;
 		this.process = null;
+		this.buffer = "";
 		try {
 			proc.kill("SIGTERM");
 		} catch {

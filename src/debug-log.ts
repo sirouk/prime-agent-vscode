@@ -11,7 +11,11 @@ export class DebugFileLog {
 		const target = process.env.PRIME_AGENT_VSCODE_LOG;
 		if (target && target.trim().length > 0 && !this.stream) {
 			try {
-				this.stream = fs.createWriteStream(target, { flags: "a" });
+				const stream = fs.createWriteStream(target, { flags: "a" });
+				stream.on("error", () => {
+					if (this.stream === stream) this.stream = null;
+				});
+				this.stream = stream;
 			} catch {
 				this.stream = null;
 			}
@@ -23,6 +27,16 @@ export class DebugFileLog {
 			this.stream?.write(text.endsWith("\n") ? text : `${text}\n`);
 		} catch {
 			// ignore
+		}
+	}
+
+	dispose(): void {
+		const stream = this.stream;
+		this.stream = null;
+		try {
+			stream?.end();
+		} catch {
+			// Logging must never keep extension shutdown alive.
 		}
 	}
 }
