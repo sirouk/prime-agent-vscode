@@ -79,16 +79,18 @@ process.stdin.on("data", (chunk) => {
     const line = buffer.slice(0, newline);
     buffer = buffer.slice(newline + 1);
     if (line.trim()) {
-		const command = JSON.parse(line);
-		if (mode === "malformed" && !sentMalformed) {
-			sentMalformed = true;
-			process.stdout.write("null\n");
-		}
-		if (mode === "bad_response_shape" && !sentMalformed) {
-			sentMalformed = true;
-			process.stdout.write(JSON.stringify({ type: "response", success: "yes" }) + "\n");
-		}
-		send({ type: "response", id: command.id, command: command.type, success: true, data: { text: "€" } });
+      const command = JSON.parse(line);
+      if (mode !== "stdin_error") {
+        if (mode === "malformed" && !sentMalformed) {
+          sentMalformed = true;
+          process.stdout.write("null\n");
+        }
+        if (mode === "bad_response_shape" && !sentMalformed) {
+          sentMalformed = true;
+          process.stdout.write(JSON.stringify({ type: "response", success: "yes" }) + "\n");
+        }
+        send({ type: "response", id: command.id, command: command.type, success: true, data: { text: "€" } });
+      }
     }
     newline = buffer.indexOf("\n");
   }
@@ -197,11 +199,13 @@ try {
 			`running=${rpc.running} exits=${staleExitEvents}`,
 		);
 
-		const stdinErrorRpc = new RpcClient({ command: peer, env: { PA_TRANSPORT_MODE: "normal" } });
+		// Keep the request pending until the synthetic broken-pipe notification.
+		// A normal echo peer can answer before that notification on a fast CI host,
+		// turning a transport-lifecycle assertion into a scheduler race.
+		const stdinErrorRpc = new RpcClient({ command: peer, env: { PA_TRANSPORT_MODE: "stdin_error" } });
 		rpcClients.push(stdinErrorRpc);
 		stdinErrorRpc.start();
 		const stdinErrorPromise = stdinErrorRpc.request({ type: "stdin_break" }, 10_000);
-		await delay(20);
 		stdinErrorRpc.process?.stdin?.emit("error", new Error("fixture EPIPE"));
 		const stdinError = await expectQuickRejection(stdinErrorPromise, "stdin failure rejects pending RPC work promptly");
 		check(
