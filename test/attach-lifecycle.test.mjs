@@ -143,8 +143,11 @@ fs.writeFileSync(parentFile, "{}\n");
 fs.writeFileSync(childFile, "{}\n");
 controller.attached = { activeSessionId: "h", sessionPath: "", sessionId: "p" };
 controller.state = { sessionFile: parentFile };
-check("an empty attachment path falls through to the RPC session file", (await controller.validChildSessionFile(childFile)) === childFile);
-check("a path outside the transcript directory is still refused", (await controller.validChildSessionFile(path.join(os.tmpdir(), "elsewhere.jsonl"))) === null);
+// The guard now lives on the tracker; going through it also proves the
+// controller's currentSessionFile() wiring still resolves the same three
+// sources in the same order.
+check("an empty attachment path falls through to the RPC session file", (await controller.threadDiffs.validChildSessionFile(childFile)) === childFile);
+check("a path outside the transcript directory is still refused", (await controller.threadDiffs.validChildSessionFile(path.join(os.tmpdir(), "elsewhere.jsonl"))) === null);
 controller.attached = null;
 
 // --- a success with no payload is "empty", not a crash ----------------------

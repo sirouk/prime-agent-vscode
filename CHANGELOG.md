@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- Split the three self-contained regions out of `session-controller.ts` — the per-thread diff engine (`thread-diffs.ts`), the Markdown exporter (`markdown-export.ts`), and the git HEAD document provider (`git-head-provider.ts`). No behavior change: the whole suite, including the thread-diff harness, passed unmodified against the extraction before any test was touched. The controller drops from 4,074 to 3,535 lines and the diff engine now states its dependencies as four hooks instead of reaching into controller state. The export harness also stops slicing the exporter out of the controller by string offset — it imports a real module now, so it can no longer break when something moves below it in the file.
+
 ## [1.0.11]
 
 - The "/" menu is back in resumed threads. A session boundary discards the composer's per-session state — including the slash catalog — but the host only ever sent that catalog in answer to a webview's first `ready`, so every thread after the first one a panel showed opened an empty menu. The webview now re-asks for what the boundary discarded, and the host answers while attached, observing, or restoring: the catalog describes the agent build, not the session on screen. Asking for it also no longer pops "Please wait while your session view is restored…" at the operator — that guard exists to refuse mutations, not read-only queries.

@@ -47,10 +47,10 @@ const ipythonEnd = (id, diffs, isError = false) => ({
 });
 
 // --- an ipython cell that edited a file populates the panel ---
-controller.trackThreadDiffs(ipythonEnd("ipython:1", [
+controller.threadDiffs.track(ipythonEnd("ipython:1", [
 	{ path: path.join(workdir, "src/app.ts"), oldStr: "const a = 1;", newStr: "const a = 2;\nconst b = 3;", startLine: 10 },
 ]));
-controller.postThreadDiffs();
+controller.threadDiffs.post();
 let files = lastDiffs();
 check("edit-skill diffs reach the panel", files?.length === 1, JSON.stringify(files));
 check("path shown workspace-relative", files?.[0]?.path === "src/app.ts", files?.[0]?.path);
@@ -58,22 +58,22 @@ check("hunk carries both sides", files?.[0]?.hunks?.[0]?.removed.length === 1 &&
 check("source reported as edit", files?.[0]?.viaSource === "edit");
 
 // --- a failed cell must not be presented as a change ---
-controller.trackThreadDiffs(ipythonEnd("ipython:2", [{ path: path.join(workdir, "src/broken.ts"), oldStr: "x", newStr: "y" }], true));
-controller.postThreadDiffs();
+controller.threadDiffs.track(ipythonEnd("ipython:2", [{ path: path.join(workdir, "src/broken.ts"), oldStr: "x", newStr: "y" }], true));
+controller.threadDiffs.post();
 check("errored cell contributes nothing", (lastDiffs() ?? []).length === 1, JSON.stringify(lastDiffs()));
 
 // --- a shell command that only READ files must not mint rows ---
 fs.mkdirSync(path.join(workdir, "src"), { recursive: true });
 fs.writeFileSync(path.join(workdir, "src/read-only.ts"), "// untouched\n");
-controller.trackThreadDiffs({ type: "tool_execution_start", toolCallId: "sh:1", toolName: "bash", args: { command: "grep -rn TODO src/read-only.ts" } });
-controller.trackThreadDiffs({ type: "tool_execution_end", toolCallId: "sh:1", toolName: "bash", result: {}, isError: false });
-controller.postThreadDiffs();
+controller.threadDiffs.track({ type: "tool_execution_start", toolCallId: "sh:1", toolName: "bash", args: { command: "grep -rn TODO src/read-only.ts" } });
+controller.threadDiffs.track({ type: "tool_execution_end", toolCallId: "sh:1", toolName: "bash", result: {}, isError: false });
+controller.threadDiffs.post();
 check("a read-only shell command is never called a change", !(lastDiffs() ?? []).some((f) => f.path.includes("read-only")), JSON.stringify(lastDiffs()));
 
 // --- resuming a thread rebuilds the panel from the session's own history ---
-controller.clearThreadDiffs();
+controller.threadDiffs.clear();
 check("clear empties the panel", (lastDiffs() ?? []).length === 0);
-controller.rebuildThreadDiffsFromMessages([
+controller.threadDiffs.rebuildFromMessages([
 	{ role: "user", content: "rename it" },
 	{
 		role: "toolResult",
@@ -87,7 +87,7 @@ controller.rebuildThreadDiffsFromMessages([
 files = lastDiffs();
 check("history rehydrates the panel", files?.length === 1 && files[0].path === "src/resumed.ts", JSON.stringify(files));
 // Idempotent: a second snapshot of the same thread must not double the hunks.
-controller.rebuildThreadDiffsFromMessages([
+controller.threadDiffs.rebuildFromMessages([
 	{
 		role: "toolResult",
 		toolCallId: "ipython:9",
@@ -115,7 +115,7 @@ const childRecord = (target, oldStr, newStr) =>
 		},
 	})}\n`;
 fs.writeFileSync(childFile, `${JSON.stringify({ type: "session", id: "child" })}\n${childRecord("src/child.ts", "a", "b")}`);
-await controller.harvestSubagentDiffs([{ sessionFile: childFile, sessionId: "child-uuid", sessionName: "verify-vault" }]);
+await controller.threadDiffs.harvestSubagents([{ sessionFile: childFile, sessionId: "child-uuid", sessionName: "verify-vault" }]);
 files = lastDiffs();
 const childRow = files?.find((f) => f.path === "src/child.ts");
 check("subagent edits join the thread's changes", !!childRow, JSON.stringify(files?.map((f) => f.path)));
@@ -124,15 +124,26 @@ check("the parent's own edits survive the harvest", !!files?.find((f) => f.path 
 
 // A second harvest reads only the bytes appended since the last one.
 fs.appendFileSync(childFile, childRecord("src/child2.ts", "c", "d"));
-await controller.harvestSubagentDiffs([{ sessionFile: childFile, sessionId: "child-uuid", sessionName: "verify-vault" }]);
+await controller.threadDiffs.harvestSubagents([{ sessionFile: childFile, sessionId: "child-uuid", sessionName: "verify-vault" }]);
 files = lastDiffs();
 check("appended child work is picked up", !!files?.find((f) => f.path === "src/child2.ts"), JSON.stringify(files?.map((f) => f.path)));
 check("the earlier child hunk is not re-read", files?.find((f) => f.path === "src/child.ts")?.hunks.length === 1);
 
 // A rebuild of the parent's own history must not drop the subagents' work —
 // that is the round trip "browse into a subagent, come back" used to break.
-controller.rebuildThreadDiffsFromMessages([]);
+controller.threadDiffs.rebuildFromMessages([]);
 check("subagent rows outlive a parent rebuild", !!lastDiffs()?.find((f) => f.path === "src/child.ts"), JSON.stringify(lastDiffs()?.map((f) => f.path)));
+
+// --- the controller must still route agent events into the tracker ----------
+// Calling the tracker directly (above) proves the engine; this proves the wire.
+controller.threadDiffs.clear();
+controller.onAgentEvent(ipythonEnd("ipython:wire", [
+	{ path: path.join(workdir, "src/wired.ts"), oldStr: "before", newStr: "after" },
+]));
+controller.threadDiffs.post();
+check("onAgentEvent routes tool diffs into the thread-diff tracker",
+	(lastDiffs() ?? []).some((f) => f.path === "src/wired.ts"),
+	JSON.stringify((lastDiffs() ?? []).map((f) => f.path)));
 
 controller.dispose?.();
 fs.rmSync(workdir, { recursive: true, force: true });

@@ -1,10 +1,9 @@
 /**
  * Export-markdown harness: exercises buildMarkdownExport from
- * src/session-controller.ts against representative AgentMessage arrays.
+ * src/markdown-export.ts against representative AgentMessage arrays.
  *
- * The function is module-private in the source. Instead of changing src
- * (adding an `export`), this harness extracts the function tail textually,
- * strips types with esbuild, and imports the generated ESM from a temp file.
+ * The exporter is pure and lives in its own module, so this harness just strips
+ * the types with esbuild and imports it.
  */
 
 import * as esbuild from "esbuild";
@@ -18,13 +17,13 @@ function check(name, condition, detail = "") {
 	if (!condition) failed += 1;
 }
 
-const srcPath = new URL("../src/session-controller.ts", import.meta.url);
+// The exporter is its own module now, so this harness imports it instead of
+// slicing it back out of the controller by string offset — the old approach
+// broke the moment anything moved below it in the file.
+const srcPath = new URL("../src/markdown-export.ts", import.meta.url);
 const src = fs.readFileSync(srcPath, "utf8");
-const marker = "function buildMarkdownExport";
-const start = src.indexOf("interface ExportToolCall") >= 0 ? src.indexOf("interface ExportToolCall") : src.indexOf(marker);
-check("buildMarkdownExport found at file tail", start >= 0 && src.indexOf(marker) >= start);
-const slice = `${src.slice(start)}\nexport { buildMarkdownExport };\n`;
-const { code } = esbuild.transformSync(slice, { loader: "ts", format: "esm", target: "node18" });
+check("buildMarkdownExport is an exported symbol", /export function buildMarkdownExport/.test(src));
+const { code } = esbuild.transformSync(src, { loader: "ts", format: "esm", target: "node18" });
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "export-md-"));
 const tmpFile = path.join(tmpDir, "build-markdown-export.mjs");
