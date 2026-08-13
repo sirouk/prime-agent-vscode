@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.12]
+
 - Split the three self-contained regions out of `session-controller.ts` — the per-thread diff engine (`thread-diffs.ts`), the Markdown exporter (`markdown-export.ts`), and the git HEAD document provider (`git-head-provider.ts`). No behavior change: the whole suite, including the thread-diff harness, passed unmodified against the extraction before any test was touched. The controller drops from 4,074 to 3,535 lines and the diff engine now states its dependencies as four hooks instead of reaching into controller state. The export harness also stops slicing the exporter out of the controller by string offset — it imports a real module now, so it can no longer break when something moves below it in the file.
 
 ## [1.0.11]
