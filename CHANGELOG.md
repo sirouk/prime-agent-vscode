@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.10]
+
 - A long thread no longer loses its middle silently. The two windowing mechanisms — messages never rendered, and rendered rows later trimmed — are independent, and only the first of them was ever stated. With both live, "Load earlier" spliced old messages straight onto a tail that was missing hundreds in between, reading as continuous history. The trimmed stretch is now marked in place, the loaded batch lands above that marker, and the count no longer includes the notice itself.
 - A dropped daemon connection can no longer re-attach twice and then detach itself. Two callers arriving while the socket was down both issued an attach; the loser released the registration the winner had just installed, leaving a session that accepted prompts and never received another event. Re-attach is now serialized, waits for any pending release of the same handle, and never detaches a handle the current view holds.
 - A navigation superseded mid-attach is rolled back instead of left half-installed. The stale attachment used to keep the daemon viewer AND wedge the newer navigation, stranding the window in "switching sessions…" with every action refused until another history row was clicked.
