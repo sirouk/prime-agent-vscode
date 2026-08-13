@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.11]
+
 - The "/" menu is back in resumed threads. A session boundary discards the composer's per-session state — including the slash catalog — but the host only ever sent that catalog in answer to a webview's first `ready`, so every thread after the first one a panel showed opened an empty menu. The webview now re-asks for what the boundary discarded, and the host answers while attached, observing, or restoring: the catalog describes the agent build, not the session on screen. Asking for it also no longer pops "Please wait while your session view is restored…" at the operator — that guard exists to refuse mutations, not read-only queries.
 
 ## [1.0.10]
