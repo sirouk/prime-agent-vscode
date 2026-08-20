@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.13]
+
 - The changed-files strip above the composer now lists only what this session cannot claim, and it folds away. Both the main agent's edits and its subagents' count as the session's own work and come out of the strip — they are already in the Changes panel with attribution, and listing them twice invited the reading that something else had touched them. What is left is genuinely outside: your saves, another thread, a build step. A late subagent harvest re-files a path the strip already showed. The strip is collapsed by default behind a header, like the Changes panel, so a run that touches thirty files no longer walls off the composer with an unfoldable chip wall.
 - Up and Down in an empty composer walk this thread's previous prompts, the way a shell does. History is seeded from the thread's own transcript, so it survives a reload or a resume, and a prompt you just sent is recalled first. It deliberately only starts from an empty box: once there is text you wrote, the arrows belong to the caret, and an open autocomplete keeps them for its own selection.
 - An empty "Thought process" box is no longer drawn. A reasoning model emits the thinking slot before its first delta; the box now appears with the content instead of sitting empty above the reply. Streaming is untouched by design — the part is skipped before its key advances, so the block that appears with the first delta is the same node that keeps growing, and it keeps its open/closed state instead of being rebuilt every frame.
