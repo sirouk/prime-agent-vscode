@@ -418,6 +418,19 @@ function renderInstallBanner(url: string, reason: string): void {
 	const card = el("div", "install-card");
 	card.appendChild(el("div", "install-title", "Prime Agent CLI not detected"));
 	card.appendChild(el("div", "install-body", `We couldn't reach prime-agent — ${reason}. Install it (takes a minute), then click Retry below.`));
+	// The one-liner itself, copyable, so the common case needs no round trip to a
+	// browser at all.
+	const command = el("code", "install-cmd", "curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh");
+	command.title = "Click to copy";
+	command.addEventListener("click", () => {
+		// Only claim the copy happened if it did: clipboard access can be refused
+		// when the document is not focused, and a false confirmation sends the
+		// operator to paste nothing.
+		const copied = navigator.clipboard?.writeText(command.textContent ?? "");
+		if (copied) copied.then(() => addNotice("info", "Install command copied."), () => addNotice("warning", "Could not copy — select the command and copy it manually."));
+		else addNotice("warning", "Could not copy — select the command and copy it manually.");
+	});
+	card.appendChild(command);
 	const actions = el("div", "install-actions");
 	const guide = document.createElement("button");
 	guide.className = "install-cta";

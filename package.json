@@ -66,52 +66,62 @@
       {
         "command": "primeAgent.openChat",
         "title": "Open Chat in Editor Tab",
-        "icon": "$(comment-discussion)"
+        "icon": "$(comment-discussion)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.focusChat",
         "title": "Focus Chat",
-        "icon": "$(comment-discussion)"
+        "icon": "$(comment-discussion)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.newSession",
         "title": "New Session",
-        "icon": "$(add)"
+        "icon": "$(add)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.abort",
         "title": "Stop Agent",
-        "icon": "$(debug-stop)"
+        "icon": "$(debug-stop)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.compact",
         "title": "Compact Context",
-        "icon": "$(fold)"
+        "icon": "$(fold)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.exportChat",
-        "title": "Export Chat…",
-        "icon": "$(export)"
+        "title": "Export Chat\u2026",
+        "icon": "$(export)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.history",
-        "title": "Resume Recent Session…",
-        "icon": "$(history)"
+        "title": "Resume Recent Session\u2026",
+        "icon": "$(history)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.restart",
         "title": "Restart Agent Process",
-        "icon": "$(debug-restart)"
+        "icon": "$(debug-restart)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.addSelectionToChat",
         "title": "Add Selection to Chat",
-        "icon": "$(symbol-snippet)"
+        "icon": "$(symbol-snippet)",
+        "category": "Prime Agent"
       },
       {
         "command": "primeAgent.addActiveFileToChat",
         "title": "Add Active File to Chat",
-        "icon": "$(file)"
+        "icon": "$(file)",
+        "category": "Prime Agent"
       }
     ],
     "menus": {
@@ -210,6 +220,10 @@
     "smoke": "node test/smoke.mjs",
     "test": "node test/activate.test.mjs && node test/chat-view-message.test.mjs && node test/session-controller-boundary.test.mjs && node test/attach-lifecycle.test.mjs && node test/session-actions.test.mjs && node test/webview.test.mjs && node test/transcript-window.test.mjs && node test/thread-diffs.test.mjs && node test/export-md.test.mjs && node test/recent-sessions-tail.test.mjs && node test/transport-regression.test.mjs",
     "test:live": "node esbuild.config.mjs && node test/daemon-parity.mjs --require-daemon && node test/host-e2e.mjs && node test/smoke.mjs",
+    "test:e2e": "node test/vscode-e2e.mjs",
+    "test:shots": "node test/preview-shot.mjs",
+    "driver": "node test/live-driver.mjs",
+    "icon": "node test/render-icon.cjs",
     "pretest": "node esbuild.config.mjs",
     "presmoke": "node esbuild.config.mjs"
   },

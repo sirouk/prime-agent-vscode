@@ -32,18 +32,38 @@ export class ThreadDiffTracker {
 	constructor(private readonly host: ThreadDiffHost) {}
 
 	/**
-	 * Every path this session is known to have edited — its own edits AND its
+	 * Paths this session edited DURING THE CURRENT RUN — its own edits and its
 	 * subagents', which count the same because both are this session's work.
 	 * The changed-files strip subtracts this so it lists only what changed
 	 * WITHOUT the session's edit tool behind it.
 	 *
-	 * Honest bound: attribution comes from published diffs, so a file the agent
-	 * rewrote from a shell or Python cell is not in here and still reads as an
-	 * outside change. That is the same limit the panel's own footnote states.
+	 * Deliberately per-run, not cumulative, because the strip it filters is
+	 * per-run: the watcher's set is emptied at every agent_start. Subtracting the
+	 * whole thread's history instead meant a file the agent edited an hour ago
+	 * was subtracted forever — so when YOU saved that same file during a later
+	 * run, the strip silently dropped it. A false negative in the one thing the
+	 * strip exists to report is worse than a false positive, which is at least
+	 * visible.
+	 *
+	 * It also survives a transcript rewrite for the same reason: compaction and
+	 * fork drop the `details.diffs` records that rebuildFromMessages recomputes
+	 * attribution from, and this set is not rebuilt from the transcript.
+	 *
+	 * Honest bound, unchanged: attribution comes from published diffs, so a file
+	 * the agent rewrote from a shell or Python cell is not in here and still
+	 * reads as an outside change — the same limit the panel's footnote states.
 	 */
 	editedPaths(): Set<string> {
-		return new Set([...this.threadDiffFiles.keys(), ...this.subagentDiffFiles.keys()]);
+		return new Set(this.runEditedPaths);
 	}
+
+	/** Attribution for the run that is starting; the strip resets with it. */
+	startRun(): void {
+		this.runEditedPaths.clear();
+	}
+
+	/** Paths credited to this session since the current run began. */
+	private runEditedPaths = new Set<string>();
 
 	/** Edits made by the session being viewed. */
 	private threadDiffFiles = new Map<string, ThreadDiffAccum>();
@@ -109,7 +129,7 @@ export class ThreadDiffTracker {
 	 * {path, oldStr, newStr, startLine}). `agent` names the subagent when the
 	 * record was harvested from a child session; returns whether anything landed.
 	 */
-	commitKernelDiffs(raw: unknown, into: Map<string, ThreadDiffAccum>, agent?: string): boolean {
+	commitKernelDiffs(raw: unknown, into: Map<string, ThreadDiffAccum>, agent?: string, creditRun = true): boolean {
 		if (!Array.isArray(raw)) return false;
 		let committed = false;
 		for (const entry of raw) {
@@ -124,6 +144,11 @@ export class ThreadDiffTracker {
 			accum.source = "edit";
 			if (accum.hunks.length >= THREAD_DIFF_MAX_HUNKS_PER_FILE) accum.hunks.shift();
 			accum.hunks.push(agent ? { ...hunk, agent } : hunk);
+			// Credit the run whether this came from our own event stream or from a
+			// subagent's transcript: both are this session's work. A REBUILD passes
+			// creditRun=false — replaying the whole transcript would turn the
+			// per-run set back into the cumulative one this exists to avoid.
+			if (creditRun) this.runEditedPaths.add(display);
 			committed = true;
 		}
 		return committed;
@@ -177,6 +202,7 @@ export class ThreadDiffTracker {
 			if (accum.hunks.length >= THREAD_DIFF_MAX_HUNKS_PER_FILE) accum.hunks.shift();
 			accum.hunks.push(hunk);
 		}
+		this.runEditedPaths.add(pending.path);
 		this.queueThreadDiffsBroadcast();
 	}
 
@@ -203,7 +229,7 @@ export class ThreadDiffTracker {
 			if (!message || (message as { role?: unknown }).role !== "toolResult") continue;
 			const record = message as ToolResultMessage;
 			if (record.isError === true) continue;
-			this.commitKernelDiffs(record.details?.diffs, this.threadDiffFiles);
+			this.commitKernelDiffs(record.details?.diffs, this.threadDiffFiles, undefined, false);
 		}
 		this.post();
 	}

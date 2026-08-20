@@ -462,8 +462,15 @@ export class DaemonSidecar {
 		await this.request({ type: "abort", activeSessionId }, 15_000);
 	}
 
+	/**
+	 * No meaningful client-side deadline. prime-agent's own daemon client already
+	 * times out at 30s and says so; adding a second, shorter stopwatch here only
+	 * manufactures a different lie about the same still-running work. A daemon
+	 * that dies settles this promise through onSocketClosed, which is the honest
+	 * end condition.
+	 */
 	async compact(activeSessionId: string): Promise<void> {
-		await this.request({ type: "compact", activeSessionId }, 300_000);
+		await this.request({ type: "compact", activeSessionId }, 30 * 60_000);
 	}
 
 	async getMessages(activeSessionId: string): Promise<Array<Record<string, unknown>>> {

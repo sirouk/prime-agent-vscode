@@ -266,6 +266,23 @@ fs.writeFileSync('CHANGELOG.md', out);
 " || fail "could not rewrite CHANGELOG.md for [${chosen#v}]"
         fi
     fi
+    # The compare-link block is part of the changelog we are about to TAG and
+    # ship inside the vsix. Leaving it to a manual follow-up commit meant every
+    # release so far carried a [X.Y.Z] heading with no matching link definition —
+    # `git show vX.Y.Z:CHANGELOG.md` proves it. Do it before the tag instead.
+    if [ "$dry" != true ]; then
+        node -e "
+const fs = require('fs');
+const src = fs.readFileSync('CHANGELOG.md', 'utf8');
+const next = '${chosen}';
+const match = src.match(/^\[Unreleased\]: (.*)\/compare\/(v[0-9]+\.[0-9]+\.[0-9]+)\.\.\.HEAD\$/m);
+if (!match) process.exit(0);
+const [line, base, prev] = match;
+if (prev === next) process.exit(0);
+const out = src.replace(line, \`[Unreleased]: \${base}/compare/\${next}...HEAD\n[\${next.slice(1)}]: \${base}/compare/\${prev}...\${next}\`);
+fs.writeFileSync('CHANGELOG.md', out);
+" || warn "could not update the CHANGELOG compare links; do it by hand after the cut"
+    fi
 }
 gate_tests() {
     log "running the full verification battery…"
@@ -363,10 +380,16 @@ apply_release_changes "$chosen_tag" "$DRY_RUN"
 
 # ---- package the vsix ----
 # vsce globs with dot:true and never reads .gitignore, so only .vscodeignore
-# keeps the marketplace token out of the published (and publicly downloadable)
-# vsix. Prove it on every cut rather than trusting the file to stay right.
-if ./node_modules/.bin/vsce ls --no-dependencies 2>/dev/null | grep -qE '(^|/)\.env(\.|$)'; then
-    fail "refusing to package: a .env file would ship inside the .vsix — add it to .vscodeignore"
+# keeps anything out of the published (and publicly downloadable) vsix. This was
+# a denylist of one filename (.env) and therefore could not catch the next thing
+# that showed up untracked: graphify-out shipped 4 MB of symbol map naming the
+# very sources .vscodeignore excludes. Assert the whole file set instead — a
+# denylist only ever knows about yesterday's mistake.
+unexpected="$(./node_modules/.bin/vsce ls --no-dependencies 2>/dev/null | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|dist/extension\.js|media/(main\.js|main\.css|panels\.css|icon\.png|icon\.svg))$' || true)"
+if [ -n "$unexpected" ]; then
+    printf '[release] refusing to package: unexpected files would ship inside the .vsix:\n' >&2
+    printf '%s\n' "$unexpected" | sed 's/^/[release]   /' >&2
+    fail "add them to .vscodeignore (or extend the allowlist in release.sh if they belong)"
 fi
 # Exact name, not `ls -t`: stale vsix files pile up in this directory and an
 # mtime race would publish the wrong bundle under the new tag.

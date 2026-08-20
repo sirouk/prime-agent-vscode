@@ -24,3 +24,9 @@ dist/*.map
 dist/controller.cjs
 dist/daemon-sidecar.cjs
 dist/session-actions.cjs
+
+# Knowledge-graph output. Gitignored, which is exactly why it needs a line here:
+# vsce globs with dot:true and never reads .gitignore, so being invisible to git
+# is what let 4 MB of symbol map — naming the very files this file excludes —
+# into the locally packaged vsix.
+graphify-out/**

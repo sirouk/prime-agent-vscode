@@ -224,7 +224,14 @@ export async function listRecentSessions(workspaceRoot: string, options: RecentS
 	const otherRows: RecentSession[] = [];
 	for (const { file, mtime } of sorted) {
 		if (inWorkspaceRows.length >= workspaceLimit && otherRows.length >= otherLimit) break;
-		const row = await readSessionRow(file);
+		// One unreadable file (deleted between the scan and the read, permissions,
+		// a truncated write) must not cost the operator the other 399 rows.
+		let row: SessionRow;
+		try {
+			row = await readSessionRow(file);
+		} catch {
+			continue;
+		}
 		if (!row.header.cwd) continue;
 		if (!row.hasMessage || row.archived) continue;
 		const inWorkspace = normalizeFsPath(row.header.cwd) === normalizedRoot;

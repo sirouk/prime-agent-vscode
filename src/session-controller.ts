@@ -46,6 +46,13 @@ const HISTORY_WORKSPACE_LIMIT = 200;
 const HISTORY_OTHER_LIMIT = 40;
 /** The saved-session catalog carries every transcript; don't refetch it per keystroke. */
 const SAVED_CATALOG_TTL_MS = 15_000;
+/**
+ * Our own ceiling on a compact reply. Deliberately far above any real
+ * compaction: whether a compaction has failed is the agent's call, not a
+ * stopwatch's, and a dead transport already settles these promises through the
+ * socket/process close paths rather than through this timer.
+ */
+const COMPACT_REPLY_CEILING_MS = 30 * 60_000;
 
 /** Level order used by the agent itself (packages/ai getSupportedThinkingLevels). */
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -274,7 +281,9 @@ export class SessionController implements vscode.Disposable {
 		if (this.installPromptDismissed()) return;
 		this.broadcast({
 			type: "installPrompt",
-			url: "https://github.com/PrimeIntellect-ai/prime-agent/blob/main/packages/coding-agent/docs/quickstart.md",
+			// Prime Intellect's own installer page, not a doc page in a repo: an
+			// operator who cannot reach the CLI wants the command that installs it.
+			url: "https://app.primeintellect.ai/prime-agent",
 			reason,
 		});
 	}
@@ -433,6 +442,8 @@ export class SessionController implements vscode.Disposable {
 		this.historyRefreshTimer = null;
 		if (this.statsTimer) clearTimeout(this.statsTimer);
 		this.statsTimer = null;
+		if (this.installWatchdog) clearTimeout(this.installWatchdog);
+		this.installWatchdog = null;
 		this.threadDiffs.clear();
 		this.sidecar?.dispose();
 		this.watcher?.dispose();
@@ -458,6 +469,11 @@ export class SessionController implements vscode.Disposable {
 			case "agent_start":
 				this.streaming = true;
 				this.changedFiles.clear();
+				// The strip and the attribution that filters it are both per-run, so
+				// they have to reset together. Keeping attribution cumulative while
+				// the strip resets is what let an edit from an earlier run hide your
+				// own later save of the same file.
+				this.threadDiffs.startRun();
 				this.broadcast({ type: "changedFiles", files: [] });
 				break;
 			case "agent_end":
@@ -471,6 +487,16 @@ export class SessionController implements vscode.Disposable {
 				break;
 			case "compaction_end":
 				this.compacting = false;
+				// Compaction rewrites the transcript, so the view is stale the moment
+				// it ends. Refreshing on the EVENT rather than on the reply to our
+				// own request is what makes this correct in the two cases that
+				// matter: a compaction another client started on a shared session,
+				// and our own request whose reply timed out while the work carried
+				// on regardless. Nobody asked for this refresh, so it must not
+				// overwrite whatever is being typed right now.
+				void this.refreshSnapshot({ keepDraft: true }).catch(() => {
+					// Reported through the output channel by refreshSnapshot itself.
+				});
 				break;
 			case "auto_retry_start":
 				this.retrying = true;
@@ -540,8 +566,12 @@ export class SessionController implements vscode.Disposable {
 
 	private onBusySettled(): void {
 		void this.refreshStateAndStats();
+		this.changedFilesNeedRecompute = false;
 		if (this.changedFiles.size > 0) this.pushChangedFiles();
 	}
+
+	/** Set when a diff post could not refresh the strip because a run looked live. */
+	private changedFilesNeedRecompute = false;
 
 	/**
 	 * The changed-files strip is what the watcher saw MINUS what this session can
@@ -556,8 +586,15 @@ export class SessionController implements vscode.Disposable {
 	 * attribute it by.
 	 */
 	private pushChangedFiles(): void {
-		const edited = this.threadDiffs.editedPaths();
-		this.broadcast({ type: "changedFiles", files: [...this.changedFiles].filter((file) => !edited.has(file)).sort() });
+		// Compare on a canonical key. The watcher's paths come from
+		// asRelativePath (always forward slashes, on-disk case) while a tool path
+		// is whatever the model wrote — a backslash or a different case on a
+		// case-insensitive filesystem is the same file and must filter as one.
+		const edited = new Set([...this.threadDiffs.editedPaths()].map((file) => canonicalRelPath(file)));
+		this.broadcast({
+			type: "changedFiles",
+			files: [...this.changedFiles].filter((file) => !edited.has(canonicalRelPath(file))).sort(),
+		});
 	}
 
 	/** Clear the session-scoped strip in both host state and every visible webview. */
@@ -971,6 +1008,51 @@ export class SessionController implements vscode.Disposable {
 	 * the operator just sent, with nothing to resend it. Re-checked after every
 	 * await because a turn can start while we are connecting.
 	 */
+	/**
+	 * A reply that never came is not the same as work that failed.
+	 *
+	 * prime-agent's own daemon client gives up on a request after 30s
+	 * (dist/modes/daemon/daemon-client.js: `request(command, timeoutMs = 30000)`,
+	 * no special case for `compact`), and compaction on a long thread routinely
+	 * outlives that. The error it raises names a socket and a log file, so
+	 * relaying it verbatim as "Compaction failed" told the operator their
+	 * compaction had died when it was still running — and it kept running.
+	 *
+	 * So: never present a timeout as a failure without asking the session itself
+	 * whether it is still compacting. The transcript refresh does not depend on
+	 * this reply either; compaction_end drives it.
+	 */
+	private async compactionStillRunning(): Promise<boolean> {
+		try {
+			const attached = this.attached;
+			if (attached && this.sidecar?.connected) {
+				const state = (await this.sidecar.getState(attached.activeSessionId)) as RpcSessionState;
+				return state?.isCompacting === true;
+			}
+			const client = this.client;
+			if (client?.running) {
+				const response = await client.request({ type: "get_state" }, 15_000);
+				if (response.success) return (response.data as RpcSessionState)?.isCompacting === true;
+			}
+		} catch {
+			// Fall back to what the event stream last told us.
+		}
+		return this.compacting;
+	}
+
+	/** Say the true thing about a compact request that did not answer in time. */
+	private async reportCompactFailure(detail: string): Promise<void> {
+		if (await this.compactionStillRunning()) {
+			this.broadcast({
+				type: "notice",
+				level: "info",
+				text: "Compaction is taking longer than the agent's reply timeout — it is still running. The transcript refreshes when it finishes.",
+			});
+			return;
+		}
+		this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${detail}` });
+	}
+
 	async compact(instructions?: string, opts?: { betweenTurnsOnly?: boolean }): Promise<void> {
 		if (this.guardObservedReadOnly("compacting")) return;
 		const wouldAbortARun = (): boolean => opts?.betweenTurnsOnly === true && this.effectiveStreaming();
@@ -982,7 +1064,7 @@ export class SessionController implements vscode.Disposable {
 				if (!this.isCurrentAttachment(attached) || wouldAbortARun()) return;
 				await sidecar.compact(attached.activeSessionId);
 			} catch (err) {
-				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${err instanceof Error ? err.message : String(err)}` });
+				if (this.isCurrentAttachment(attached)) await this.reportCompactFailure(err instanceof Error ? err.message : String(err));
 			}
 			return;
 		}
@@ -994,17 +1076,17 @@ export class SessionController implements vscode.Disposable {
 		try {
 			const response = await client.request(
 				instructions ? { type: "compact", customInstructions: instructions } : { type: "compact" },
-				300_000,
+				COMPACT_REPLY_CEILING_MS,
 			);
 			if (!this.isCurrentRpcView(client, epoch)) return;
 			if (!response.success) {
-				this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${response.error ?? "unknown error"}` });
+				await this.reportCompactFailure(response.error ?? "unknown error");
 			} else {
 				await this.refreshSnapshot();
 			}
 		} catch (err) {
 			if (this.isCurrentRpcView(client, epoch)) {
-				this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${err instanceof Error ? err.message : String(err)}` });
+				await this.reportCompactFailure(err instanceof Error ? err.message : String(err));
 			}
 		}
 	}
@@ -2510,6 +2592,12 @@ export class SessionController implements vscode.Disposable {
 		// So do its changes and its subagents' — every caller here is landing on a
 		// different session. Leaving them would credit this thread with edits it
 		// never made; the snapshot that follows rebuilds the real ones.
+		//
+		// Order matters: clearing the tracker posts, and that post recomputes the
+		// changed-files strip. Drop the watcher's set FIRST or the strip is
+		// recomputed against an empty attribution map and re-lists every file the
+		// agent just edited as somebody else's work.
+		this.clearChangedFiles();
 		this.threadDiffs.clear();
 		this.clearReattachTimer();
 		return true;
@@ -2947,7 +3035,15 @@ export class SessionController implements vscode.Disposable {
 	// Snapshot / status
 	// ------------------------------------------------------------------
 
-	async refreshSnapshot(options: { epoch?: number; allowRestoring?: boolean } = {}): Promise<boolean> {
+	/**
+	 * `keepDraft` is for refreshes the operator did not ask for. restoreDraft()
+	 * pushes the host's copy of the composer text, which the webview applies
+	 * unconditionally — fine after a navigation, wrong when a background event
+	 * (auto-compaction, or another client compacting a shared session) lands
+	 * while someone is mid-sentence, because the host's copy is up to one debounce
+	 * stale and applying it moves the caret to the end.
+	 */
+	async refreshSnapshot(options: { epoch?: number; allowRestoring?: boolean; keepDraft?: boolean } = {}): Promise<boolean> {
 		// Hiding and re-showing the view reloads the webview, which asks for a
 		// fresh snapshot. Our own background RPC client is still running, so
 		// without this branch the attached transcript is repainted with the
@@ -2975,7 +3071,7 @@ export class SessionController implements vscode.Disposable {
 				status: this.buildStatus(),
 				steerDefault: vscode.workspace.getConfiguration("primeAgent").get<"steer" | "followUp">("defaultStreamingBehavior", "steer"),
 			});
-			this.restoreDraft();
+			if (options.keepDraft !== true) this.restoreDraft();
 			this.threadDiffs.rebuildFromMessages(this.cachedMessages);
 			this.pushStatus();
 			this.repaintChildrenStrip();
@@ -3023,7 +3119,7 @@ export class SessionController implements vscode.Disposable {
 			return false;
 		}
 		if (!this.isCurrentRpcView(client, epoch, allowRestoring)) return false;
-		this.restoreDraft();
+		if (options.keepDraft !== true) this.restoreDraft();
 		this.threadDiffs.rebuildFromMessages(this.cachedMessages);
 		this.pushStatus();
 		this.repaintChildrenStrip();
@@ -3539,10 +3635,24 @@ export class SessionController implements vscode.Disposable {
 			// attributable later. Re-file it then. Guarded on the run being over
 			// because the strip is only pushed at agent_end; during a run there is
 			// nothing on screen to correct.
-			if (!this.effectiveStreaming()) this.pushChangedFiles();
+			// A harvest that lands while the run still looks live cannot correct the
+			// strip yet, so remember to do it rather than dropping the correction:
+			// effectiveStreaming() reads state refreshed asynchronously at agent_end,
+			// and that stale-true window is exactly when a subagent harvest arrives.
+			if (this.effectiveStreaming()) this.changedFilesNeedRecompute = true;
+			else if (this.changedFiles.size > 0 || this.changedFilesNeedRecompute) {
+				this.changedFilesNeedRecompute = false;
+				this.pushChangedFiles();
+			}
 		},
 		isDisposed: () => this.disposed,
 	});
+}
+
+/** Workspace-relative path reduced to a comparison key (separators + case). */
+function canonicalRelPath(file: string): string {
+	const slashed = file.split(/[\\/]+/).join("/");
+	return process.platform === "linux" ? slashed : slashed.toLowerCase();
 }
 
 function formatNumber(value: number): string {

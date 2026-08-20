@@ -172,6 +172,78 @@ check("a harvest landing after the run re-files it as the session's own work",
 check("...and it shows up in the Changes panel instead",
 	!!lastDiffs()?.find((f) => f.path === "src/late-child.ts"), JSON.stringify(lastDiffs()?.map((f) => f.path)));
 
+// --- attribution and the strip must share one lifetime ----------------------
+// Verified failures before this: detaching re-listed the agent's own edits as
+// somebody else's, and a cumulative edited-set silently HID a later human save
+// of a file the agent had touched in an earlier run.
+controller.threadDiffs.clear();
+controller.changedFiles.clear();
+posted.length = 0;
+
+// Run 1: the agent edits src/shared.ts.
+controller.onAgentEvent({ type: "agent_start" });
+controller.threadDiffs.track(ipythonEnd("ipython:r1", [
+	{ path: path.join(workdir, "src/shared.ts"), oldStr: "a", newStr: "b" },
+]));
+controller.changedFiles = new Set(["src/shared.ts"]);
+controller.streaming = false;
+controller.pushChangedFiles();
+check("run 1: the agent's own edit is filtered out of the strip",
+	JSON.stringify(lastChanged()) === JSON.stringify([]), JSON.stringify(lastChanged()));
+
+// Run 2: the agent touches nothing; the operator saves that same file.
+controller.onAgentEvent({ type: "agent_start" });
+controller.changedFiles = new Set(["src/shared.ts"]);
+controller.streaming = false;
+controller.pushChangedFiles();
+check("run 2: YOUR save of a file the agent edited earlier is still reported",
+	JSON.stringify(lastChanged()) === JSON.stringify(["src/shared.ts"]), JSON.stringify(lastChanged()));
+
+// A transcript rewrite (compaction/fork drops the diff records) must not
+// re-inflate the strip with the session's own work.
+controller.onAgentEvent({ type: "agent_start" });
+controller.threadDiffs.track(ipythonEnd("ipython:r3", [
+	{ path: path.join(workdir, "src/rewritten.ts"), oldStr: "a", newStr: "b" },
+]));
+controller.changedFiles = new Set(["src/rewritten.ts"]);
+controller.streaming = false;
+controller.pushChangedFiles();
+check("before the rewrite the edit is attributed", JSON.stringify(lastChanged()) === JSON.stringify([]), JSON.stringify(lastChanged()));
+controller.threadDiffs.rebuildFromMessages([]);
+check("a transcript rewrite does not re-list the session's own edits",
+	JSON.stringify(lastChanged()) === JSON.stringify([]), JSON.stringify(lastChanged()));
+
+// Detaching clears both sets in the order that cannot re-inflate the strip.
+controller.onAgentEvent({ type: "agent_start" });
+controller.threadDiffs.track(ipythonEnd("ipython:r4", [
+	{ path: path.join(workdir, "src/agent-wrote.ts"), oldStr: "a", newStr: "b" },
+]));
+controller.changedFiles = new Set(["src/agent-wrote.ts", "src/you-wrote.ts"]);
+controller.streaming = false;
+controller.pushChangedFiles();
+check("attached view lists only the outside edit",
+	JSON.stringify(lastChanged()) === JSON.stringify(["src/you-wrote.ts"]), JSON.stringify(lastChanged()));
+await controller.detachFromDaemon(null);
+check("detaching does not re-list the agent's edits as outside changes",
+	JSON.stringify(lastChanged()) === JSON.stringify([]), JSON.stringify(lastChanged()));
+
+// Separator and case differences describe the same file.
+controller.onAgentEvent({ type: "agent_start" });
+controller.threadDiffs.track(ipythonEnd("ipython:r5", [
+	{ path: path.join(workdir, "src/Case.ts"), oldStr: "a", newStr: "b" },
+]));
+controller.changedFiles = new Set(["src/case.ts"]);
+controller.streaming = false;
+controller.pushChangedFiles();
+if (process.platform === "linux") {
+	check("case-sensitive platform keeps distinct paths distinct", JSON.stringify(lastChanged()) === JSON.stringify(["src/case.ts"]), JSON.stringify(lastChanged()));
+} else {
+	check("a case difference is the same file on a case-insensitive filesystem",
+		JSON.stringify(lastChanged()) === JSON.stringify([]), JSON.stringify(lastChanged()));
+}
+controller.changedFiles.clear();
+controller.threadDiffs.clear();
+
 // --- the controller must still route agent events into the tracker ----------
 // Calling the tracker directly (above) proves the engine; this proves the wire.
 controller.threadDiffs.clear();

@@ -61,10 +61,13 @@ jobs:
 
       - name: Package the vsix
         run: |
-          # vsce globs with dot:true and ignores .gitignore — a stray .env here
-          # would be published to the world inside the vsix.
-          if npx vsce ls --no-dependencies | grep -qE '(^|/)\.env(\.|$)'; then
-            echo "refusing to package: a .env file would ship inside the vsix" >&2
+          # vsce globs with dot:true and ignores .gitignore, so anything untracked
+          # that happens to sit in the tree ships. A denylist of one filename
+          # could not catch graphify-out; assert the whole file set instead.
+          unexpected="$(npx vsce ls --no-dependencies | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|dist/extension\.js|media/(main\.js|main\.css|panels\.css|icon\.png|icon\.svg))$' || true)"
+          if [ -n "$unexpected" ]; then
+            echo "refusing to package: unexpected files would ship inside the vsix:" >&2
+            echo "$unexpected" >&2
             exit 1
           fi
           npm run package

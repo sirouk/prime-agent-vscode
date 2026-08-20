@@ -224,6 +224,68 @@ controller.observingId = null;
 controller.observationRestoring = false;
 controller.client = null;
 
+// --- a daemon reply timeout is not a failed compaction ----------------------
+// prime-agent's own daemon client gives up at 30s (daemon-client.js
+// `request(command, timeoutMs = 30000)`, no case for `compact`), and compaction
+// on a long thread outlives that routinely. Relaying it as "Compaction failed"
+// told the operator their still-running compaction had died.
+const TIMEOUT_ERROR = 'Timed out after 30000ms waiting for the Prime Agent daemon response to "compact". Socket: /tmp/prime-agent-0/daemon.sock.';
+posts.length = 0;
+controller.attached = null;
+controller.attachedEpoch = null;
+controller.observingId = null;
+controller.observationRestoring = false;
+controller.compacting = true;
+controller.client = {
+	running: true,
+	sendRaw: () => {},
+	request: async (command) => {
+		if (command.type === "compact") throw new Error(TIMEOUT_ERROR);
+		if (command.type === "get_state") return { success: true, data: { isCompacting: true } };
+		return { success: true, data: {} };
+	},
+};
+controller.ensureStarted = async () => {};
+await controller.compact();
+const stillRunning = posts.filter((m) => m.type === "notice");
+check("a timeout while compaction is still running is not reported as a failure",
+	!stillRunning.some((m) => m.level === "error"), JSON.stringify(stillRunning.map((m) => `${m.level}:${m.text.slice(0, 40)}`)));
+check("...and the operator is told it is still going",
+	stillRunning.some((m) => m.level === "info" && /still running/i.test(m.text)),
+	JSON.stringify(stillRunning.map((m) => m.text.slice(0, 60))));
+
+// A genuine failure — the session is NOT compacting — must still be reported.
+posts.length = 0;
+controller.compacting = false;
+controller.client = {
+	running: true,
+	sendRaw: () => {},
+	request: async (command) => {
+		if (command.type === "compact") throw new Error("provider rejected the compaction");
+		if (command.type === "get_state") return { success: true, data: { isCompacting: false } };
+		return { success: true, data: {} };
+	},
+};
+await controller.compact();
+check("a real compaction failure is still surfaced as an error",
+	posts.some((m) => m.type === "notice" && m.level === "error" && /provider rejected/.test(m.text)),
+	JSON.stringify(posts.filter((m) => m.type === "notice").map((m) => `${m.level}:${m.text.slice(0, 40)}`)));
+
+// compaction_end refreshes the transcript on its own, so a lost reply cannot
+// leave a stale view — and a compaction another client ran also lands.
+let refreshed = 0;
+controller.refreshSnapshot = async () => { refreshed += 1; return true; };
+controller.onAgentEvent({ type: "compaction_end", reason: "manual" });
+check("compaction_end refreshes the transcript regardless of who asked for it", refreshed === 1, String(refreshed));
+controller.client = null;
+
+// --- the install prompt points at the installer, not a repo doc page --------
+posts.length = 0;
+controller.maybeShowInstallPrompt("test reason");
+const installPost = posts.find((m) => m.type === "installPrompt");
+check("install prompt targets Prime Intellect's installer page",
+	installPost?.url === "https://app.primeintellect.ai/prime-agent", String(installPost?.url));
+
 controller.dispose();
 console.log(failed === 0 ? "\nPASS attach-lifecycle" : `\nFAIL attach-lifecycle (${failed})`);
 process.exit(failed === 0 ? 0 : 1);

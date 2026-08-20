@@ -358,6 +358,7 @@ export class Composer {
 		// after whitespace, so appending one to "…changes in" opened nothing and
 		// left a stray character. Separate it the way insertMention already does.
 		const sep = before && !/\s$/.test(before) ? " " : "";
+		this.historyIndex = null;
 		this.textarea.value = `${before}${sep}${text}${this.textarea.value.slice(caret)}`;
 		this.textarea.selectionStart = this.textarea.selectionEnd = before.length + sep.length + text.length;
 		this.autoGrow();
@@ -579,6 +580,7 @@ export class Composer {
 		const before = this.textarea.value.slice(0, caret);
 		const after = this.textarea.value.slice(caret);
 		const sep = before && !before.endsWith("\n") && !before.endsWith(" ") ? " " : "";
+		this.historyIndex = null;
 		this.textarea.value = `${before}${sep}@${path} ${after}`;
 		const pos = before.length + sep.length + path.length + 2;
 		this.textarea.selectionStart = this.textarea.selectionEnd = pos;
@@ -593,6 +595,7 @@ export class Composer {
 	/** Restore one rejected send without overwriting an intervening draft. */
 	restoreRejectedPayload(text: string, images: ImageAttachment[], selections: SelectionAttachment[]): boolean {
 		if (this.textarea.value.trim() || this.images.length > 0 || this.selections.length > 0) return false;
+		this.historyIndex = null;
 		this.textarea.value = text;
 		this.images = [...images];
 		this.selections = [...selections];
@@ -604,6 +607,7 @@ export class Composer {
 	}
 
 	setText(text: string): void {
+		this.historyIndex = null;
 		this.textarea.value = text;
 		this.autoGrow();
 		this.focus();
@@ -616,6 +620,7 @@ export class Composer {
 	 * where the next keystroke persisted it over B's own draft.
 	 */
 	setDraft(text: string): void {
+		this.historyIndex = null;
 		this.textarea.value = text;
 		this.autoGrow();
 		// Don't steal focus back from History just to clear the box.
@@ -883,9 +888,18 @@ export class Composer {
 		if (this.promptHistory.length === 0) return false;
 		if (this.historyIndex === null) {
 			if (direction === 1) return false; // Down from a fresh empty box does nothing
-			if (this.textarea.value !== "") return false;
+			// Whitespace is an empty box to a human. A stray space or a newline left
+			// by an edit must not be the reason recall silently refuses.
+			if (this.textarea.value.trim() !== "") return false;
 			this.historyIndex = this.promptHistory.length - 1;
 		} else {
+			// Browsing continues only while the box still holds what we put there.
+			// If anything else changed it — a host draft push, an insertion, an
+			// edit — the position is stale, so start again from the newest.
+			if (this.textarea.value !== (this.promptHistory[this.historyIndex] ?? "")) {
+				this.historyIndex = null;
+				return this.navigateHistory(direction);
+			}
 			const next = this.historyIndex + direction;
 			if (next < 0) return true; // already at the oldest: hold it there
 			if (next >= this.promptHistory.length) {
@@ -1246,6 +1260,7 @@ export class Composer {
 		if (!item) return;
 		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
 		if (this.acKind === "slash") {
+			this.historyIndex = null;
 			this.textarea.value = item.insert;
 			this.textarea.selectionStart = this.textarea.selectionEnd = item.insert.length;
 		} else {
@@ -1264,6 +1279,7 @@ export class Composer {
 			const tail = after.replace(/^\s+/, "");
 			// Always terminate the token: without the space, typed letters merge
 			// into the path and the highlight bleeds forward.
+			this.historyIndex = null;
 			this.textarea.value = `${before}@${path} ${tail}`;
 			const pos = before.length + path.length + 2;
 			this.textarea.selectionStart = this.textarea.selectionEnd = pos;

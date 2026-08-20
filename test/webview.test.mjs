@@ -517,6 +517,10 @@ hostMessage({ type: "installPrompt", url: "https://github.com/PrimeIntellect-ai/
 const banner = document.querySelector(".install-banner.visible");
 check("install banner appears on prompt", !!banner, document.querySelector(".install-card")?.textContent?.slice(0, 60) ?? "");
 check("banner links the quickstart", banner?.querySelector(".install-cta") !== null);
+// An operator who cannot reach the CLI wants the command, not a doc tour.
+check("banner shows Prime Intellect's own install one-liner",
+	banner?.querySelector(".install-cmd")?.textContent === "curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh",
+	banner?.querySelector(".install-cmd")?.textContent ?? "<none>");
 posted.length = 0;
 banner.querySelector(".install-dismiss").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("dismiss posts and hides", !document.querySelector(".install-banner.visible") && posted.some((m) => m.type === "dismissInstallPrompt"));
@@ -1253,6 +1257,62 @@ hostMessage({ type: "event", event: { type: "message_update", message: { role: "
 check("later deltas grow the same node, not a new one", scroller.querySelector("details.thinking") === born);
 check("...and its text keeps up", /step two/.test(scroller.querySelector("details.thinking").textContent));
 hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+
+// --- recall must work at ANY point in a thread, not only at rest -------------
+const anytimeStatus = { ...baseStatus, sessionId: "session-anytime" };
+hostMessage({
+	type: "snapshot", status: anytimeStatus, state: null,
+	messages: [
+		{ role: "user", content: "alpha" }, { role: "assistant", content: [{ type: "text", text: "a" }] },
+		{ role: "user", content: "beta" }, { role: "assistant", content: [{ type: "text", text: "b" }] },
+	],
+});
+const clearBox = () => { textarea.value = ""; textarea.dispatchEvent(new window.Event("input", { bubbles: true })); };
+const arrow = (key) => textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+
+hostMessage({ type: "event", event: { type: "agent_start" } });
+clearBox(); arrow("ArrowUp");
+check("recall works while a run is streaming", textarea.value === "beta", JSON.stringify(textarea.value));
+hostMessage({ type: "status", status: { ...anytimeStatus, streaming: true, compacting: true } });
+clearBox(); arrow("ArrowUp");
+check("recall works while compacting", textarea.value === "beta", JSON.stringify(textarea.value));
+hostMessage({ type: "status", status: { ...anytimeStatus, retrying: true } });
+clearBox(); arrow("ArrowUp");
+check("recall works while retrying", textarea.value === "beta", JSON.stringify(textarea.value));
+hostMessage({ type: "status", status: anytimeStatus });
+hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+
+// Steering mid-run puts the steer in the history immediately.
+clearBox();
+textarea.value = "steer now";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+arrow("Enter");
+arrow("ArrowUp");
+check("a steering prompt is recalled first", textarea.value === "steer now", JSON.stringify(textarea.value));
+
+// A box holding only whitespace is an empty box to a human.
+clearBox();
+textarea.value = "   ";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+arrow("ArrowUp");
+check("whitespace does not block recall", textarea.value === "steer now", JSON.stringify(textarea.value));
+
+// The host replacing the text mid-browse must restart from the newest, not
+// resume from a position that no longer describes what is in the box.
+clearBox(); arrow("ArrowUp"); arrow("ArrowUp");
+check("browsed back before the interruption", textarea.value === "beta", JSON.stringify(textarea.value));
+hostMessage({ type: "draft", text: "" });
+arrow("ArrowUp");
+check("a host draft push restarts recall at the newest", textarea.value === "steer now", JSON.stringify(textarea.value));
+clearBox(); arrow("ArrowUp"); arrow("ArrowUp");
+hostMessage({ type: "insertMention", path: "src/x.ts" });
+const withMention = textarea.value;
+arrow("ArrowUp");
+check("a recalled prompt with a mention added is now the operator's text, so the arrows leave it alone",
+	textarea.value === withMention, JSON.stringify(textarea.value));
+clearBox(); arrow("ArrowUp");
+check("...and clearing it starts recall again at the newest", textarea.value === "steer now", JSON.stringify(textarea.value));
+clearBox();
 
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

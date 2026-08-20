@@ -2516,6 +2516,24 @@ body.vscode-light pre.term {
 .install-title { font-size: 11px; font-weight: 600; margin-bottom: 3px; }
 .install-body { font-size: 10.5px; color: var(--pa-dim); line-height: 1.4; margin-bottom: 8px; }
 
+/* The install one-liner, copyable in place. */
+.install-cmd {
+	display: block;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10px;
+	color: var(--pa-text);
+	background: var(--pa-surface-2);
+	border: 1px solid var(--pa-border);
+	border-radius: 6px;
+	padding: 4px 7px;
+	margin-bottom: 8px;
+	cursor: pointer;
+	overflow-x: auto;
+	white-space: nowrap;
+}
+
+.install-cmd:hover { border-color: var(--pa-border-strong); }
+
 .install-actions { display: flex; gap: 6px; }
 
 .install-cta {

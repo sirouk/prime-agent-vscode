@@ -25,6 +25,9 @@ code --install-extension sirouk.prime-agent-vscode
 
 Listing: [marketplace.visualstudio.com/items?itemName=sirouk.prime-agent-vscode](https://marketplace.visualstudio.com/items?itemName=sirouk.prime-agent-vscode)
 
+> The command above installs **this extension**. The Prime Agent CLI it drives is a separate,
+> upstream install — see [Requirements](#requirements).
+
 ### From source
 
 One-liner — clones to a temp dir, builds, installs, cleans up:
@@ -43,7 +46,7 @@ npm run package
 code --install-extension prime-agent-vscode-<version>.vsix
 ```
 
-Building from source requires `git`, `node` >= 20, `npm`, and the `code` CLI on `PATH` (macOS:
+Building from source requires `git`, `node` >= 22, `npm`, and the `code` CLI on `PATH` (macOS:
 run *Shell Command: Install 'code' command in PATH* from the Command Palette). The extension
 usually activates without a window reload; otherwise run *Developer: Reload Window*.
 
@@ -113,7 +116,13 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
 ## Requirements
 
 - The [`prime-agent` CLI](https://github.com/PrimeIntellect-ai/prime-agent) installed and
-  authenticated (`/login` in the terminal client, once).
+  authenticated (`/login` in the terminal client, once). Install it with Prime Intellect's
+  own installer:
+
+  ```sh
+  curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+  ```
+
 - VS Code 1.90+.
 
 If `prime-agent` is not on `PATH`, set `primeAgent.command` to an absolute path, e.g.
