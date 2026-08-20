@@ -2,7 +2,7 @@
   "name": "prime-agent-vscode",
   "displayName": "Prime Agent",
   "description": "Chat with Prime Agent from VS Code. Streams from the Prime Agent RPC protocol with full tool-call visibility.",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "publisher": "sirouk",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -95,13 +95,13 @@
       },
       {
         "command": "primeAgent.exportChat",
-        "title": "Export Chat\u2026",
+        "title": "Export Chat…",
         "icon": "$(export)",
         "category": "Prime Agent"
       },
       {
         "command": "primeAgent.history",
-        "title": "Resume Recent Session\u2026",
+        "title": "Resume Recent Session…",
         "icon": "$(history)",
         "category": "Prime Agent"
       },

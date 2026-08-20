@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.14]
+
 - Compaction no longer reports a failure it cannot know about. prime-agent's own daemon client gives up on a request after 30 seconds and says so — with a socket path and a log file — and compaction on a long thread routinely outlives that. The extension relayed it as "Compaction failed" while the compaction was still running. It now asks the session whether it is still compacting before calling anything a failure, and the transcript refresh is driven by the compaction_end event instead of by the reply, which also picks up a compaction another client started on a shared session. Our own timeouts no longer manufacture a second, shorter deadline on top of the agent's.
 - Up/Down prompt recall works at any point in a thread. It already ran during a turn, but any host-side write to the composer — a restored draft, an inserted mention, an accepted autocomplete — left the browse position pointing at text that was no longer there, so the next Up appeared to do nothing. Every such write now resets it, recall re-anchors if the box no longer holds what it put there, and a box holding only whitespace counts as empty.
 - The changed-files strip counts correctly in four more situations. Detaching from a session no longer re-lists the agent's own edits as somebody else's. Attribution is now per-run like the strip it filters, so your own save of a file the agent edited in an *earlier* run is reported instead of silently hidden. A compaction or fork that rewrites the transcript no longer re-inflates the strip. And a separator or letter-case difference between what the agent wrote and what the watcher saw is recognised as the same file.
@@ -222,7 +224,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.13...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.14...HEAD
+[1.0.14]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.11...v1.0.12
 [1.0.11]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.10...v1.0.11
