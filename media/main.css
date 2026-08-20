@@ -861,20 +861,50 @@ details.thinking .thinking-body {
 
 .changed-files {
 	border-top: 1px solid var(--pa-border);
-	padding: 5px 10px;
+	padding: 4px 10px 5px;
 	display: none;
-	flex-wrap: wrap;
-	gap: 5px;
-	align-items: center;
+	flex-direction: column;
+	gap: 4px;
 }
 
 .changed-files.visible {
 	display: flex;
 }
 
+/* Collapsed by default, so a wide run cannot wall off the composer. */
+.cf-header {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	width: 100%;
+	padding: 1px 0;
+	color: var(--pa-dim);
+	text-align: left;
+	cursor: pointer;
+}
+
+.cf-header:hover {
+	color: var(--pa-text);
+}
+
+.cf-caret {
+	font-size: 9px;
+	width: 9px;
+	flex: none;
+}
+
+.cf-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 5px;
+	align-items: center;
+	max-height: 132px;
+	overflow-y: auto;
+}
+
 .cf-label {
 	font-size: 10.5px;
-	color: var(--pa-dim);
+	color: inherit;
 	margin-right: 2px;
 }
 

@@ -1148,5 +1148,111 @@ check("jump returns to the latest and retires the pill", scroller.scrollTop === 
 hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "text", text: "still going and going and going" }] } } });
 check("auto-follow resumes after the jump", scroller.scrollTop === 2000, String(scroller.scrollTop));
 
+// --- Changed-files strip: collapsible, and it lists only OUTSIDE changes ------
+// The host already subtracts what the session edited; the panel's job is to
+// keep a wide run from walling off the composer with an unfoldable chip wall.
+const cfFiles = Array.from({ length: 12 }, (_, i) => `src/other-${i}.ts`);
+hostMessage({ type: "changedFiles", files: cfFiles });
+const cfBar = document.querySelector(".changed-files");
+check("changed-files strip becomes visible", cfBar.className.includes("visible"));
+check("changed-files strip is collapsed by default", document.querySelectorAll(".changed-files .cf-chip").length === 0,
+	`${document.querySelectorAll(".changed-files .cf-chip").length} chips`);
+const cfHeader = document.querySelector(".changed-files .cf-header");
+check("collapsed header states the count and that they are OTHER changes",
+	/12 other files changed/.test(cfHeader.textContent), cfHeader.textContent.trim());
+check("collapsed header carries the caret and aria state",
+	cfHeader.querySelector(".cf-caret")?.textContent === "▸" && cfHeader.getAttribute("aria-expanded") === "false");
+cfHeader.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("expanding reveals the file chips", document.querySelectorAll(".changed-files .cf-chip").length === 12,
+	`${document.querySelectorAll(".changed-files .cf-chip").length} chips`);
+check("expanded caret flips", document.querySelector(".changed-files .cf-caret").textContent === "▾");
+posted.length = 0;
+document.querySelector(".changed-files .cf-open").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("a chip still opens its file", posted.some((m) => m.type === "openFile" && m.path === "src/other-0.ts"),
+	JSON.stringify(posted.map((m) => m.type)));
+document.querySelector(".changed-files .cf-header").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("collapsing hides them again", document.querySelectorAll(".changed-files .cf-chip").length === 0);
+// The expanded/collapsed choice must survive the next push from the host.
+document.querySelector(".changed-files .cf-header").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+hostMessage({ type: "changedFiles", files: ["src/other-0.ts", "src/other-1.ts"] });
+check("expanded state survives a re-render", document.querySelectorAll(".changed-files .cf-chip").length === 2,
+	`${document.querySelectorAll(".changed-files .cf-chip").length} chips`);
+check("singular wording for one file", (() => {
+	hostMessage({ type: "changedFiles", files: ["src/solo.ts"] });
+	return /1 other file changed/.test(document.querySelector(".changed-files .cf-header").textContent);
+})(), document.querySelector(".changed-files .cf-header").textContent.trim());
+hostMessage({ type: "changedFiles", files: [] });
+check("an empty list hides the strip entirely", !document.querySelector(".changed-files").className.includes("visible"));
+
+// --- Up/Down recall of previous prompts from an EMPTY composer ---------------
+const recallStatus = { ...baseStatus, sessionId: "session-recall" };
+hostMessage({
+	type: "snapshot",
+	status: recallStatus,
+	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
+	messages: [
+		{ role: "user", content: "first prompt" },
+		{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+		{ role: "user", content: [{ type: "text", text: "second prompt" }] },
+		{ role: "assistant", content: [{ type: "text", text: "ok" }] },
+	],
+});
+const upKey = () => textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+const downKey = () => textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+textarea.value = "";
+upKey();
+check("ArrowUp on an empty box recalls the newest prompt", textarea.value === "second prompt", JSON.stringify(textarea.value));
+check("recall puts the caret at the end", textarea.selectionStart === "second prompt".length, String(textarea.selectionStart));
+upKey();
+check("ArrowUp again walks further back", textarea.value === "first prompt", JSON.stringify(textarea.value));
+upKey();
+check("ArrowUp holds at the oldest prompt", textarea.value === "first prompt", JSON.stringify(textarea.value));
+downKey();
+check("ArrowDown walks forward again", textarea.value === "second prompt", JSON.stringify(textarea.value));
+downKey();
+check("ArrowDown past the newest returns to an empty box", textarea.value === "", JSON.stringify(textarea.value));
+// With text the operator wrote, the arrows belong to the caret.
+textarea.value = "half-written thought";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+const caretEvent = new window.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true });
+textarea.dispatchEvent(caretEvent);
+check("ArrowUp does not hijack a draft the operator is writing", textarea.value === "half-written thought", JSON.stringify(textarea.value));
+check("...and the key is left to the textarea", !caretEvent.defaultPrevented);
+textarea.value = "";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+// A sent prompt joins the history immediately.
+textarea.value = "just sent this";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+upKey();
+check("a prompt sent in this panel is recalled first", textarea.value === "just sent this", JSON.stringify(textarea.value));
+textarea.value = "";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+// --- Empty thinking parts must not draw an empty "Thought process" box -------
+hostMessage({
+	type: "snapshot",
+	status: { ...baseStatus, sessionId: "session-thinking" },
+	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
+	messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "   " }, { type: "text", text: "answer" }] }],
+});
+check("a blank thinking part renders no box", !scroller.querySelector("details.thinking"),
+	scroller.querySelector("details.thinking")?.outerHTML?.slice(0, 60) ?? "none");
+check("...while the reply itself still renders", /answer/.test(scroller.textContent));
+// Streaming: the slot arrives before its first delta. The box must appear with
+// the content and must be the SAME node afterwards, or it would lose its
+// open/closed state on every frame.
+hostMessage({ type: "snapshot", status: { ...baseStatus, sessionId: "session-thinking-2" }, state: null, messages: [] });
+hostMessage({ type: "event", event: { type: "agent_start" } });
+hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "" }] } } });
+check("no box while the thinking slot is still empty", !scroller.querySelector("details.thinking"));
+hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one" }] } } });
+const born = scroller.querySelector("details.thinking");
+check("the box appears with the first delta", !!born && /step one/.test(born.textContent));
+hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one, step two" }] } } });
+check("later deltas grow the same node, not a new one", scroller.querySelector("details.thinking") === born);
+check("...and its text keeps up", /step two/.test(scroller.querySelector("details.thinking").textContent));
+hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

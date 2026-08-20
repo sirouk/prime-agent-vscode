@@ -134,6 +134,44 @@ check("the earlier child hunk is not re-read", files?.find((f) => f.path === "sr
 controller.threadDiffs.rebuildFromMessages([]);
 check("subagent rows outlive a parent rebuild", !!lastDiffs()?.find((f) => f.path === "src/child.ts"), JSON.stringify(lastDiffs()?.map((f) => f.path)));
 
+// --- the changed-files strip lists only what the session cannot claim --------
+// Both the main agent's edits and its subagents' count as this session's work,
+// so both come out of the strip; they are already in the Changes panel above it,
+// with attribution. What is left is genuinely someone else's.
+const lastChanged = () => [...posted].reverse().find((m) => m.type === "changedFiles")?.files ?? null;
+// The rebuild just above deliberately emptied the parent's own edits, so put one
+// back: this check is about main-agent AND subagent work counting the same.
+controller.threadDiffs.track(ipythonEnd("ipython:own", [
+	{ path: path.join(workdir, "src/resumed.ts"), oldStr: "old", newStr: "new" },
+]));
+const edited = controller.threadDiffs.editedPaths();
+check("editedPaths() counts the main agent's edits", edited.has("src/resumed.ts"), JSON.stringify([...edited]));
+check("editedPaths() counts a subagent's edits too", edited.has("src/child.ts") && edited.has("src/child2.ts"), JSON.stringify([...edited]));
+
+controller.changedFiles = new Set(["src/resumed.ts", "src/child.ts", "src/typed-by-hand.ts", "docs/notes.md"]);
+controller.pushChangedFiles();
+check("the session's own edits are filtered out of the strip",
+	!(lastChanged() ?? []).includes("src/resumed.ts"), JSON.stringify(lastChanged()));
+check("a subagent's edits are filtered out too",
+	!(lastChanged() ?? []).includes("src/child.ts"), JSON.stringify(lastChanged()));
+check("outside changes survive, sorted",
+	JSON.stringify(lastChanged()) === JSON.stringify(["docs/notes.md", "src/typed-by-hand.ts"]), JSON.stringify(lastChanged()));
+
+// A late subagent harvest re-files a path the strip already showed as outside work.
+controller.threadDiffs.clear();
+controller.changedFiles = new Set(["src/late-child.ts"]);
+controller.pushChangedFiles();
+check("before attribution the file reads as an outside change",
+	JSON.stringify(lastChanged()) === JSON.stringify(["src/late-child.ts"]), JSON.stringify(lastChanged()));
+const lateFile = path.join(workdir, "late-child-session.jsonl");
+fs.writeFileSync(lateFile, childRecord("src/late-child.ts", "old", "new"));
+controller.streaming = false;
+await controller.threadDiffs.harvestSubagents([{ sessionFile: lateFile, sessionId: "late-uuid", sessionName: "late-agent" }]);
+check("a harvest landing after the run re-files it as the session's own work",
+	JSON.stringify(lastChanged()) === JSON.stringify([]), JSON.stringify(lastChanged()));
+check("...and it shows up in the Changes panel instead",
+	!!lastDiffs()?.find((f) => f.path === "src/late-child.ts"), JSON.stringify(lastDiffs()?.map((f) => f.path)));
+
 // --- the controller must still route agent events into the tracker ----------
 // Calling the tracker directly (above) proves the engine; this proves the wire.
 controller.threadDiffs.clear();

@@ -8,6 +8,7 @@ import { HistoryView } from "./history.js";
 import { Transcript } from "./transcript.js";
 import type {
 	AgentEvent,
+	AgentMessage,
 	HostToWebview,
 	ImageAttachment,
 	RpcModel,
@@ -683,6 +684,9 @@ function dispatchHostMessage(message: HostToWebview): void {
 			transcript.clearSpawnCards?.();
 			spawnSeenBaseline = false;
 			transcript.renderSnapshot(message.messages ?? []);
+			// Up/Down recall has to survive a reload or a resume, so it is seeded
+			// from the thread itself rather than only from what this panel sent.
+			composer.setPromptHistory(userPromptsOf(message.messages ?? []));
 			// applyStatus already sets the streaming state from the union of the
 			// transcript and the host status; re-setting it from the transcript
 			// alone would drop a run that started before we attached.
@@ -853,6 +857,33 @@ function dispatchHostMessage(message: HostToWebview): void {
 			addNotice("error", `Prompt rejected: ${message.error}`);
 			break;
 	}
+}
+
+/**
+ * The thread's own user prompts, oldest first, for Up/Down recall.
+ *
+ * Text parts only: an image or a selection attachment cannot be typed back into
+ * the box, and the host composes the attachment envelope itself, so recalling
+ * anything but the words would put text in the composer that never matches the
+ * message it came from.
+ */
+function userPromptsOf(messages: AgentMessage[]): string[] {
+	const prompts: string[] = [];
+	for (const message of messages) {
+		if (!message || (message as { role?: unknown }).role !== "user") continue;
+		const content = (message as { content?: unknown }).content;
+		if (typeof content === "string") {
+			if (content.trim()) prompts.push(content);
+		} else if (Array.isArray(content)) {
+			const text = content
+				.filter((part) => part && (part as { type?: unknown }).type === "text")
+				.map((part) => (part as { text?: string }).text ?? "")
+				.join("\n")
+				.trim();
+			if (text) prompts.push(text);
+		}
+	}
+	return prompts;
 }
 
 function formatNumber(value: number): string {

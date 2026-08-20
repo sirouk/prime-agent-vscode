@@ -540,9 +540,24 @@ export class SessionController implements vscode.Disposable {
 
 	private onBusySettled(): void {
 		void this.refreshStateAndStats();
-		if (this.changedFiles.size > 0) {
-			this.broadcast({ type: "changedFiles", files: [...this.changedFiles].sort() });
-		}
+		if (this.changedFiles.size > 0) this.pushChangedFiles();
+	}
+
+	/**
+	 * The changed-files strip is what the watcher saw MINUS what this session can
+	 * prove it edited. Both the main agent's edits and its subagents' count as
+	 * this session's work, so both come out — they are already presented, with
+	 * attribution, in the Changes panel, and listing them twice invited the
+	 * reading that something else had touched them.
+	 *
+	 * What is left is genuinely outside the session's edit tool: your own saves,
+	 * another thread, a build step — plus the one honest overlap, a file the
+	 * agent rewrote from a shell or Python cell, which publishes no diff to
+	 * attribute it by.
+	 */
+	private pushChangedFiles(): void {
+		const edited = this.threadDiffs.editedPaths();
+		this.broadcast({ type: "changedFiles", files: [...this.changedFiles].filter((file) => !edited.has(file)).sort() });
 	}
 
 	/** Clear the session-scoped strip in both host state and every visible webview. */
@@ -3517,7 +3532,15 @@ export class SessionController implements vscode.Disposable {
 		workspaceRoot: () => this.workspaceRoot,
 		currentSessionFile: () =>
 			(this.attached?.sessionPath || undefined) ?? (this.rentedState?.sessionFile || undefined) ?? (this.state?.sessionFile || undefined),
-		post: (message) => this.broadcast(message),
+		post: (message) => {
+			this.broadcast(message);
+			// A subagent harvest lands after its child's run — and often after our
+			// own agent_end — so a file the strip already listed can become
+			// attributable later. Re-file it then. Guarded on the run being over
+			// because the strip is only pushed at agent_end; during a run there is
+			// nothing on screen to correct.
+			if (!this.effectiveStreaming()) this.pushChangedFiles();
+		},
 		isDisposed: () => this.disposed,
 	});
 }

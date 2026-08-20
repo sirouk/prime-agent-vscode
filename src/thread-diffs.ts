@@ -31,6 +31,20 @@ export interface ThreadDiffHost {
 export class ThreadDiffTracker {
 	constructor(private readonly host: ThreadDiffHost) {}
 
+	/**
+	 * Every path this session is known to have edited — its own edits AND its
+	 * subagents', which count the same because both are this session's work.
+	 * The changed-files strip subtracts this so it lists only what changed
+	 * WITHOUT the session's edit tool behind it.
+	 *
+	 * Honest bound: attribution comes from published diffs, so a file the agent
+	 * rewrote from a shell or Python cell is not in here and still reads as an
+	 * outside change. That is the same limit the panel's own footnote states.
+	 */
+	editedPaths(): Set<string> {
+		return new Set([...this.threadDiffFiles.keys(), ...this.subagentDiffFiles.keys()]);
+	}
+
 	/** Edits made by the session being viewed. */
 	private threadDiffFiles = new Map<string, ThreadDiffAccum>();
 	/** Edits harvested from this session's subagents, kept apart so a rebuild of

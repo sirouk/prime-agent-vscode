@@ -9,6 +9,8 @@ import type { ImageAttachment, ModelRef, RpcModel, RpcSlashCommand, SelectionAtt
 
 /** Keys that move the caret without producing an input event. */
 const CARET_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
+/** Previous prompts kept for Up/Down recall. Deep enough for a long thread. */
+const PROMPT_HISTORY_MAX = 200;
 const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
@@ -167,6 +169,9 @@ export class Composer {
 
 		this.textarea.addEventListener("keydown", (event) => this.onKeyDown(event));
 		this.textarea.addEventListener("input", () => {
+			// Real typing ends history browsing: from here the text is the
+			// operator's, so Up must go back to moving the caret.
+			this.historyIndex = null;
 			this.autoGrow();
 			this.updateAutocomplete();
 			window.clearTimeout(this.draftDebounce);
@@ -637,6 +642,10 @@ export class Composer {
 		this.images = [];
 		this.selections = [];
 		this.accepted.clear();
+		// History belongs to the thread that just left; the incoming snapshot
+		// seeds the new one.
+		this.promptHistory = [];
+		this.historyIndex = null;
 		this.commands = [];
 		this.acRequestId += 1;
 		this.acSelected = 0;
@@ -698,6 +707,7 @@ export class Composer {
 			this.closeAutocomplete();
 			return;
 		}
+		this.rememberPrompt(text);
 		this.deps.onSend(text, this.images, this.selections);
 		this.textarea.value = "";
 		this.images = [];
@@ -836,6 +846,73 @@ export class Composer {
 		this.modelMenu.show(items);
 	}
 
+	// ---- previous-prompt history (Up/Down from an empty composer) ----
+
+	/** Oldest first. Seeded from the thread's own transcript, grown as you send. */
+	private promptHistory: string[] = [];
+	/** null = not browsing. Otherwise an index into promptHistory. */
+	private historyIndex: number | null = null;
+
+	/** Replace the history with the thread's own user messages (host snapshot). */
+	setPromptHistory(prompts: string[]): void {
+		const kept: string[] = [];
+		for (const raw of prompts) {
+			const text = typeof raw === "string" ? raw : "";
+			// Consecutive repeats are noise to walk back through.
+			if (text.trim() && text !== kept[kept.length - 1]) kept.push(text);
+		}
+		this.promptHistory = kept.slice(-PROMPT_HISTORY_MAX);
+		this.historyIndex = null;
+	}
+
+	private rememberPrompt(text: string): void {
+		if (text.trim() && text !== this.promptHistory[this.promptHistory.length - 1]) {
+			this.promptHistory.push(text);
+			if (this.promptHistory.length > PROMPT_HISTORY_MAX) this.promptHistory.shift();
+		}
+		this.historyIndex = null;
+	}
+
+	/**
+	 * Walk the thread's previous prompts, the way a shell (and Claude, and Codex)
+	 * does it. Deliberately only starts from an EMPTY composer: once there is
+	 * text the operator wrote, Up and Down belong to the caret, and stealing them
+	 * would make a multi-line draft impossible to navigate.
+	 */
+	private navigateHistory(direction: -1 | 1): boolean {
+		if (this.promptHistory.length === 0) return false;
+		if (this.historyIndex === null) {
+			if (direction === 1) return false; // Down from a fresh empty box does nothing
+			if (this.textarea.value !== "") return false;
+			this.historyIndex = this.promptHistory.length - 1;
+		} else {
+			const next = this.historyIndex + direction;
+			if (next < 0) return true; // already at the oldest: hold it there
+			if (next >= this.promptHistory.length) {
+				// Past the newest: back to the empty box you started from.
+				this.historyIndex = null;
+				this.textarea.value = "";
+				this.afterHistoryFill();
+				return true;
+			}
+			this.historyIndex = next;
+		}
+		this.textarea.value = this.promptHistory[this.historyIndex] ?? "";
+		this.afterHistoryFill();
+		return true;
+	}
+
+	/** Caret to the end, mirror and height in step, draft persisted like a normal edit. */
+	private afterHistoryFill(): void {
+		const end = this.textarea.value.length;
+		this.textarea.selectionStart = this.textarea.selectionEnd = end;
+		this.autoGrow();
+		this.closeAutocomplete();
+		this.textarea.scrollTop = this.textarea.scrollHeight;
+		window.clearTimeout(this.draftDebounce);
+		this.draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
+	}
+
 	private onKeyDown(event: KeyboardEvent): void {
 		if (this.acKind) {
 			if (event.key === "ArrowDown") {
@@ -855,6 +932,14 @@ export class Composer {
 			}
 			if (event.key === "Escape") {
 				this.closeAutocomplete();
+				return;
+			}
+		}
+		// After the autocomplete block above, so an open panel keeps Up/Down for
+		// its own selection — the history only sees keys nothing else claimed.
+		if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+			if (this.navigateHistory(event.key === "ArrowUp" ? -1 : 1)) {
+				event.preventDefault();
 				return;
 			}
 		}

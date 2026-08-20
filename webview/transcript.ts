@@ -93,6 +93,8 @@ const INITIAL_RENDER = 150;
 const LOAD_BATCH = 100;
 /** Ceiling on rendered rows in a long-running session, and the level trimming targets. */
 const MAX_RENDERED_ROWS = 600;
+/** Chips drawn in the expanded changed-files strip before it says "+N more". */
+const CHANGED_FILES_MAX = 40;
 const PRUNE_TO = 400;
 
 interface ToolBlock {
@@ -141,6 +143,8 @@ export class Transcript {
 	private changedFilesBar: HTMLElement;
 
 	private stickToBottom = true;
+	/** Collapsed until asked, and the choice survives every re-render of the strip. */
+	private changedFilesExpanded = false;
 	private spawnCardIds = new Set<string>();
 	/** Messages held as data, above the rendered window. */
 	private olderMessages: AgentMessage[] = [];
@@ -1090,6 +1094,15 @@ export class Transcript {
 				}
 				desired.push(md);
 			} else if (part.type === "thinking") {
+				// Same rule the text branch above already applies: a part with no
+				// content yet is not a part to render. A reasoning model emits the
+				// thinking slot before its first delta, which drew an empty
+				// "Thought process" box that sat there until content arrived.
+				// Skipping BEFORE the index advances is what makes this safe while
+				// streaming — the key stays stable, so the block that appears with
+				// the first delta is the same node that keeps growing, and it keeps
+				// its open/closed state instead of being rebuilt.
+				if (!part.thinking?.trim()) continue;
 				const key = `think-${thinkIndex++}`;
 				let node = keyed(key);
 				if (!node) {
@@ -1563,14 +1576,37 @@ export class Transcript {
 	// Changed files strip
 	// ---------------------------------------------------------------
 
+	/**
+	 * Files that changed on disk without this session's edit tool behind them —
+	 * your own saves, another thread, a build step. Collapsed by default and
+	 * behind a header, exactly like the Changes panel: a run that touches thirty
+	 * files used to push a thirty-chip wall between the transcript and the
+	 * composer with no way to fold it away.
+	 */
 	renderChangedFiles(files: string[]): void {
 		const bar = this.changedFilesBar;
 		bar.textContent = "";
 		bar.classList.toggle("visible", files.length > 0);
 		if (files.length === 0) return;
-		const label = el("span", "cf-label", `${files.length} file${files.length === 1 ? "" : "s"} changed`);
-		bar.appendChild(label);
-		for (const file of files.slice(0, 10)) {
+
+		const header = el("button", "cf-header") as HTMLButtonElement;
+		header.append(
+			el("span", "cf-caret", this.changedFilesExpanded ? "▾" : "▸"),
+			el("span", "cf-label", `${files.length} other file${files.length === 1 ? "" : "s"} changed`),
+		);
+		header.title =
+			"Changed on disk without this session's edit tool behind them — your edits, another thread, a build step, " +
+			"or a file the agent rewrote from a shell or Python cell. Click to expand.";
+		header.setAttribute("aria-expanded", String(this.changedFilesExpanded));
+		header.addEventListener("click", () => {
+			this.changedFilesExpanded = !this.changedFilesExpanded;
+			this.renderChangedFiles(files);
+		});
+		bar.appendChild(header);
+		if (!this.changedFilesExpanded) return;
+
+		const list = el("div", "cf-list");
+		for (const file of files.slice(0, CHANGED_FILES_MAX)) {
 			const chip = el("span", "cf-chip");
 			const nameBtn = el("button", "cf-open", shortenPath(file));
 			nameBtn.title = `Open ${file}`;
@@ -1581,11 +1617,12 @@ export class Transcript {
 			diffBtn.appendChild(icon("diff", 12));
 			diffBtn.addEventListener("click", () => this.deps.onOpenDiff(file));
 			chip.append(nameBtn, diffBtn);
-			bar.appendChild(chip);
+			list.appendChild(chip);
 		}
-		if (files.length > 10) {
-			bar.appendChild(el("span", "cf-more", `+${files.length - 10} more`));
+		if (files.length > CHANGED_FILES_MAX) {
+			list.appendChild(el("span", "cf-more", `+${files.length - CHANGED_FILES_MAX} more`));
 		}
+		bar.appendChild(list);
 	}
 
 	// ---------------------------------------------------------------
