@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.15]
+
 - Subagents are visible, attachable and controllable again, and a running agent stops reading as stopped. prime-agent 0.3.2 moved every RPC client onto a *client-owned* daemon worker and, in the same change, hid client-owned workers from the daemon's `list` unless the caller both asks for them and *is* the client that owns them. The extension's sidecar is a second socket connection, so it is not that client: our own live root fell back to its stale on-disk row — `isSessionActive: false`, no `rlmDepth`, no `parentActiveSessionId` — and every subagent under it disappeared from the roster entirely, which is what emptied the strip and left a working agent looking finished while its children kept running in the background. The extension now recovers the owning client id from the worker descriptor the daemon itself writes, and names it on roster reads. Nothing upstream is patched and no daemon state is mutated: this is our own worker, read back with the identity it already has.
 - That identity is claimed on a throwaway connection that is closed before each roster read returns. A client holding an owner id open stops the daemon from ever reaping that worker, so a persistent claim would have traded an invisible subagent for a leaked one — an exited agent whose worker and IPython kernels stayed alive for as long as the window did. A transient claim can at most postpone a reap by the daemon's own 30-second grace window. An identity is never borrowed from a worker that is stopping, that is dead, or that is already visible to everyone, the lookup is keyed by session file so a switch or fork cannot reuse the previous worker's id, and a lookup that finds nothing degrades to exactly the previous behaviour.
 - Both halves are gated. A unit layer pins the descriptor shape we depend on and every reason to decline an identity: no owner, stop intent, dead process, reused session file, sibling journals and damaged JSON. A live layer stands up a real client-owned session against a running daemon and proves the three legs in order — a plain `list all` cannot see it, `list all` with `includeClientOwned` still cannot, and naming the owner id can — then kills only the session it made. Both run in `release.sh`'s battery.
@@ -228,7 +230,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.14...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.15...HEAD
+[1.0.15]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.11...v1.0.12
