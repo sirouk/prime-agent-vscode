@@ -1064,6 +1064,32 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** Say the true thing about a compact request that did not answer in time. */
+	/**
+	 * Turn a compaction failure the operator cannot act on into one they can.
+	 *
+	 * Two of them are about the model rather than the thread, and both are worth
+	 * naming because the fix is the same gesture — pick another model — and the
+	 * raw provider text says nothing about that:
+	 *
+	 * - A refusal is the model declining this thread's content. Measured on a
+	 *   real 6,500-message thread: claude-opus-5 refused it in ~2s through two
+	 *   different providers, while claude-sonnet-5 and a non-Anthropic model
+	 *   summarized the very same content without complaint. Retrying the same
+	 *   model just reproduces it.
+	 * - "prompt is too long" is a context window smaller than the thread, not a
+	 *   fault in the request (claude-haiku-4-5 rejected 484,555 tokens against a
+	 *   200,000 ceiling on that same thread).
+	 */
+	private static compactFailureHint(detail: string): string {
+		if (/refus/i.test(detail)) {
+			return " The model declined to summarize this thread's content. Another model usually compacts it — switch model and run it again.";
+		}
+		if (/prompt is too long|context (?:window|length) exceeded|too many tokens/i.test(detail)) {
+			return " This thread is larger than the current model's context window. Switch to a model with a bigger window and run it again.";
+		}
+		return "";
+	}
+
 	private async reportCompactFailure(detail: string): Promise<void> {
 		if (await this.compactionStillRunning()) {
 			this.broadcast({
@@ -1073,7 +1099,11 @@ export class SessionController implements vscode.Disposable {
 			});
 			return;
 		}
-		this.broadcast({ type: "notice", level: "error", text: `Compaction failed: ${detail}` });
+		this.broadcast({
+			type: "notice",
+			level: "error",
+			text: `Compaction failed: ${detail}${SessionController.compactFailureHint(detail)}`,
+		});
 	}
 
 	async compact(instructions?: string, opts?: { betweenTurnsOnly?: boolean }): Promise<void> {

@@ -660,6 +660,40 @@ controller.fetchAttachedStats = originalIdentityFetchStats;
 controller.refreshAttachedState = originalIdentityRefreshState;
 controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 
+// --- compaction failures the operator can act on -----------------------------
+// A refusal and a context overflow are both about the model, not the thread,
+// and the raw provider text never says so. Measured on a real 6,500-message
+// thread: claude-opus-5 refused it through two providers while claude-sonnet-5
+// summarized the same content fine, and claude-haiku-4-5 rejected 484,555
+// tokens against its 200,000 ceiling.
+{
+	const notices = [];
+	const originalBroadcast = controller.broadcast;
+	const originalStillRunning = controller.compactionStillRunning;
+	controller.broadcast = (message) => { if (message.type === "notice") notices.push(message); };
+	controller.compactionStillRunning = async () => false;
+
+	await controller.reportCompactFailure("Turn prefix summarization failed: Model refused to respond (refusal)");
+	check("a refusal keeps the provider detail", /Model refused to respond/.test(notices.at(-1)?.text ?? ""));
+	check("a refusal points at switching model", /switch model/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
+
+	await controller.reportCompactFailure("Summarization failed: prompt is too long: 484555 tokens > 200000 maximum");
+	check("a context overflow points at a bigger window", /bigger window/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
+
+	await controller.reportCompactFailure("Summarization failed: Provider overloaded");
+	check("an unrelated failure gets no invented advice",
+		(notices.at(-1)?.text ?? "") === "Compaction failed: Summarization failed: Provider overloaded", notices.at(-1)?.text);
+
+	// The 1.0.14 guard still wins: a slow compaction is not a failed one.
+	controller.compactionStillRunning = async () => true;
+	await controller.reportCompactFailure("Turn prefix summarization failed: Model refused to respond (refusal)");
+	check("a still-running compaction is never reported as failed",
+		notices.at(-1)?.level === "info" && /still running/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
+
+	controller.broadcast = originalBroadcast;
+	controller.compactionStillRunning = originalStillRunning;
+}
+
 // The last lifecycle fixture intentionally leaves a lightweight RPC stand-in
 // installed; dispose() owns a real client's stop() method, so remove it first.
 controller.client = null;

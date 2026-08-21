@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- A compaction failure now says what to do about it. Two of them are about the model rather than the thread, and the provider's own words never say so. A refusal is the model declining this thread's content: measured on a real 6,500-message thread, `claude-opus-5` refused it in about two seconds through two different providers, while `claude-sonnet-5` and a non-Anthropic model summarized the very same content without complaint — so retrying the same model only reproduces it, and the fix is to pick another one. "Prompt is too long" is a context window smaller than the thread rather than a fault in the request (`claude-haiku-4-5` rejected 484,555 tokens against its 200,000 ceiling on that thread). Both now carry the provider's exact text plus the one gesture that resolves them. Every other failure is relayed unchanged — no invented advice.
+
 ## [1.0.18]
 
 - Large sessions can be resumed again. Opening one asks the agent for its transcript, and that reply arrives as a single JSONL record: for a 6,479-message session it is 4.6 MiB. The extension capped an inbound record at 4 MiB and treated the overflow as a protocol violation, so it destroyed the connection and killed the agent process mid-resume — the session simply never opened, and nothing on screen said why. The cap exists to stop a peer that never sends a newline from growing the extension host forever, which is a different thing from a legitimately large record; it is now 64 MiB, shared by both transports, with roughly an order of magnitude of headroom over the largest transcript observed. Sessions below the old limit were never affected, which is why only the long-running threads looked broken.
