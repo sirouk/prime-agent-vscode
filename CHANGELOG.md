@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.22]
+
 - Sessions stop disappearing. prime-agent marks a session `archived` whenever its worker closes for any reason other than a clean shutdown or an update — a kill, a worker swap, an update that did not land cleanly — so "archived" was never only the Archive button. The extension hid every archived session from the list AND from search, which is how real threads with thousands of messages ("Airship Simplification", "AI Security Pipeline Work") vanished from their own folder and were findable only from the CLI. Archived sessions are listed again, in the folder they belong to, and search can reach them. Drafts still stay out: a session with no message has nothing to resume.
 - History rows now carry the same three-state status the CLI names, not just a running flag. A green pulse is running, a solid grey dot is idle — loaded and waiting for work — and a hollow ring is inactive, meaning no worker is loaded and resuming it starts one. Only the live state animates: a pulsing dot on every row would make a list of finished work look busy. A host that sends no status reads as inactive rather than quietly claiming a liveness nobody checked, and the on-disk fallback scan says the same, because a bounded file read cannot know whether a worker exists.
 
@@ -267,7 +269,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.21...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.22...HEAD
+[1.0.22]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.21...v1.0.22
 [1.0.21]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.20...v1.0.21
 [1.0.20]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.19...v1.0.20
 [1.0.19]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.18...v1.0.19
