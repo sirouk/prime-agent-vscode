@@ -17,6 +17,9 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
+export { agentDirForSessionFile, defaultAgentDir, resolveOwnerClientId } from "./daemon-owner.js";
+export type { OwnerLookup, WorkerDescriptorRef } from "./daemon-owner.js";
+
 const PROTOCOL_NAME = "prime-agent.daemon";
 const PROTOCOL_VERSION = 7;
 const MAX_JSONL_FRAME_BYTES = 4 * 1024 * 1024;
@@ -131,6 +134,20 @@ export class DaemonSidecar {
 	onEvent: (message: DaemonServerMessage) => void = () => {};
 	/** Hook when the socket closes so hosts can invalidate attached state. */
 	onClose: () => void = () => {};
+	/**
+	 * Protocol client id to claim in every command envelope on this connection.
+	 *
+	 * The daemon rewrites the connection's identity to whatever the envelope
+	 * declares (daemon-supervisor.ts: `protocolClientIds.set(client, id)` and
+	 * `client.id = id`), which is the only way a second connection can read the
+	 * roster of a worker its RPC sibling owns.
+	 *
+	 * Set this ONLY on a short-lived connection (see `listAsOwner`). A long-lived
+	 * client holding an owner id keeps `scheduleOwnedWorkerCleanup` from ever
+	 * reaping that worker, so an exited RPC process would leak its worker and
+	 * kernels for as long as this extension stays open.
+	 */
+	impersonateClientId: string | null = null;
 
 	isSupported(): boolean {
 		if (!this.hello) return false;
@@ -379,6 +396,7 @@ export class DaemonSidecar {
 			type: "command",
 			id,
 			protocol: { name: PROTOCOL_NAME, version: PROTOCOL_VERSION },
+			...(this.impersonateClientId ? { clientId: this.impersonateClientId } : {}),
 			command,
 		})}\n`;
 		return new Promise<T>((resolve, reject) => {
@@ -403,11 +421,43 @@ export class DaemonSidecar {
 		});
 	}
 
-	async list(all = false): Promise<SessionSummaryRef[]> {
+	async list(all = false, options: { includeClientOwned?: boolean } = {}): Promise<SessionSummaryRef[]> {
 		// `data` is optional in the envelope: a success with no payload must read as
 		// "no rows", not as a TypeError thrown from inside a caller's try block.
-		const data = await this.request<{ sessions?: SessionSummaryRef[] } | undefined>({ type: "list", all }, 20_000);
+		const data = await this.request<{ sessions?: SessionSummaryRef[] } | undefined>(
+			{ type: "list", all, ...(options.includeClientOwned ? { includeClientOwned: true } : {}) },
+			20_000,
+		);
 		return data?.sessions ?? [];
+	}
+
+	/**
+	 * Roster read that can also see the client-owned worker hosting our own RPC
+	 * session — the one carrying our live root and every RLM subagent.
+	 *
+	 * Both halves are required and neither is sufficient: the daemon needs
+	 * `includeClientOwned: true` AND an envelope client id equal to the worker's
+	 * `ownerClientId`. Verified against a live daemon: `list all` alone and
+	 * `list all + includeClientOwned` both return zero active rows and zero
+	 * subagents, while the pair returns the streaming root plus its children.
+	 *
+	 * The identity is claimed on a THROWAWAY connection that is disposed before
+	 * this resolves. The daemon reschedules owned-worker cleanup when a client
+	 * disconnects, so a transient claim can at most postpone a reap by the
+	 * 30s grace window; a persistent claim would postpone it forever.
+	 *
+	 * Returns a superset of `list(all)`: the supervisor's filter is
+	 * `isVisibleWorker(worker) || (includeClientOwned && accessible)`.
+	 */
+	static async listAsOwner(ownerClientId: string, all = true, timeoutMs = 10_000): Promise<SessionSummaryRef[]> {
+		const owned = new DaemonSidecar();
+		owned.impersonateClientId = ownerClientId;
+		try {
+			await owned.connect(timeoutMs);
+			return await owned.list(all, { includeClientOwned: true });
+		} finally {
+			owned.dispose();
+		}
 	}
 
 	/**

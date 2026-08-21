@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { DaemonSidecar } from "./daemon-sidecar.js";
+import { resolveOwnerClientId } from "./daemon-owner.js";
 import type { AttachSnapshot, DaemonServerMessage, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
 import type {
 	AgentEvent,
@@ -1768,7 +1769,7 @@ export class SessionController implements vscode.Disposable {
 	private async collectHistory(): Promise<RecentSession[]> {
 		try {
 			const sidecar = await this.ensureSidecar();
-			return this.rowsFromCatalog(await sidecar.list(true));
+			return this.rowsFromCatalog(await this.listSessions(sidecar));
 		} catch {
 			// Daemon unreachable: the scan is less exact about names but it is the
 			// difference between a stale title and no history at all.
@@ -1910,7 +1911,7 @@ export class SessionController implements vscode.Disposable {
 		if (!session) return;
 		try {
 			const sidecar = await this.ensureSidecar();
-			const resident = (await sidecar.list(true)).find(
+			const resident = (await this.listSessions(sidecar)).find(
 				(row) =>
 					row.activeSessionId &&
 					(row.sessionId === session.id || (row.sessionFile && normalizeFsPath(row.sessionFile) === normalizeFsPath(session.path))),
@@ -1948,12 +1949,12 @@ export class SessionController implements vscode.Disposable {
 		}
 		try {
 			const sidecar = await this.ensureSidecar();
-			const resident = (await sidecar.list(true)).find(
+			const resident = (await this.listSessions(sidecar)).find(
 				(s) => (s.sessionFile ? normalizeFsPath(s.sessionFile) === normalizeFsPath(sessionPath) : false) && s.activeSessionId,
 			);
 			if (resident?.activeSessionId) {
 				await sidecar.request({ type: "kill", activeSessionId: resident.activeSessionId }, 30_000);
-				const stillResident = (await sidecar.list(true)).some(
+				const stillResident = (await this.listSessions(sidecar)).some(
 					(row) => row.activeSessionId === resident.activeSessionId,
 				);
 				if (stillResident) throw new Error("session is still stopping; try Archive again once it is inactive");
@@ -2459,7 +2460,7 @@ export class SessionController implements vscode.Disposable {
 			// active windows differ, and events are addressed to the canonical id.
 			let canonicalId = activeSessionId;
 			try {
-				const listed = await sidecar.list(true);
+				const listed = await this.listSessions(sidecar);
 				const target =
 					listed.find((s) => s.activeSessionId === activeSessionId) ??
 					listed.find((s) => (s as { sessionId?: string }).sessionId === activeSessionId) ??
@@ -2604,6 +2605,65 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/**
+	 * How long a resolved owner id is trusted. Hits are stable for the life of a
+	 * worker; misses are re-checked promptly because the descriptor is written
+	 * just after the RPC session starts, and the first refreshes race it.
+	 */
+	private static readonly OWNER_ID_HIT_TTL_MS = 30_000;
+	private static readonly OWNER_ID_MISS_TTL_MS = 2_000;
+	private ownerIdCache: { sessionFile: string; id: string | undefined; at: number } | null = null;
+
+	/**
+	 * The owner id of the client-owned worker hosting THIS session, or undefined
+	 * when the roster can be read as ourselves.
+	 *
+	 * Keyed by session file, so switching or forking a session drops the previous
+	 * worker's identity instead of quietly reusing it.
+	 */
+	private ownedRosterClientId(): string | undefined {
+		const sessionFile = this.state?.sessionFile;
+		if (!sessionFile) return undefined;
+		const cached = this.ownerIdCache;
+		const now = Date.now();
+		if (cached && cached.sessionFile === sessionFile) {
+			const ttl = cached.id ? SessionController.OWNER_ID_HIT_TTL_MS : SessionController.OWNER_ID_MISS_TTL_MS;
+			if (now - cached.at < ttl) return cached.id;
+		}
+		let id: string | undefined;
+		try {
+			id = resolveOwnerClientId({ sessionFile });
+		} catch {
+			// Descriptor layout changed or unreadable: degrade to the plain roster.
+			id = undefined;
+		}
+		this.ownerIdCache = { sessionFile, id, at: now };
+		return id;
+	}
+
+	/**
+	 * Every roster read in this class goes through here.
+	 *
+	 * A plain `list all` cannot see the client-owned worker that hosts our own
+	 * RPC session, so our live root reads as a stale on-disk row and none of our
+	 * subagents appear at all. Naming the worker's owner id restores both.
+	 *
+	 * The identity is claimed on a throwaway connection per read so it can never
+	 * pin a dead worker alive; see DaemonSidecar.listAsOwner. Any failure falls
+	 * back to the un-owned read, which is exactly today's behaviour.
+	 */
+	private async listSessions(sidecar: DaemonSidecar): Promise<SessionSummaryRef[]> {
+		const ownerClientId = this.ownedRosterClientId();
+		if (ownerClientId) {
+			try {
+				return await DaemonSidecar.listAsOwner(ownerClientId);
+			} catch (error) {
+				this.output.appendLine(`[prime-agent] owned roster read failed, falling back: ${String(error)}`);
+			}
+		}
+		return sidecar.list(true);
+	}
+
+	/**
 	 * Throttle window for the subagent strip. `list all` is a socket round-trip
 	 * that makes the daemon re-read every session file plus every subagent
 	 * registry — one per tool call stalls a long run for no new information.
@@ -2692,7 +2752,7 @@ export class SessionController implements vscode.Disposable {
 		// RPC session for child capabilities while it is on screen.
 		if (this.observingId) return;
 		try {
-			const sessions = await this.sidecar.list(true);
+			const sessions = await this.listSessions(this.sidecar);
 			if (this.disposed || epoch !== this.viewEpoch || this.attached !== attachment || this.observingId) return;
 			let parentActive: string;
 			let parentUuid: string | undefined;
@@ -2843,7 +2903,7 @@ export class SessionController implements vscode.Disposable {
 		let child: SessionSummaryRef | undefined;
 		try {
 			sidecar = await this.ensureSidecar({ reattach: false });
-			child = (await sidecar.list(true)).find((candidate) => (candidate.activeSessionId ?? candidate.id) === capability.activeSessionId);
+			child = (await this.listSessions(sidecar)).find((candidate) => (candidate.activeSessionId ?? candidate.id) === capability.activeSessionId);
 		} catch {
 			if (epoch !== this.viewEpoch) return false;
 			this.restoreAttachedView(previous, epoch);
