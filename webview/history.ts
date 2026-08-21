@@ -189,15 +189,20 @@ export class HistoryView {
 				relativeTime(session.modifiedMs != null ? new Date(session.modifiedMs).toISOString() : session.timestamp),
 			),
 		);
-		// Running session: animated status dot next to its name. Shown for the
-		// current session too — attaching to a live run must not make the run
-		// look finished on the next visit to history.
-		if (session.running) {
-			const run = el("span", "running-mark") as HTMLElement;
-			run.title = "Running right now";
-			run.appendChild(el("span", "running-dot"));
-			resume.appendChild(run);
-		}
+		// Status dot next to the name, the same three the CLI names. Shown for the
+		// current session too — attaching to a live run must not make the run look
+		// finished on the next visit to history. Older hosts send only `running`,
+		// so fall back to it rather than inventing a liveness we were not told.
+		const status = session.status ?? (session.running ? "running" : "inactive");
+		const mark = el("span", `running-mark ${status}`) as HTMLElement;
+		mark.title =
+			status === "running"
+				? "Running right now"
+				: status === "idle"
+					? "Idle — loaded and waiting for work"
+					: "Inactive — not loaded; resuming it starts a worker";
+		mark.appendChild(el("span", "running-dot"));
+		resume.appendChild(mark);
 		const actions = el("div", "history-actions");
 		if (!isCurrent) {
 			if (session.running) {

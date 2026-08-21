@@ -13,6 +13,9 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- Sessions stop disappearing. prime-agent marks a session `archived` whenever its worker closes for any reason other than a clean shutdown or an update — a kill, a worker swap, an update that did not land cleanly — so "archived" was never only the Archive button. The extension hid every archived session from the list AND from search, which is how real threads with thousands of messages ("Airship Simplification", "AI Security Pipeline Work") vanished from their own folder and were findable only from the CLI. Archived sessions are listed again, in the folder they belong to, and search can reach them. Drafts still stay out: a session with no message has nothing to resume.
+- History rows now carry the same three-state status the CLI names, not just a running flag. A green pulse is running, a solid grey dot is idle — loaded and waiting for work — and a hollow ring is inactive, meaning no worker is loaded and resuming it starts one. Only the live state animates: a pulsing dot on every row would make a list of finished work look busy. A host that sends no status reads as inactive rather than quietly claiming a liveness nobody checked, and the on-disk fallback scan says the same, because a bounded file read cannot know whether a worker exists.
+
 ## [1.0.21]
 
 - A subagent that starts now opens the Subagents strip for you. Work that begins inside a collapsed strip was invisible until you went looking for it, which is the wrong default for the one event you most want to notice. It fires for a fresh spawn and for an existing subagent going back to work, once per burst rather than once per subagent.

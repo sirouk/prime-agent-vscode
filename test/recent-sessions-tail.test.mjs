@@ -7,7 +7,9 @@
  * Covers the three things the on-disk fallback has to get right:
  *   - the workspace bucket is never starved by other folders,
  *   - a late rename wins over the first-prompt title,
- *   - drafts and archived sessions stay out, exactly as the CLI's roster does.
+ *   - drafts stay out (nothing to resume), while archived sessions are listed
+ *     as inactive: prime-agent archives on any unclean worker close, so hiding
+ *     them made real threads vanish from the list.
  */
 import * as esbuild from "esbuild";
 import * as fs from "node:fs";
@@ -86,7 +88,7 @@ const rows = await listRecentSessions(WS, { sessionsDir, workspaceLimit: 60, oth
 const ws = rows.filter((r) => r.inWorkspace);
 const others = rows.filter((r) => !r.inWorkspace);
 
-check("workspace bucket is not starved by newer other-folder sessions", ws.length === 2, `ws=${ws.map((r) => r.id).join(",")}`);
+check("workspace bucket is not starved by newer other-folder sessions", ws.length === 3, `ws=${ws.map((r) => r.id).join(",")}`);
 check("other folders still listed, under their own quota", others.length === 25, `n=${others.length}`);
 check("workspace rows come first", rows.slice(0, ws.length).every((r) => r.inWorkspace));
 
@@ -94,7 +96,11 @@ const renamed = rows.find((r) => r.id === "ws-renamed");
 check("late rename wins over the first-prompt title", renamed?.name === "Prime Agent VS Code Extension", `name=${String(renamed?.name)}`);
 
 check("zero-message draft is hidden", !rows.some((r) => r.id === "ws-draft"));
-check("archived session is hidden", !rows.some((r) => r.id === "ws-archived"));
+check("an archived session is listed, not hidden", rows.some((r) => r.id === "ws-archived"),
+	rows.map((r) => r.id).join(","));
+check("a scanned row cannot claim liveness it did not check",
+	rows.every((r) => r.status === "inactive" && !r.running),
+	JSON.stringify(rows.map((r) => [r.id, r.status])));
 check("live workspace session is shown", rows.some((r) => r.id === "ws-live"));
 
 // Buckets are recent-descending within themselves (#58).

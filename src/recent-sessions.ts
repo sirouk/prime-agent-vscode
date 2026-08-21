@@ -233,7 +233,10 @@ export async function listRecentSessions(workspaceRoot: string, options: RecentS
 			continue;
 		}
 		if (!row.header.cwd) continue;
-		if (!row.hasMessage || row.archived) continue;
+		// Archived is not a reason to hide a session — see rowsFromCatalog. A scan
+		// cannot know liveness, so every row it produces is "inactive"; the daemon
+		// catalog is what promotes one to idle or running when it answers.
+		if (!row.hasMessage) continue;
 		const inWorkspace = normalizeFsPath(row.header.cwd) === normalizedRoot;
 		const bucket = inWorkspace ? inWorkspaceRows : otherRows;
 		if (bucket.length >= (inWorkspace ? workspaceLimit : otherLimit)) continue;
@@ -246,6 +249,7 @@ export async function listRecentSessions(workspaceRoot: string, options: RecentS
 			name: row.name,
 			firstPrompt: row.firstPrompt,
 			inWorkspace,
+			status: "inactive",
 		});
 	}
 	// Both buckets inherit the mtime-descending scan order.

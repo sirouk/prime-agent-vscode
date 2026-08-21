@@ -1876,6 +1876,17 @@ export class SessionController implements vscode.Disposable {
 	 * subagents are still working "idle" — the CLI shows all of them running. The
 	 * trailing terms are redundant with isSessionActive but keep older daemons honest.
 	 */
+	/**
+	 * The CLI's three-way roster status. A session the daemon serves from its
+	 * on-disk registry holds no worker and is "inactive" — that includes every
+	 * archived one, which is how a session retired by a kill or a worker swap
+	 * still reads honestly instead of vanishing.
+	 */
+	private static rosterStatus(s: SessionSummaryRef): "running" | "idle" | "inactive" {
+		if (!s.activeSessionId) return "inactive";
+		return SessionController.isRunningSummary(s) ? "running" : "idle";
+	}
+
 	private static isRunningSummary(s: SessionSummaryRef): boolean {
 		return Boolean(
 			s.hasActiveHeartbeat ||
@@ -1907,10 +1918,15 @@ export class SessionController implements vscode.Disposable {
 			if (!s.sessionFile || !s.cwd) continue;
 			// Subagents belong under their parent in the strip, not in history.
 			if ((s.rlmDepth ?? 0) > 0) continue;
-			// shouldShowAgentsViewSession: live only. Drafts (no message yet) and
-			// archived sessions stay out, so the extension and the CLI agree on
-			// what "your sessions" means.
-			if (s.lifecycle !== "live") continue;
+			// Drafts have no message and nothing to resume, so they stay out.
+			// Archived ones do NOT: prime-agent archives a session whenever its
+			// worker closes for any reason but a clean shutdown or an update
+			// (daemon-mode closeKeepsResumeEntry), so "archived" marks plenty of
+			// threads the operator never retired — a kill, a worker swap, an
+			// update that did not land cleanly. Hiding those made real work
+			// disappear from the list and left the CLI as the only way to find it.
+			// They come back as "inactive", which is what they are.
+			if (s.lifecycle === "draft") continue;
 			const modified = s.modified ?? s.lastActivityAt;
 			const parsed = modified ? Date.parse(modified) : Number.NaN;
 			const inWorkspace = normalizeFsPath(s.cwd) === root;
@@ -1924,6 +1940,7 @@ export class SessionController implements vscode.Disposable {
 				firstPrompt: s.firstMessage,
 				inWorkspace,
 				running: SessionController.isRunningSummary(s),
+				status: SessionController.rosterStatus(s),
 			});
 		}
 		const activityOf = (s: RecentSession): number => {
@@ -2019,9 +2036,11 @@ export class SessionController implements vscode.Disposable {
 		const knownPaths = new Set(base.map((s) => normalizeFsPath(s.path)));
 		const root = normalizeFsPath(this.workspaceRoot);
 		for (const info of saved) {
-			// Same visibility rule as the roster, or search would resurrect exactly
-			// the drafts and archived sessions the list deliberately hides.
-			if ((info.messageCount ?? 0) === 0 || info.state?.status === "archived" || info.state?.status === "crash") continue;
+			// Same visibility rule as the roster: drafts have nothing to find, and a
+			// crashed record is not a session. Archived ones ARE searchable now,
+			// because the roster shows them — this filter is what made a real
+			// thread unfindable from here while the CLI could still see it.
+			if ((info.messageCount ?? 0) === 0 || info.state?.status === "crash") continue;
 			const body = info.allMessagesText ?? "";
 			const at = body.toLowerCase().indexOf(needle);
 			if (at < 0) continue;
@@ -2043,7 +2062,10 @@ export class SessionController implements vscode.Disposable {
 				firstPrompt: info.firstMessage,
 				inWorkspace: normalizeFsPath(info.cwd) === root,
 				// `running` stays unset: the saved catalog has no runtime state, and
-				// "we did not ask" must not render as "not running".
+				// "we did not ask" must not render as "not running". The status dot
+				// says "inactive" for the same reason the on-disk scan does — this
+				// row exists only because the roster did not carry it.
+				status: "inactive",
 				matchSnippet: snippet,
 			});
 		}

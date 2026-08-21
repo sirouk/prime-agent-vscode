@@ -2583,7 +2583,9 @@ body.vscode-light pre.term {
 }
 .install-dismiss:hover { color: var(--pa-text); background: var(--pa-raised); }
 
-/* ---------- running mark for live-history rows ---------- */
+/* ---------- roster status mark for history rows ---------- */
+/* Three states, the same three the CLI names. Only the live one moves: a
+   pulsing dot on every row would make a list of finished work look busy. */
 
 .running-mark {
 	display: inline-flex;
@@ -2597,6 +2599,20 @@ body.vscode-light pre.term {
 	border-radius: 50%;
 	background: var(--pa-accent);
 	animation: running-pulse 1.4s ease-in-out infinite;
+}
+
+/* Loaded and waiting: present, but not doing anything. */
+.running-mark.idle .running-dot {
+	background: var(--pa-dim);
+	animation: none;
+	opacity: 0.85;
+}
+
+/* Not loaded: an outline, so it reads as absent rather than dimmed-out work. */
+.running-mark.inactive .running-dot {
+	background: transparent;
+	border: 1px solid var(--pa-faint);
+	animation: none;
 }
 
 @keyframes running-pulse {

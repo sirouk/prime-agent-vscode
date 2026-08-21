@@ -334,6 +334,13 @@ export interface RecentSession {
 	modifiedMs?: number;
 	/** True when the daemon reports this session is actively streaming rn. */
 	running?: boolean;
+	/**
+	 * Roster status, the same three the CLI's agents view names: a session with
+	 * no live worker is "inactive", one whose worker is doing something is
+	 * "running", and one holding a worker between turns is "idle". `running`
+	 * stays for the controls that only care whether there is a run to stop.
+	 */
+	status?: "running" | "idle" | "inactive";
 	name?: string;
 	firstPrompt?: string;
 	inWorkspace: boolean;

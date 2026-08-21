@@ -610,15 +610,29 @@ check(
 hostMessage({
 	type: "history",
 	sessions: [
-		{ id: "run-1", path: "/tmp/run.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "live worker", inWorkspace: true, running: true },
-		{ id: "idle-1", path: "/tmp/idle.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "quiet archive", inWorkspace: true },
+		{ id: "run-1", path: "/tmp/run.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "live worker", inWorkspace: true, running: true, status: "running" },
+		{ id: "idle-1", path: "/tmp/idle.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "quiet archive", inWorkspace: true, status: "idle" },
+		{ id: "gone-1", path: "/tmp/gone.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "retired thread", inWorkspace: true, status: "inactive" },
+		{ id: "old-host", path: "/tmp/old.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "legacy row", inWorkspace: true },
 	],
 });
-const runRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("live worker"));
+const rowNamed = (text) => [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes(text));
+const markOf = (text) => rowNamed(text)?.querySelector(".running-mark");
+const runRow = rowNamed("live worker");
 check("running row shows the animated mark", !!runRow.querySelector(".running-dot"));
+// All three roster states are visible, and only the live one moves.
+check("a running row is marked running", markOf("live worker")?.className.includes("running"));
+check("an idle row still gets a dot, not nothing", !!markOf("quiet archive")?.querySelector(".running-dot"));
+check("an idle row is marked idle", markOf("quiet archive")?.className.includes("idle"), markOf("quiet archive")?.className);
+check("an inactive row is shown and marked inactive", markOf("retired thread")?.className.includes("inactive"), markOf("retired thread")?.className);
+check("each state says what it means", [markOf("live worker"), markOf("quiet archive"), markOf("retired thread")]
+	.map((m) => m?.title ?? "").every((t) => t.length > 0));
+check("a host that sends no status still reads as inactive, never as running",
+	markOf("legacy row")?.className.includes("inactive"), markOf("legacy row")?.className);
 check("history actions are siblings of its resume control", !!runRow.querySelector(".history-item-top > .history-resume + .history-actions") && !runRow.querySelector(".history-resume button"));
-const idleRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("quiet archive"));
-check("idle row has no running mark", !idleRow.querySelector(".running-dot"));
+const idleRow = rowNamed("quiet archive");
+check("an idle row offers no Stop — there is no run to stop",
+	![...idleRow.querySelectorAll(".history-action")].some((b) => b.title.startsWith("Stop")));
 const actTitles = [...runRow.querySelectorAll(".history-action")].map((b) => b.title);
 check("actions ordered stop -> rename -> delete", actTitles[0].startsWith("Stop") && actTitles.some((t) => t.startsWith("Rename")) && actTitles.some((t) => t.startsWith("Delete")), actTitles.join("|"));
 posted.length = 0;
