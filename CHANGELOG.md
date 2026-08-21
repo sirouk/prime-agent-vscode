@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.20]
+
 - "‹ parent" works again. Browsing from this window's own session into a subagent leaves that child attached and records an "rpc" breadcrumb, but unwinding refused to run whenever an attachment existed — which is exactly the state browsing always leaves behind. The back row was a silent no-op for the commonest path there is: root, into a child, back. It now releases the child and restores this window's session, and a newer navigation is still rejected by the epoch guard that actually means it. Broken since 1.0.9; the regression test fails four ways against the old guard.
 - A refused compaction now offers a way out instead of just naming the verdict. The notice carries a "Compact with <model>" button that runs the compaction on another model and puts your model back afterwards — compaction is a summary, not the work, so it should not cost you your model choice. Nothing about which model is hard-coded: the candidate is chosen from the agent's own catalogue by the only property that can be checked in advance, a context window at least as large as the current one, preferring the roomiest. A model that already refused this thread is never offered again, so the button cannot loop, and when nothing qualifies the notice says what to do instead of showing a button that would fail. The offer is a host-issued capability like a subagent's browse reference — the webview can only hand back an id the host minted, never compose one.
 
@@ -257,7 +259,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.19...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.20...HEAD
+[1.0.20]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.19...v1.0.20
 [1.0.19]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.18...v1.0.19
 [1.0.18]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.17...v1.0.18
 [1.0.17]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.16...v1.0.17
