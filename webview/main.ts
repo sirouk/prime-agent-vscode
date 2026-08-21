@@ -43,48 +43,63 @@ brand.addEventListener("keydown", (event) => {
 });
 const sessionTitleWrap = el("div", "session-title-wrap");
 const sessionTitle = el("span", "session-title", "");
-const titleEditBtn = el("button", "title-edit-btn") as HTMLButtonElement;
-titleEditBtn.title = "Rename this session";
-titleEditBtn.appendChild(icon("pencil", 11) as unknown as Node);
-sessionTitleWrap.append(sessionTitle, titleEditBtn);
+sessionTitleWrap.append(sessionTitle);
 topbar.append(brand, sessionTitleWrap, el("span", "spacer"));
 
-// Inline session-title editing on the header.
-let titleEditing = false;
+/**
+ * Inline session-title editing: double-click the name, Enter or click away to
+ * keep it, Escape to discard.
+ *
+ * Committing on blur is deliberate. An editor that throws away what you typed
+ * because you clicked somewhere else is the clunky part of inline renaming, and
+ * Escape already says "discard" unambiguously. Nothing is sent unless the text
+ * actually changed, so a stray double-click costs nothing.
+ */
+let titleEditing: { finish: (commit: boolean) => void; sessionId?: string } | null = null;
+
+function sizeTitleInput(input: HTMLInputElement): void {
+	input.style.width = `${Math.min(340, Math.max(120, input.value.length * 8 + 24))}px`;
+}
+
 function startTitleEdit(): void {
-	if (titleEditing) return;
-	titleEditing = true;
-	titleEditBtn.style.display = "none";
+	if (titleEditing || !sessionTitle.isConnected) return;
+	const original = (sessionTitle.textContent ?? "").trim();
 	const input = document.createElement("input");
 	input.className = "session-title-input";
-	input.value = sessionTitle.textContent ?? "";
+	input.value = original;
 	input.spellcheck = false;
-	sessionTitle.replaceWith(input);
+	input.setAttribute("aria-label", "Session name");
+	input.title = "Enter to save · Escape to cancel";
+	const finish = (commit: boolean): void => {
+		if (!titleEditing) return;
+		titleEditing = null;
+		const next = input.value.trim();
+		input.replaceWith(sessionTitle);
+		// An emptied box means "leave it alone": the daemon has no way to clear a
+		// name, so sending one would only bounce back as an error notice.
+		if (commit && next && next !== original) post({ type: "renameSession", name: next });
+	};
+	titleEditing = { finish, sessionId: currentStatus?.sessionId };
+	input.addEventListener("input", () => sizeTitleInput(input));
 	input.addEventListener("keydown", (event) => {
 		if (event.key === "Enter") {
-			titleEditing = false;
-			post({ type: "renameSession", name: input.value.trim() });
-			input.replaceWith(sessionTitle);
-			titleEditBtn.style.display = "";
+			event.preventDefault();
+			finish(true);
 		} else if (event.key === "Escape") {
-			titleEditing = false;
-			input.replaceWith(sessionTitle);
-			titleEditBtn.style.display = "";
-		} else {
-			input.style.width = `${Math.min(340, Math.max(120, input.value.length * 8 + 24))}px`;
+			event.preventDefault();
+			finish(false);
 		}
 	});
-	input.addEventListener("blur", () => {
-		if (!titleEditing) return;
-		titleEditing = false;
-		input.replaceWith(sessionTitle);
-		titleEditBtn.style.display = "";
-	});
+	input.addEventListener("blur", () => finish(true));
+	sessionTitle.replaceWith(input);
+	sizeTitleInput(input);
 	input.focus();
 	input.select();
 }
-titleEditBtn.addEventListener("click", (event) => {
-	event.stopPropagation();
+
+sessionTitle.addEventListener("dblclick", (event) => {
+	// Without this the second click leaves the name text-selected under the input.
+	event.preventDefault();
 	startTitleEdit();
 });
 
@@ -159,7 +174,7 @@ observeBanner.style.display = "none";
 const chatView = el("div", "chat-view");
 const scroller = el("div", "messages");
 const changedFilesBar = el("div", "changed-files");
-chatView.append(scroller, changedFilesBar);
+chatView.append(scroller);
 
 // Scope IDs to this webview instance: a late rejection from a panel that was
 // closed and reopened must never match a new panel's first `prompt-1` row.
@@ -472,6 +487,7 @@ function showView(view: "chat" | "history"): void {
 	// on content, so without this they hang over the history list with no
 	// composer under them. "" hands display back to their own .visible class.
 	subagentsStrip.style.display = view === "chat" ? "" : "none";
+	changedFilesBar.style.display = view === "chat" ? "" : "none";
 	threadDiffsPanel.root.style.display = view === "chat" ? "" : "none";
 	if (view === "history") historyView.showLoading();
 }
@@ -579,6 +595,9 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 		retireBootSplash();
 	}
 	if (currentStatus?.sessionId !== status.sessionId) {
+		// A rename in flight belongs to the session that was on screen when it
+		// started. Discard it rather than let Enter land on whatever replaced it.
+		if (titleEditing && titleEditing.sessionId !== status.sessionId) titleEditing.finish(false);
 		// Drop the previous session's tree before repainting — otherwise the old
 		// subagent rows linger as a stuck artifact until the next children push.
 		// `subagentsExpanded` deliberately survives: browsing into a subagent is a
@@ -608,11 +627,11 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 		if (status.sessionName) {
 			sessionTitle.textContent = status.sessionName;
 			sessionTitleWrap.style.display = "";
-			sessionTitle.title = `${status.sessionName} — click the pencil to rename`;
+			sessionTitle.title = `${status.sessionName} — double-click to rename`;
 		} else {
 			sessionTitle.textContent = status.sessionId ? `session ${status.sessionId.slice(0, 8)}` : "";
 			sessionTitleWrap.style.display = status.sessionId ? "" : "none";
-			sessionTitle.title = "Unnamed session — click the pencil to name it";
+			sessionTitle.title = "Unnamed session — double-click to name it";
 		}
 	}
 	sessionIdLabel.textContent = status.sessionId ? `#${status.sessionId.slice(0, 8)}` : "";
@@ -816,8 +835,8 @@ function dispatchHostMessage(message: HostToWebview): void {
 					sessionTitle.textContent = message.title;
 					sessionTitleWrap.style.display = message.title ? "" : "none";
 					sessionTitle.title = message.title
-						? `${message.title} — click the pencil to rename`
-						: "Unnamed session — click the pencil to name it";
+						? `${message.title} — double-click to rename`
+						: "Unnamed session — double-click to name it";
 				}
 			}
 			break;
@@ -926,8 +945,13 @@ import { ThreadDiffsPanel } from "./thread-diffs.js";
 const threadDiffsPanel = new ThreadDiffsPanel({
 	onOpenFile: (path) => post({ type: "openFile", path }),
 });
-// Sibling of the subagents strip, floating directly above the composer.
-subagentsStrip.after(threadDiffsPanel.root);
+// Bottom stack, in the order the operator reads it: who is working (subagents),
+// then what changed outside this thread, then what the agent itself changed —
+// closest to the composer because it is the one tied to the reply being written.
+// `changedFilesBar` used to live inside the transcript view, which put outside
+// edits above the subagent strip and buried the agent's own changes under them.
+subagentsStrip.after(changedFilesBar);
+changedFilesBar.after(threadDiffsPanel.root);
 
 // Handled outside dispatchHostMessage so this wiring stays append-only; the
 // panel is driven purely by the host's cumulative `threadDiffs` pushes.

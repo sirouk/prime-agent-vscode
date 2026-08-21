@@ -860,11 +860,20 @@ details.thinking .thinking-body {
 /* ---------- changed files ---------- */
 
 .changed-files {
-	border-top: 1px solid var(--pa-border);
+	/* Bottom stack member, between the subagent strip and the Changes panel.
+	   It matches their border and surface so the three read as one stack
+	   instead of a transparent gap sandwiched between two raised panels. */
+	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
+	background: color-mix(in srgb, transparent 60%, var(--pa-raised) 40%);
 	padding: 4px 10px 5px;
 	display: none;
 	flex-direction: column;
 	gap: 4px;
+}
+
+/* The strip above already drew this line; two of them read as a seam. */
+.subagents-strip.visible + .changed-files {
+	border-top: none;
 }
 
 .changed-files.visible {
@@ -2452,27 +2461,18 @@ body.vscode-light pre.term {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-}
-
-.title-edit-btn {
-	display: none;
-	padding: 0;
-	width: 13px;
-	height: 13px;
+	/* The name is the rename affordance now, so it has to look touchable. The
+	   double-click that opens it would otherwise leave the text selected. */
+	cursor: text;
+	user-select: none;
 	border-radius: 3px;
-	color: var(--pa-faint);
+	padding: 1px 3px;
+	margin: -1px -3px;
 }
 
-.session-title-wrap:hover .title-edit-btn,
-.session-title-wrap:focus-within .title-edit-btn {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-}
-
-.title-edit-btn:hover {
-	color: var(--pa-accent);
-	background: var(--pa-accent-dim);
+.session-title:hover {
+	color: var(--pa-text);
+	background: var(--pa-surface-2);
 }
 
 .session-title-input,

@@ -1110,6 +1110,12 @@ export class SessionController implements vscode.Disposable {
 	async renameSession(name: string): Promise<void> {
 		if (this.guardObservedReadOnly("renaming a session")) return;
 		const trimmed = name.trim();
+		// The daemon refuses an empty name ("Session name cannot be empty"), on the
+		// attached path and the RPC one alike, so a cleared box can only ever have
+		// produced a failed round-trip and an error notice — under a message that
+		// claimed the name had been cleared. Emptying the field means "leave it
+		// alone", which is also what the operator's Escape does.
+		if (!trimmed) return;
 		const attached = this.attached;
 		if (attached) {
 			try {
@@ -1117,9 +1123,9 @@ export class SessionController implements vscode.Disposable {
 				if (!this.isCurrentAttachment(attached)) return;
 				await sidecar.request({ type: "set_session_name", activeSessionId: attached.activeSessionId, name: trimmed }, 15_000);
 				if (!this.isCurrentAttachment(attached)) return;
-				if (this.rentedState) this.rentedState.sessionName = trimmed || undefined;
+				if (this.rentedState) this.rentedState.sessionName = trimmed;
 				this.pushStatus();
-				this.broadcast({ type: "notice", level: "info", text: trimmed ? `Session renamed to "${trimmed}".` : "Session name cleared." });
+				this.broadcast({ type: "notice", level: "info", text: `Session renamed to "${trimmed}".` });
 			} catch (err) {
 				if (this.isCurrentAttachment(attached)) this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${err instanceof Error ? err.message : String(err)}` });
 			}
@@ -1133,9 +1139,9 @@ export class SessionController implements vscode.Disposable {
 			const response = await client.request({ type: "set_session_name", name: trimmed }, 30_000);
 			if (!this.isCurrentRpcView(client, epoch)) return;
 			if (response.success) {
-				if (this.state) this.state.sessionName = trimmed || undefined;
+				if (this.state) this.state.sessionName = trimmed;
 				this.pushStatusLight();
-				this.broadcast({ type: "notice", level: "info", text: trimmed ? `Session renamed to "${trimmed}".` : "Session name cleared." });
+				this.broadcast({ type: "notice", level: "info", text: `Session renamed to "${trimmed}".` });
 			} else {
 				this.broadcast({ type: "notice", level: "error", text: `Rename failed: ${response.error ?? "unknown error"}` });
 			}

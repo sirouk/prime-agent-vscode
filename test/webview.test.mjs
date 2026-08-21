@@ -367,6 +367,23 @@ check("resume switches session", posted.some((m) => m.type === "switchSession" &
 
 // --- subagents strip: renders children, browses into one, returns via parent ---
 check("subagents strip hidden with no children", !document.querySelector(".subagents-strip.visible"));
+
+// --- bottom stack order -----------------------------------------------------
+// Read top to bottom: who is working, then what changed outside this thread,
+// then what the agent itself changed, then the box you type in. Outside edits
+// used to sit inside the transcript, which put them ABOVE the subagent strip
+// and pushed the agent's own changes further from the composer.
+{
+	const order = [...document.querySelector("#app").children]
+		.map((node) => node.className.split(" ")[0])
+		.filter((name) => ["subagents-strip", "changed-files", "td-panel", "composer-dock"].includes(name));
+	check(
+		"bottom stack reads subagents -> outside changes -> agent changes -> composer",
+		order.join(" > ") === "subagents-strip > changed-files > td-panel > composer-dock",
+		order.join(" > "),
+	);
+	check("outside changes no longer live inside the transcript view", !document.querySelector(".chat-view .changed-files"));
+}
 hostMessage({
 	type: "sessionChildren",
 	children: [
@@ -615,22 +632,76 @@ hostMessage({
 	],
 });
 
-// --- session title with pencil rename (header) ---
+// --- session title rename by double-click (header) ---
 hostMessage({ type: "status", status: { ...baseStatus, sessionName: "vscode-extension" } });
 const titleWrap = document.querySelector(".session-title-wrap");
 check("session title shown in header", titleWrap && titleWrap.querySelector(".session-title").textContent === "vscode-extension");
-check("title pencil present", !!titleWrap.querySelector(".title-edit-btn"));
+check("the rename button is gone — the name itself is the affordance", !titleWrap.querySelector(".title-edit-btn"));
+
+const dblclick = () => titleWrap.querySelector(".session-title").dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+
+// A single click must not start editing, or selecting the title text would.
 posted.length = 0;
-titleWrap.querySelector(".title-edit-btn").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+titleWrap.querySelector(".session-title").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("a single click does not open the editor", !document.querySelector(".session-title-input"));
+
+dblclick();
 const titleInput = document.querySelector(".session-title-input");
-check("editing swaps the span for an input", !!titleInput && titleInput.value === "vscode-extension");
+check("double-click swaps the span for an input", !!titleInput && titleInput.value === "vscode-extension");
 titleInput.value = "shiny-browser-app";
 titleInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 check("enter posts renameSession", posted.some((m) => m.type === "renameSession" && m.name === "shiny-browser-app"));
 check("input restores to the span after commit", !!document.querySelector(".session-title-wrap .session-title"));
+
+// Escape discards, and says so by sending nothing.
+posted.length = 0;
+dblclick();
+const escInput = document.querySelector(".session-title-input");
+escInput.value = "typed-then-abandoned";
+escInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+check("escape sends no rename", !posted.some((m) => m.type === "renameSession"));
+check("escape restores the span", !!document.querySelector(".session-title-wrap .session-title"));
+check("escape leaves the old name on screen", document.querySelector(".session-title").textContent === "vscode-extension");
+
+// Clicking away keeps the edit: losing a rename to a stray click is the clunk.
+posted.length = 0;
+dblclick();
+const blurInput = document.querySelector(".session-title-input");
+blurInput.value = "kept-on-blur";
+blurInput.dispatchEvent(new window.FocusEvent("blur", { bubbles: false }));
+check("blur commits the rename", posted.some((m) => m.type === "renameSession" && m.name === "kept-on-blur"));
+
+// Emptying the box means "leave it alone": the daemon cannot clear a name, so
+// sending one would only bounce back as an error under the operator's cursor.
+posted.length = 0;
+dblclick();
+const emptyInput = document.querySelector(".session-title-input");
+emptyInput.value = "   ";
+emptyInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("an emptied name posts nothing", !posted.some((m) => m.type === "renameSession"));
+check("an emptied name leaves the old one on screen", document.querySelector(".session-title").textContent === "vscode-extension");
+
+// An unchanged value is not a rename, so a stray double-click costs nothing.
+posted.length = 0;
+dblclick();
+const noopInput = document.querySelector(".session-title-input");
+noopInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("an unchanged name posts nothing", !posted.some((m) => m.type === "renameSession"));
+
+// A rename in flight belongs to the session it started on.
+posted.length = 0;
+dblclick();
+const staleInput = document.querySelector(".session-title-input");
+staleInput.value = "meant-for-the-old-session";
+hostMessage({ type: "status", status: { ...baseStatus, sessionId: "0000ffff-1111-2222-3333-444455556666", sessionName: "another-session" } });
+check("a session change discards the in-flight rename", !posted.some((m) => m.type === "renameSession"));
+check("a session change restores the span", !!document.querySelector(".session-title-wrap .session-title"));
+hostMessage({ type: "status", status: { ...baseStatus, sessionName: "vscode-extension" } });
+
 hostMessage({ type: "uiState", title: "title supplied by agent" });
 check("uiState title updates the header", document.querySelector(".session-title")?.textContent === "title supplied by agent",
 	document.querySelector(".session-title")?.textContent ?? "<none>");
+
 
 // --- history row pencil rename ---
 posted.length = 0;
