@@ -294,6 +294,74 @@ let subagentsExpanded = false;
 let sessionChildren: SessionChild[] = [];
 
 /**
+ * Auto-expanding the strip when a subagent starts, without becoming a nuisance.
+ *
+ * The whole value is the moment work begins: a subagent that spawned into a
+ * collapsed strip is invisible until the operator goes looking. Everything else
+ * here exists to make sure that never fights them:
+ *
+ * - Only ever expands. Nothing auto-collapses, so it cannot close a list being
+ *   read — including the historical group, which keeps its own state.
+ * - Never while they are inside a subagent view. There the strip is how they get
+ *   back out, and opening it under them moves the row they were aiming for.
+ * - A collapse by hand is an instruction. It is respected until they open the
+ *   strip by hand again, so a busy thread cannot keep reopening a panel they
+ *   deliberately shut.
+ * - Nothing on the first roster of a session. Resuming a thread with live
+ *   subagents is not something that just started, and forcing the panel open on
+ *   every resume is exactly the noise being avoided.
+ * - Never takes the scroll: expanding shrinks the transcript viewport, so a
+ *   reader parked mid-history keeps their place and only a reader who was
+ *   already following the tail is re-pinned to it.
+ */
+let subagentsAutoExpandSuppressed = false;
+/** Ids seen live on the previous roster, to spot one starting rather than staying. */
+let liveChildIds = new Set<string>();
+
+/** False until this session's first roster, so a resume is not read as activity. */
+let subagentRosterSeen = false;
+
+/**
+ * Forget which subagents were live, so the next roster seeds instead of reading
+ * as a burst of activity. Deliberately does NOT clear the operator's collapse:
+ * `subagentsExpanded` already survives a session change on purpose, and the
+ * instruction that produced it has to survive with it, or browsing into a child
+ * and back would quietly re-arm a panel they shut.
+ */
+function resetSubagentActivityBaseline(): void {
+	liveChildIds = new Set();
+	subagentRosterSeen = false;
+}
+
+const childKey = (child: { activeSessionId?: string; id?: string }): string => child.activeSessionId || child.id || "";
+
+/**
+ * Subagents that STARTED since the last roster: freshly spawned, or an existing
+ * one that went from idle/finished back to running. Seeds silently on the first
+ * roster of a session — resuming a busy thread is not something starting now.
+ */
+function takeStartedSubagents(spawned: readonly { activeSessionId: string }[]): string[] {
+	const liveNow = new Set(sessionChildren.filter((child) => childStatus(child) === "running").map(childKey));
+	const seeding = !subagentRosterSeen;
+	subagentRosterSeen = true;
+	const started = seeding
+		? []
+		: [...spawned.map((entry) => entry.activeSessionId).filter(Boolean), ...[...liveNow].filter((id) => !liveChildIds.has(id))];
+	liveChildIds = liveNow;
+	return [...new Set(started)].filter(Boolean);
+}
+
+/** Open the strip for work that just began. Returns whether it actually opened. */
+function maybeAutoExpandSubagents(started: readonly string[]): boolean {
+	if (started.length === 0 || subagentsExpanded || subagentsAutoExpandSuppressed) return false;
+	// Inside a subagent the strip is the way back out; opening it under the
+	// operator moves the row they were reaching for.
+	if (sessionParent || sessionViewedId) return false;
+	subagentsExpanded = true;
+	return true;
+}
+
+/**
  * Roster status of a row. Hosts before the status field only sent `isStreaming`,
  * which cannot tell a finished subagent from one waiting between turns — fall
  * back to it rather than inventing a liveness we don't have.
@@ -344,6 +412,8 @@ function renderSubagentsStrip(): void {
 	header.title = "Subagents related to this session — click to expand, browse one to look inside";
 	header.addEventListener("click", () => {
 		subagentsExpanded = !subagentsExpanded;
+		// Collapsing by hand means "keep it shut"; opening by hand takes it back.
+		subagentsAutoExpandSuppressed = !subagentsExpanded;
 		renderSubagentsStrip();
 	});
 	subagentsStrip.appendChild(header);
@@ -495,7 +565,10 @@ function showView(view: "chat" | "history"): void {
 newChatBtn.addEventListener("click", () => {
 	showView("chat");
 	subagentsExpanded = false;
+	// A new thread starts with no instruction from the operator about this strip.
+	subagentsAutoExpandSuppressed = false;
 	spawnSeenBaseline = false;
+	resetSubagentActivityBaseline();
 	renderSubagentsStrip();
 	post({ type: "newSession" });
 });
@@ -608,6 +681,7 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 		sessionSiblings = [];
 		sessionViewedId = null;
 		spawnSeenBaseline = false;
+		resetSubagentActivityBaseline();
 		renderSubagentsStrip();
 	}
 	currentStatus = status;
@@ -727,6 +801,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			pendingPrompts.clear();
 			transcript.clearSpawnCards?.();
 			spawnSeenBaseline = false;
+			resetSubagentActivityBaseline();
 			transcript.renderSnapshot(message.messages ?? []);
 			// Up/Down recall has to survive a reload or a resume, so it is seeded
 			// from the thread itself rather than only from what this panel sent.
@@ -775,6 +850,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			for (const spawn of spawnedList) {
 				transcript.injectSpawnCard({ id: spawn.activeSessionId, browseRef: spawn.browseRef, name: spawn.name, created: spawn.created });
 			}
+			const startedSubagents = takeStartedSubagents(spawnedList);
 			// Seed cards ONLY for currently-running children; finished and idle ones
 			// stay in the collapsible strip. Spams nothing on resume. `status` is what
 			// makes this honest: a subagent whose own turn ended but whose children
@@ -787,7 +863,11 @@ function dispatchHostMessage(message: HostToWebview): void {
 					}
 				}
 			}
+			const opened = maybeAutoExpandSubagents(startedSubagents);
 			renderSubagentsStrip();
+			// Expanding shrinks the transcript viewport. This only moves a reader who
+			// was already following the tail; one parked mid-history keeps their place.
+			if (opened) transcript.scrollToBottom();
 			break;
 		}
 		case "commands":
@@ -808,6 +888,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			pendingPrompts.clear();
 			transcript.clearSpawnCards?.();
 			spawnSeenBaseline = false;
+			resetSubagentActivityBaseline();
 			transcript.renderSnapshot(message.messages);
 			showView("chat");
 			break;

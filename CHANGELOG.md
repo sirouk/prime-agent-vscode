@@ -13,6 +13,9 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- A subagent that starts now opens the Subagents strip for you. Work that begins inside a collapsed strip was invisible until you went looking for it, which is the wrong default for the one event you most want to notice. It fires for a fresh spawn and for an existing subagent going back to work, once per burst rather than once per subagent.
+- Everything else about it is restraint. It only ever opens — nothing auto-collapses, so it can never shut a list you are reading, and the finished group keeps its own state. It stays out of the way while you are inside a subagent, where the strip is how you get back out and opening it would move the row you were reaching for. Collapsing it by hand is treated as an instruction and respected until you open it by hand again, so a busy thread cannot keep reopening a panel you deliberately shut; a new thread starts fresh. It says nothing on the first roster of a session, because resuming a thread that already has live subagents is not something starting now. And it never takes the scroll: expanding shrinks the transcript, so a reader parked mid-history keeps their place and only a reader already following the tail is re-pinned to it.
+
 ## [1.0.20]
 
 - "‹ parent" works again. Browsing from this window's own session into a subagent leaves that child attached and records an "rpc" breadcrumb, but unwinding refused to run whenever an attachment existed — which is exactly the state browsing always leaves behind. The back row was a silent no-op for the commonest path there is: root, into a child, back. It now releases the child and restores this window's session, and a newer navigation is still rejected by the epoch guard that actually means it. Broken since 1.0.9; the regression test fails four ways against the old guard.

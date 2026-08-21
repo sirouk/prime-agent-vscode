@@ -703,6 +703,79 @@ check("uiState title updates the header", document.querySelector(".session-title
 	document.querySelector(".session-title")?.textContent ?? "<none>");
 
 
+// --- auto-expanding the strip when a subagent starts -------------------------
+// The value is the moment work begins; every other rule here exists so it never
+// fights the operator. State is reset through New Chat, which is the one gesture
+// that clears both the strip and any instruction the operator gave it.
+{
+	const kid = (id, name, streaming, status) => ({
+		id: `uuid-${id}`, activeSessionId: id, browseRef: `ref-${id}`, name,
+		runtimeKind: "subagent", rlmDepth: 1, isStreaming: streaming, status, attachedClients: 0,
+	});
+	const roster = (children, spawned) => hostMessage({ type: "sessionChildren", children, ...(spawned ? { spawned } : {}) });
+	const expanded = () => !!document.querySelector(".subagents-strip .subagent-row");
+	const header = () => document.querySelector(".subagents-strip .subagents-header");
+	// Guarded: a selector that silently stops matching would reset nothing and
+	// make every check below pass for the wrong reason.
+	const newChatBtn = document.querySelector(".topbar .icon-btn[title='New session']");
+	check("the New session control is reachable for these fixtures", !!newChatBtn);
+	const freshThread = () => newChatBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+	// Resuming a thread that already has live subagents is not activity.
+	freshThread();
+	roster([kid("aaaa00000001", "already-running", true, "running")]);
+	check("a resumed roster does not force the strip open", !expanded());
+
+	// ...but the next one to start does.
+	roster([kid("aaaa00000001", "already-running", true, "running"), kid("aaaa00000002", "just-spawned", true, "running")],
+		[{ activeSessionId: "aaaa00000002", browseRef: "ref-aaaa00000002", name: "just-spawned" }]);
+	check("a subagent that spawns opens a collapsed strip", expanded());
+
+	// Nothing auto-collapses: a finished subagent leaves the strip as it was.
+	roster([kid("aaaa00000001", "already-running", false, "inactive"), kid("aaaa00000002", "just-spawned", true, "running")]);
+	check("a subagent finishing never closes the strip", expanded());
+
+	// A re-activation counts too: idle -> running with no spawn record.
+	freshThread();
+	roster([kid("bbbb00000001", "waiting", false, "idle")]);
+	check("an idle roster leaves a collapsed strip alone", !expanded());
+	roster([kid("bbbb00000001", "waiting", true, "running")]);
+	check("a subagent going back to work opens the strip", expanded());
+
+	// Collapsing by hand is an instruction, and it is respected.
+	freshThread();
+	roster([kid("cccc00000001", "one", false, "idle")]);
+	header().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	check("the header still expands by hand", expanded());
+	header().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	check("the header still collapses by hand", !expanded());
+	roster([kid("cccc00000001", "one", false, "idle"), kid("cccc00000002", "two", true, "running")],
+		[{ activeSessionId: "cccc00000002", browseRef: "ref-cccc00000002", name: "two" }]);
+	check("a spawn does not reopen a strip the operator shut", !expanded());
+
+	// A new thread carries no instruction from the last one.
+	freshThread();
+	roster([kid("dddd00000001", "seed", false, "idle")]);
+	roster([kid("dddd00000001", "seed", false, "idle"), kid("dddd00000002", "fresh", true, "running")],
+		[{ activeSessionId: "dddd00000002", browseRef: "ref-dddd00000002", name: "fresh" }]);
+	check("a new thread starts auto-expanding again", expanded());
+
+	// Inside a subagent the strip is the way back out — never open it under them.
+	freshThread();
+	roster([kid("eeee00000001", "seed", false, "idle")]);
+	hostMessage({
+		type: "sessionChildren",
+		children: [kid("eeee00000002", "grandchild", true, "running")],
+		parent: { id: "uuid-parent", activeSessionId: "parent000001", name: "the-parent" },
+		viewedActiveSessionId: "eeee00000001",
+		spawned: [{ activeSessionId: "eeee00000002", browseRef: "ref-eeee00000002", name: "grandchild" }],
+	});
+	check("browsing inside a subagent keeps the strip as the operator left it", !expanded());
+	check("the way back out is still rendered", !!document.querySelector(".subagents-strip .subagents-back-row"));
+
+	freshThread();
+}
+
 // --- a notice can carry a one-shot recovery ---------------------------------
 posted.length = 0;
 hostMessage({ type: "notice", level: "error", text: "Compaction failed: refused.",
