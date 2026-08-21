@@ -128,6 +128,54 @@ check("agentDir is derived from a default-layout session file", agentDirForSessi
 check("a non-default session layout yields no derived agentDir", agentDirForSessionFile(path.join(root, "elsewhere", "s.jsonl")) === undefined);
 check("no session file yields no derived agentDir", agentDirForSessionFile(undefined) === undefined);
 
+// --- the claim's lifecycle on the sidecar ------------------------------------
+// The identity is what lets us reach our own client-owned worker, and it is also
+// what stops the daemon reaping that worker. Both directions are load-bearing.
+require("./vscode-stub.cjs");
+const { SessionController } = require("../dist/controller.cjs");
+const memory = new Map();
+const memoryState = {
+	get: (key, fallback) => (memory.has(key) ? memory.get(key) : fallback),
+	update: (key, value) => { memory.set(key, value); return Promise.resolve(); },
+};
+const controller = new SessionController(
+	{ subscriptions: [], extensionUri: { fsPath: process.cwd() }, globalState: memoryState, workspaceState: memoryState },
+	{ append: () => {}, appendLine: () => {} },
+);
+
+function fakeSidecar(claim) {
+	return { impersonateClientId: claim, connected: true, disposed: false, dispose() { this.disposed = true; } };
+}
+
+// Releasing on agent exit must drop the socket: that is the only thing that
+// tells the daemon nobody answers to the owner id any more.
+const claimed = fakeSidecar("daemon-client:owner-1");
+controller.sidecar = claimed;
+controller.ownerIdCache = { sessionFile, id: "daemon-client:owner-1", at: Date.now() };
+controller.releaseOwnerIdentity();
+check("releasing a claim disposes the sidecar", claimed.disposed === true);
+check("releasing a claim drops the connection", controller.sidecar === null);
+check("releasing a claim forgets the cached id", controller.ownerIdCache === null);
+
+// A connection that never claimed anything is not holding a worker open, so
+// tearing it down would only cost the operator their attachment.
+const unclaimed = fakeSidecar(null);
+controller.sidecar = unclaimed;
+controller.ownerIdCache = { sessionFile, id: undefined, at: Date.now() };
+controller.releaseOwnerIdentity();
+check("releasing without a claim keeps the connection", unclaimed.disposed === false && controller.sidecar === unclaimed);
+check("releasing without a claim still forgets the cache", controller.ownerIdCache === null);
+
+// A descriptor caught mid-rewrite resolves to nothing. That must never be read
+// as "drop the claim": it would tear down a live attachment for no reason.
+const held = fakeSidecar("daemon-client:owner-1");
+controller.sidecar = held;
+controller.state = null; // no session file -> the lookup cannot resolve anything
+await controller.ensureSidecar({ reattach: false });
+check("an unresolvable lookup keeps the existing claim", held.disposed === false && controller.sidecar === held);
+
+controller.dispose();
+
 fs.rmSync(root, { recursive: true, force: true });
 
 console.log(failed === 0 ? "\nPASS owner-visibility" : `\nFAIL owner-visibility (${failed})`);

@@ -372,6 +372,16 @@ export class SessionController implements vscode.Disposable {
 			this.output.appendLine(`[prime-agent] exited with code ${code ?? "?"}`);
 			this.reachable = false;
 			this.state = null;
+			// Our worker died with it; stop answering to its owner id so the daemon
+			// can reap it instead of keeping it (and its kernels) alive for us.
+			//
+			// Deliberately ABOVE the foreground guard. That guard is false whenever
+			// the operator is attached — including to a subagent of the very worker
+			// that just lost its agent — and skipping the release there is exactly
+			// how a dead session would be kept running forever. Dropping the socket
+			// costs a reconnect, which onClose/runReattach already treat as a normal
+			// path and recover from.
+			this.releaseOwnerIdentity();
 			if (!this.isForegroundRpcClient(client)) return;
 			this.clearRunFlags();
 			this.clearChangedFiles();
@@ -2218,8 +2228,23 @@ export class SessionController implements vscode.Disposable {
 	// ----------------------------------------------------------------
 
 	private async ensureSidecar(options: { reattach?: boolean } = {}): Promise<DaemonSidecar> {
+		// The daemon binds a connection's identity on its first command envelope, so
+		// a claim can only be applied to a FRESH socket. Learning our owner id late
+		// (the descriptor is written just after the RPC session starts) or moving to
+		// a different worker therefore has to replace the connection.
+		//
+		// Only ever upgrade or switch: a lookup that momentarily comes back empty —
+		// a descriptor caught mid-rewrite — must not drop a working claim and tear
+		// down a live attachment with it. The claim is released deliberately when
+		// the RPC process exits (see `releaseOwnerIdentity`).
+		const owner = this.ownedRosterClientId();
+		if (this.sidecar && owner && this.sidecar.impersonateClientId !== owner) {
+			this.sidecar.dispose();
+			this.sidecar = null;
+		}
 		if (!this.sidecar) {
 			this.sidecar = new DaemonSidecar();
+			this.sidecar.impersonateClientId = owner ?? null;
 			this.sidecar.onEvent = (message) => this.onDaemonEvent(message);
 			this.sidecar.onAnyLine = (byteLength) => this.debugLog.append(`sidecar-line bytes=${byteLength}`);
 			this.sidecar.onClose = () => {
@@ -2645,22 +2670,31 @@ export class SessionController implements vscode.Disposable {
 	 *
 	 * A plain `list all` cannot see the client-owned worker that hosts our own
 	 * RPC session, so our live root reads as a stale on-disk row and none of our
-	 * subagents appear at all. Naming the worker's owner id restores both.
-	 *
-	 * The identity is claimed on a throwaway connection per read so it can never
-	 * pin a dead worker alive; see DaemonSidecar.listAsOwner. Any failure falls
-	 * back to the un-owned read, which is exactly today's behaviour.
+	 * subagents appear at all. The flag asks for owned workers; the identity that
+	 * makes the daemon hand them over is carried by the sidecar connection itself
+	 * (see `ensureSidecar`). Without a claim this degrades to the plain roster.
 	 */
 	private async listSessions(sidecar: DaemonSidecar): Promise<SessionSummaryRef[]> {
-		const ownerClientId = this.ownedRosterClientId();
-		if (ownerClientId) {
-			try {
-				return await DaemonSidecar.listAsOwner(ownerClientId);
-			} catch (error) {
-				this.output.appendLine(`[prime-agent] owned roster read failed, falling back: ${String(error)}`);
-			}
-		}
-		return sidecar.list(true);
+		return sidecar.list(true, { includeClientOwned: true });
+	}
+
+	/**
+	 * Give up the owner identity when the RPC process that owns the worker is
+	 * gone.
+	 *
+	 * The daemon refuses to reap a client-owned worker while any connected client
+	 * still answers to its owner id, so holding the claim past the agent's death
+	 * would strand that worker and its IPython kernels for as long as this window
+	 * stayed open. Dropping the socket is what releases it: the daemon reschedules
+	 * cleanup on disconnect. The cache is cleared too, so the next connection
+	 * resolves the identity again from scratch — and a descriptor whose process is
+	 * dead resolves to nothing.
+	 */
+	private releaseOwnerIdentity(): void {
+		this.ownerIdCache = null;
+		if (!this.sidecar?.impersonateClientId) return;
+		this.sidecar.dispose();
+		this.sidecar = null;
 	}
 
 	/**

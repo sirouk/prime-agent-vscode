@@ -1,17 +1,18 @@
 /**
- * Live gate for the client-owned roster hole.
+ * Live gate for client-owned worker access.
  *
- * The daemon lists a worker's sessions only when the worker is visible
- * (`ownerClientId === undefined`) or when the caller passes
- * `includeClientOwned: true` AND is the client that owns it. Our RPC session is
- * client-owned, so a plain `list all` from the sidecar returns neither our live
- * root nor any of its subagents — the regression that made a running agent read
- * as stopped with an empty subagent strip.
+ * The daemon hides a client-owned worker (and every RLM subagent under it) from
+ * `list`, and refuses `attach` on it with "Unknown active session", unless the
+ * caller names the worker's `ownerClientId`. Our RPC session is client-owned, so
+ * without that identity a running agent reads as stopped, the subagent strip is
+ * empty, and clicking a subagent fails.
  *
- * This proves all three legs against a REAL daemon, with no model calls:
- *   1. `list all`                          -> our client-owned session is absent
- *   2. `list all` + includeClientOwned     -> still absent (flag alone is not enough)
- *   3. listAsOwner(ownerClientId)          -> present
+ * This proves every leg against a REAL daemon, with no model calls:
+ *   list:   `list all`                       -> our client-owned session is absent
+ *           `list all` + includeClientOwned   -> still absent (flag alone is not enough)
+ *           + owner identity                  -> present
+ *   attach: as a stranger                     -> rejected
+ *           as the owner                      -> snapshot returned
  * plus that resolveOwnerClientId() recovers that owner id from the descriptor
  * the daemon actually wrote.
  *
@@ -59,6 +60,14 @@ producer.impersonateClientId = ownerClientId;
 const rowId = (row) => row.activeSessionId ?? row.id ?? "";
 const has = (rows, id) => rows.some((row) => rowId(row) === id);
 
+/** A connection carrying a chosen identity — exactly what the sidecar does. */
+async function connectAs(clientId) {
+	const client = new DaemonSidecar();
+	client.impersonateClientId = clientId;
+	await client.connect(8_000);
+	return client;
+}
+
 let createdId = "";
 
 async function main() {
@@ -84,7 +93,7 @@ async function main() {
 	if (!createdId) throw new Error(`create returned no session id: ${JSON.stringify(summary)}`);
 	const sessionFile = summary?.sessionFile;
 
-	// 1. The owner id must be recoverable from the descriptor the daemon wrote.
+	// --- the identity is recoverable from what the daemon wrote ---------------
 	const resolved = resolveOwnerClientId({ sessionFile, activeSessionId: createdId });
 	check("resolveOwnerClientId recovers the owner id from the live descriptor", resolved === ownerClientId, `got ${resolved ?? "undefined"}`);
 	if (sessionFile) {
@@ -94,28 +103,40 @@ async function main() {
 		);
 	}
 
-	// 2. A second client is what the extension's sidecar actually is.
-	const observer = new DaemonSidecar();
-	await observer.connect(8_000);
+	// --- listing: a second client is what the extension's sidecar is ----------
+	const stranger = await connectAs(null);
+	const owned = await connectAs(ownerClientId);
 	try {
-		check("a plain `list all` cannot see the client-owned session", !has(await observer.list(true), createdId));
+		check("a plain `list all` cannot see the client-owned session", !has(await stranger.list(true), createdId));
 		check(
 			"`includeClientOwned` alone is still not enough",
-			!has(await observer.list(true, { includeClientOwned: true }), createdId),
+			!has(await stranger.list(true, { includeClientOwned: true }), createdId),
 		);
 
-		const owned = await DaemonSidecar.listAsOwner(ownerClientId);
-		check("listAsOwner sees the client-owned session", has(owned, createdId));
-		check("listAsOwner stays a superset of the plain roster", owned.length >= (await observer.list(true)).length);
+		const ownedRows = await owned.list(true, { includeClientOwned: true });
+		check("the owner identity sees the client-owned session", has(ownedRows, createdId));
+		check("the owned roster stays a superset of the plain one", ownedRows.length >= (await stranger.list(true)).length);
 
-		// Repeatable: each call must stand up its own connection and tear it down.
-		check("listAsOwner is repeatable", has(await DaemonSidecar.listAsOwner(ownerClientId), createdId));
+		// --- attaching: this is what "view ›" on a subagent does ---------------
+		let strangerAttachError = "";
+		try {
+			await stranger.attach(createdId);
+			strangerAttachError = "";
+		} catch (error) {
+			strangerAttachError = error?.message ?? String(error);
+		}
+		check(
+			"attach without the owner identity is refused",
+			strangerAttachError.includes("Unknown active session"),
+			strangerAttachError || "attach unexpectedly succeeded",
+		);
 
-		// A foreign identity must not open the door to somebody else's worker.
-		const stranger = await DaemonSidecar.listAsOwner(`daemon-client:${randomUUID()}`);
-		check("an unrelated owner id sees nothing extra", !has(stranger, createdId));
+		const attached = await owned.attach(createdId);
+		check("attach with the owner identity returns a snapshot", !!attached?.snapshot);
+		await owned.request({ type: "detach", activeSessionId: createdId }, 10_000).catch(() => {});
 	} finally {
-		observer.dispose();
+		stranger.dispose();
+		owned.dispose();
 	}
 }
 

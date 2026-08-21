@@ -139,13 +139,22 @@ export class DaemonSidecar {
 	 *
 	 * The daemon rewrites the connection's identity to whatever the envelope
 	 * declares (daemon-supervisor.ts: `protocolClientIds.set(client, id)` and
-	 * `client.id = id`), which is the only way a second connection can read the
-	 * roster of a worker its RPC sibling owns.
+	 * `client.id = id`). Naming our RPC sibling's `ownerClientId` is the only way
+	 * a second connection can reach a client-owned worker at all: without it the
+	 * roster hides it and `attach` answers "Unknown active session".
 	 *
-	 * Set this ONLY on a short-lived connection (see `listAsOwner`). A long-lived
-	 * client holding an owner id keeps `scheduleOwnedWorkerCleanup` from ever
-	 * reaping that worker, so an exited RPC process would leak its worker and
-	 * kernels for as long as this extension stays open.
+	 * Two rules come with it. The daemon binds the identity on the FIRST command
+	 * envelope, so this must be set before the connection is used and can only be
+	 * changed by replacing the socket. And the daemon will not reap a client-owned
+	 * worker while any connected client still answers to its owner id, so the
+	 * holder must drop this connection once the owning process is gone — otherwise
+	 * that worker and its kernels outlive the agent.
+	 *
+	 * Sharing an id with the live RPC connection is safe for a third reason worth
+	 * stating: the daemon's command journal dedupes MUTATING commands on
+	 * (clientId, commandId). Our ids are `side-<n>` and prime-agent's own client
+	 * issues `daemon_<n>` / `daemon_ack_<n>`, so the two streams cannot collide —
+	 * and `list`/`attach` are read-only, so they are never journaled at all.
 	 */
 	impersonateClientId: string | null = null;
 
@@ -429,35 +438,6 @@ export class DaemonSidecar {
 			20_000,
 		);
 		return data?.sessions ?? [];
-	}
-
-	/**
-	 * Roster read that can also see the client-owned worker hosting our own RPC
-	 * session — the one carrying our live root and every RLM subagent.
-	 *
-	 * Both halves are required and neither is sufficient: the daemon needs
-	 * `includeClientOwned: true` AND an envelope client id equal to the worker's
-	 * `ownerClientId`. Verified against a live daemon: `list all` alone and
-	 * `list all + includeClientOwned` both return zero active rows and zero
-	 * subagents, while the pair returns the streaming root plus its children.
-	 *
-	 * The identity is claimed on a THROWAWAY connection that is disposed before
-	 * this resolves. The daemon reschedules owned-worker cleanup when a client
-	 * disconnects, so a transient claim can at most postpone a reap by the
-	 * 30s grace window; a persistent claim would postpone it forever.
-	 *
-	 * Returns a superset of `list(all)`: the supervisor's filter is
-	 * `isVisibleWorker(worker) || (includeClientOwned && accessible)`.
-	 */
-	static async listAsOwner(ownerClientId: string, all = true, timeoutMs = 10_000): Promise<SessionSummaryRef[]> {
-		const owned = new DaemonSidecar();
-		owned.impersonateClientId = ownerClientId;
-		try {
-			await owned.connect(timeoutMs);
-			return await owned.list(all, { includeClientOwned: true });
-		} finally {
-			owned.dispose();
-		}
 	}
 
 	/**
