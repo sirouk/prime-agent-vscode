@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.18]
+
 - Large sessions can be resumed again. Opening one asks the agent for its transcript, and that reply arrives as a single JSONL record: for a 6,479-message session it is 4.6 MiB. The extension capped an inbound record at 4 MiB and treated the overflow as a protocol violation, so it destroyed the connection and killed the agent process mid-resume — the session simply never opened, and nothing on screen said why. The cap exists to stop a peer that never sends a newline from growing the extension host forever, which is a different thing from a legitimately large record; it is now 64 MiB, shared by both transports, with roughly an order of magnitude of headroom over the largest transcript observed. Sessions below the old limit were never affected, which is why only the long-running threads looked broken.
 - A protocol fault now says so. `protocolError` was emitted and nothing listened, so the one failure mode that kills the agent outright was invisible outside the output channel. It now surfaces as an error notice naming the fault.
 - Unnamed sessions get a readable label in the history list. The fallback is the session's first prompt, and a first prompt is very often a pasted block — a sentence, a blank line, then a markdown heading — which rendered as one run-on smear: "Written to `…/HANDOFF.md` first.Now for your ultimate mission:# HANDOFF". The label is now the first line that carries words, with leading markdown ornament removed and a cut on a word boundary, so a row stays one glanceable line. The subtitle collapses its whitespace for the same reason.
@@ -248,7 +250,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.17...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.18...HEAD
+[1.0.18]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.17...v1.0.18
 [1.0.17]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.16...v1.0.17
 [1.0.16]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.14...v1.0.15
