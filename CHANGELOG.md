@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.17]
+
 - Renaming a session is now a double-click on its name in the header, and the pencil button is gone. Enter keeps the new name, Escape discards it, and clicking away keeps it — an editor that throws away what you just typed because you clicked somewhere else is the clunky part of inline renaming, and Escape already says "discard" without ambiguity. Nothing is sent unless the text actually changed, so a stray double-click costs nothing, and a rename still in flight when the session changes underneath it is discarded rather than landing on whatever replaced it. The name itself now carries the affordance: it lights up on hover, and the double-click no longer leaves the text selected behind the input.
 - Emptying the name box means "leave it alone" instead of failing. The daemon refuses an empty name on both the attached and the RPC path, so a cleared field could only ever produce a failed round-trip and an error notice — sitting under a message that claimed the name had been cleared. Both the editor and the host now treat an emptied field the way Escape is treated.
 - The bottom of the panel now reads in the order the work does: subagents, then changes made outside this thread, then the changes the agent and its subagents made, then the composer. Outside changes used to be rendered inside the transcript view, which put them *above* the subagent strip and pushed the agent's own changes furthest from the box you type in. The strip also picks up the border and surface of the two panels it now sits between, so the three read as one stack rather than a transparent gap between two raised panels.
@@ -241,7 +243,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.16...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.17...HEAD
+[1.0.17]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.16...v1.0.17
 [1.0.16]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.13...v1.0.14
