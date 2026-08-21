@@ -367,6 +367,18 @@ export class SessionController implements vscode.Disposable {
 			this.maybeShowInstallPrompt(`"${command}" could not be launched — ${err.message}`);
 			this.pushStatus();
 		});
+		// A protocol fault kills the connection and the agent with it. Nothing
+		// listened for it before, so the operator saw a session simply fail to open
+		// with no explanation anywhere but the output channel.
+		client.on("protocolError", (err: Error) => {
+			if (this.client !== client || this.disposed) return;
+			this.output.appendLine(`[prime-agent] protocol error: ${err.message}`);
+			this.broadcast({
+				type: "notice",
+				level: "error",
+				text: `The agent connection was reset: ${err.message}. Use Restart to start it again.`,
+			});
+		});
 		client.on("exit", (code: number | null) => {
 			if (this.client !== client || this.disposed) return;
 			this.output.appendLine(`[prime-agent] exited with code ${code ?? "?"}`);

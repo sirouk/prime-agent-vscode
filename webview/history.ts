@@ -19,6 +19,32 @@ export interface HistoryDeps {
 /** Host round-trip debounce: long enough to not search every keystroke, short enough to feel live. */
 const SEARCH_DEBOUNCE_MS = 220;
 
+/** Longest derived label before it is cut on a word boundary. */
+const MAX_DERIVED_LABEL_CHARS = 80;
+
+/**
+ * A readable row label for a session that was never named.
+ *
+ * The fallback is the first prompt, and a first prompt is very often a pasted
+ * block: a sentence, a blank line, then a markdown heading. Rendered raw it
+ * arrives as one run-on smear — "Written to `…/HANDOFF.md` first.Now for your
+ * ultimate mission:# HANDOFF" — which is both unreadable and unhelpful. Take
+ * the first line that carries words, drop the markdown ornament in front of it,
+ * and cut on a word boundary so the row stays one glanceable line.
+ */
+export function deriveSessionLabel(session: { name?: string; firstPrompt?: string }): string {
+	if (session.name) return session.name;
+	const line = (session.firstPrompt ?? "")
+		.split(/\r?\n/)
+		.map((entry) => entry.replace(/^[\s>#*\-]+/, "").replace(/\s+/g, " ").trim())
+		.find((entry) => entry.length > 0);
+	if (!line) return "(untitled session)";
+	if (line.length <= MAX_DERIVED_LABEL_CHARS) return line;
+	const cut = line.slice(0, MAX_DERIVED_LABEL_CHARS);
+	const lastSpace = cut.lastIndexOf(" ");
+	return `${(lastSpace > MAX_DERIVED_LABEL_CHARS / 2 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
 export class HistoryView {
 	readonly root: HTMLElement;
 	private listEl: HTMLElement;
@@ -150,7 +176,7 @@ export class HistoryView {
 		const isCurrent = session.id === this.currentId;
 		if (isCurrent) item.classList.add("current");
 		const top = el("div", "history-item-top");
-		const name = session.name || session.firstPrompt || "(untitled session)";
+		const name = deriveSessionLabel(session);
 		const resume = isCurrent ? el("div", "history-resume") : document.createElement("button");
 		resume.className = "history-resume";
 		resume.title = isCurrent ? `${name} (current session)` : `Resume ${name}`;
@@ -231,7 +257,11 @@ export class HistoryView {
 		if (session.matchSnippet) {
 			item.appendChild(el("div", "history-item-sub match", session.matchSnippet.slice(0, 160)));
 		} else {
-			const sub = session.name && session.firstPrompt ? session.firstPrompt.slice(0, 110) : showFolder ? session.cwd : undefined;
+			const sub = session.name && session.firstPrompt
+			? session.firstPrompt.replace(/\s+/g, " ").trim().slice(0, 110)
+			: showFolder
+				? session.cwd
+				: undefined;
 			if (sub) item.appendChild(el("div", "history-item-sub", sub));
 		}
 		if (!isCurrent) {
@@ -257,7 +287,7 @@ export class HistoryView {
 			item.classList.remove("renaming");
 			return;
 		}
-		const currentText = session.name || session.firstPrompt || "";
+		const currentText = session.name || deriveSessionLabel(session);
 		const input = document.createElement("input");
 		input.className = "history-rename-input";
 		input.value = currentText;

@@ -703,6 +703,43 @@ check("uiState title updates the header", document.querySelector(".session-title
 	document.querySelector(".session-title")?.textContent ?? "<none>");
 
 
+// --- derived row label for an unnamed session ---
+// A first prompt is very often a pasted block. Rendered raw it arrives as one
+// run-on smear ("...HANDOFF.md first.Now for your ultimate mission:# HANDOFF"),
+// which is what made a real session unidentifiable in the list.
+hostMessage({ type: "history", sessions: [
+	{ path: "/tmp/pasted.jsonl", id: "pasted-1", cwd: "/Users/dev/ai-secpipe", timestamp: new Date().toISOString(),
+	  firstPrompt: "Written to `/Users/dev/ai-secpipe/HANDOFF.md` first.\n\nNow for your ultimate mission:\n\n# HANDOFF\n\nrest of the brief", inWorkspace: true },
+	{ path: "/tmp/heading.jsonl", id: "heading-1", cwd: "/Users/dev/ai-secpipe", timestamp: new Date().toISOString(),
+	  firstPrompt: "   \n\n## Ship the release gate\n\nand then do the rest", inWorkspace: true },
+	{ path: "/tmp/blank.jsonl", id: "blank-1", cwd: "/Users/dev/ai-secpipe", timestamp: new Date().toISOString(),
+	  firstPrompt: "\n\n   \n", inWorkspace: true },
+	{ path: "/tmp/verylong.jsonl", id: "long-1", cwd: "/Users/dev/ai-secpipe", timestamp: new Date().toISOString(),
+	  firstPrompt: `${"word ".repeat(60)}end`, inWorkspace: true },
+] });
+{
+	const labelOf = (id) => [...document.querySelectorAll(".history-item")]
+		.map((row) => row.querySelector(".history-item-name")?.textContent ?? "")
+		.find((text) => text.includes(id)) ?? "";
+	const names = [...document.querySelectorAll(".history-item .history-item-name")].map((n) => n.textContent);
+	check("a pasted prompt labels from its first meaningful line",
+		names.some((n) => n === "Written to `/Users/dev/ai-secpipe/HANDOFF.md` first."), JSON.stringify(names.slice(0, 4)));
+	check("no label runs two lines together",
+		!names.some((n) => /first\.Now|:#/.test(n)), JSON.stringify(names.slice(0, 4)));
+	check("a leading markdown heading loses its ornament",
+		names.some((n) => n === "Ship the release gate"), JSON.stringify(names.slice(0, 4)));
+	check("an all-whitespace prompt falls back to a placeholder",
+		names.some((n) => n === "(untitled session)"), JSON.stringify(names.slice(0, 4)));
+	const long = names.find((n) => n.startsWith("word word"));
+	check("a very long line is cut on a word boundary", !!long && long.length <= 81 && long.endsWith("\u2026") && !long.includes("wor\u2026"),
+		JSON.stringify(long));
+}
+// Put the shared fixture back: `history` replaces the list wholesale, and the
+// checks below this point look for rows it defines.
+hostMessage({ type: "history", sessions: [
+	{ id: "hist-a", path: "/tmp/a.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "local chat", inWorkspace: true },
+] });
+
 // --- history row pencil rename ---
 posted.length = 0;
 const hRow = [...document.querySelectorAll(".history-item")].find((i) => i.textContent.includes("local chat"));

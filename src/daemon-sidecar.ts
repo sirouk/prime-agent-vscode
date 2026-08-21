@@ -17,12 +17,14 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { MAX_JSONL_FRAME_BYTES, MAX_JSONL_FRAME_LABEL } from "./wire-limits.js";
+
 export { agentDirForSessionFile, defaultAgentDir, resolveOwnerClientId } from "./daemon-owner.js";
+export { MAX_JSONL_FRAME_BYTES, MAX_JSONL_FRAME_LABEL } from "./wire-limits.js";
 export type { OwnerLookup, WorkerDescriptorRef } from "./daemon-owner.js";
 
 const PROTOCOL_NAME = "prime-agent.daemon";
 const PROTOCOL_VERSION = 7;
-const MAX_JSONL_FRAME_BYTES = 4 * 1024 * 1024;
 
 export interface DaemonHello {
 	socketPath?: string;
@@ -157,6 +159,11 @@ export class DaemonSidecar {
 	 * and `list`/`attach` are read-only, so they are never journaled at all.
 	 */
 	impersonateClientId: string | null = null;
+	/**
+	 * Runaway-peer frame cap. Overridable so the transport regressions can prove
+	 * the guard without pushing the real 64 MiB through a socket.
+	 */
+	maxFrameBytes: number = MAX_JSONL_FRAME_BYTES;
 
 	isSupported(): boolean {
 		if (!this.hello) return false;
@@ -219,7 +226,7 @@ export class DaemonSidecar {
 			while (index >= 0) {
 				const line = this.buffer.slice(0, index).trim();
 				this.buffer = this.buffer.slice(index + 1);
-				if (Buffer.byteLength(line, "utf8") > MAX_JSONL_FRAME_BYTES) {
+				if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) {
 					this.rejectOversizedFrame(socket);
 					return;
 				}
@@ -229,7 +236,7 @@ export class DaemonSidecar {
 			// Apply the cap only to the residual unterminated record. A single TCP
 			// read can legitimately contain several complete frames whose aggregate
 			// size exceeds the per-frame ceiling.
-			if (Buffer.byteLength(this.buffer, "utf8") > MAX_JSONL_FRAME_BYTES) this.rejectOversizedFrame(socket);
+			if (Buffer.byteLength(this.buffer, "utf8") > this.maxFrameBytes) this.rejectOversizedFrame(socket);
 		});
 		socket.on("close", () => this.onSocketClosed(socket));
 		socket.on("error", () => {
@@ -290,7 +297,7 @@ export class DaemonSidecar {
 		this.buffer = "";
 		this.onSocketClosed(socket);
 		try {
-			socket.destroy(new Error("daemon frame exceeded 4 MiB"));
+			socket.destroy(new Error(`daemon frame exceeded ${this.maxFrameBytes === MAX_JSONL_FRAME_BYTES ? MAX_JSONL_FRAME_LABEL : `${this.maxFrameBytes} bytes`}`));
 		} catch {
 			// already closed
 		}

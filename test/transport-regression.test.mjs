@@ -13,7 +13,10 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const MAX_JSONL_FRAME_BYTES = 4 * 1024 * 1024;
+// A deliberately tiny cap. The guard exists to bound a peer that never sends a
+// newline; proving it does not require pushing the real 64 MiB through a pipe,
+// and the production default is asserted separately below.
+const TEST_FRAME_CAP = 64 * 1024;
 const require = createRequire(import.meta.url);
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-transport-"));
 
@@ -68,7 +71,7 @@ function send(payload) {
 process.on("SIGTERM", () => setTimeout(() => process.exit(0), 80));
 
 if (mode === "oversized") {
-  process.stdout.write("x".repeat(4 * 1024 * 1024 + 1024));
+  process.stdout.write("x".repeat(Number(process.env.PA_TEST_FRAME_CAP ?? 65536) + 1024));
 }
 
 process.stdin.setEncoding("utf8");
@@ -133,7 +136,7 @@ function createFixtureDaemon(socketPath) {
 					const request = JSON.parse(line);
 					const command = request.command ?? {};
 					if (command.type === "oversize") {
-						socket.write("x".repeat(MAX_JSONL_FRAME_BYTES + 1024));
+						socket.write("x".repeat(TEST_FRAME_CAP + 1024));
 					} else {
 						if (command.type === "malformed_then_echo") socket.write("null\n");
 						if (command.type === "bad_response_shape") socket.write(JSON.stringify({ type: "response", id: request.id, success: "yes" }) + "\n");
@@ -170,7 +173,7 @@ try {
 	esbuild.buildSync({ entryPoints: ["src/rpc-client.ts"], outfile: rpcBundle, bundle: true, format: "cjs", platform: "node", target: "node20" });
 	esbuild.buildSync({ entryPoints: ["src/daemon-sidecar.ts"], outfile: daemonBundle, bundle: true, format: "cjs", platform: "node", target: "node20" });
 	const { RpcClient } = require(rpcBundle);
-	const { DaemonSidecar } = require(daemonBundle);
+	const { DaemonSidecar, MAX_JSONL_FRAME_BYTES } = require(daemonBundle);
 	check("transport modules bundle from source", typeof RpcClient === "function" && typeof DaemonSidecar === "function");
 
 	if (process.platform === "win32") {
@@ -242,11 +245,22 @@ try {
 			String(badShapeRpcError?.message ?? badShapeRpcError),
 		);
 
-		const oversizedRpc = new RpcClient({ command: peer, env: { PA_TRANSPORT_MODE: "oversized" } });
+		const oversizedRpc = new RpcClient({ command: peer, env: { PA_TRANSPORT_MODE: "oversized", PA_TEST_FRAME_CAP: String(TEST_FRAME_CAP) }, maxFrameBytes: TEST_FRAME_CAP });
 		rpcClients.push(oversizedRpc);
 		oversizedRpc.start();
 		const frameError = await expectQuickRejection(oversizedRpc.request({ type: "will_not_reply" }, 10_000), "oversized unterminated RPC frame rejects pending work promptly");
-		check("RPC frame cap reports the framing violation", /frame exceeded 4 MiB/.test(String(frameError?.message ?? frameError)));
+		check("RPC frame cap reports the framing violation", /frame exceeded \d+ bytes/.test(String(frameError?.message ?? frameError)));
+
+		// The production default must clear a real transcript, not just a toy one.
+		// `get_messages` for a 6,479-message session is a single 4.6 MiB frame; the
+		// old 4 MiB cap tore the connection down mid-resume and killed the agent,
+		// which is what made large sessions permanently unopenable.
+		const OBSERVED_LARGE_TRANSCRIPT_BYTES = 4_827_774;
+		check(
+			"the shipped frame cap clears a real large transcript with headroom",
+			MAX_JSONL_FRAME_BYTES >= OBSERVED_LARGE_TRANSCRIPT_BYTES * 4,
+			`cap=${MAX_JSONL_FRAME_BYTES} observed=${OBSERVED_LARGE_TRANSCRIPT_BYTES}`,
+		);
 		await delay(30);
 		check("RPC frame violation tears down the unusable transport", !oversizedRpc.running);
 
@@ -254,6 +268,7 @@ try {
 		daemon = createFixtureDaemon(socketPath);
 		await daemon.listen();
 		sidecar = new DaemonSidecar();
+		sidecar.maxFrameBytes = TEST_FRAME_CAP;
 		sidecar.socketPath = () => socketPath;
 		await sidecar.connect(2_000);
 		const daemonReply = await sidecar.request({ type: "echo" }, 2_000);

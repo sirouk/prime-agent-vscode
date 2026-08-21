@@ -9,6 +9,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { delimiter } from "node:path";
 import * as fs from "node:fs";
+import { MAX_JSONL_FRAME_BYTES, MAX_JSONL_FRAME_LABEL } from "./wire-limits.js";
 
 export interface RpcClientOptions {
 	/** Command or absolute path used to launch the agent (default: "prime-agent") */
@@ -21,6 +22,11 @@ export interface RpcClientOptions {
 	env?: Record<string, string>;
 	/** Optional wire trace hook invoked for every parsed inbound record (types only). */
 	onWire?: (summary: string) => void;
+	/**
+	 * Runaway-peer frame cap. Overridable so the transport regressions can prove
+	 * the guard without pushing the real 64 MiB through a pipe.
+	 */
+	maxFrameBytes?: number;
 }
 
 interface PendingRequest {
@@ -34,8 +40,7 @@ interface LaunchSpec {
 	args: string[];
 }
 
-/** A peer that never sends a newline must not grow the extension host forever. */
-const MAX_JSONL_FRAME_BYTES = 4 * 1024 * 1024;
+
 
 export interface RpcReply {
 	command?: string;
@@ -53,6 +58,15 @@ export class RpcClient extends EventEmitter {
 
 	constructor(private readonly options: RpcClientOptions = {}) {
 		super();
+	}
+
+	/** Frame cap in force for this client; see wire-limits.ts for the rationale. */
+	private get maxFrameBytes(): number {
+		return this.options.maxFrameBytes ?? MAX_JSONL_FRAME_BYTES;
+	}
+
+	private get maxFrameLabel(): string {
+		return this.options.maxFrameBytes === undefined ? MAX_JSONL_FRAME_LABEL : `${this.options.maxFrameBytes} bytes`;
 	}
 
 	get stderrText(): string {
@@ -172,8 +186,8 @@ export class RpcClient extends EventEmitter {
 		while (newline >= 0) {
 			let line = this.buffer.slice(0, newline);
 			this.buffer = this.buffer.slice(newline + 1);
-			if (Buffer.byteLength(line, "utf8") > MAX_JSONL_FRAME_BYTES) {
-				this.failProtocol(new Error("prime-agent RPC frame exceeded 4 MiB"));
+			if (Buffer.byteLength(line, "utf8") > this.maxFrameBytes) {
+				this.failProtocol(new Error(`prime-agent RPC frame exceeded ${this.maxFrameLabel}`));
 				return;
 			}
 			if (line.endsWith("\r")) line = line.slice(0, -1);
@@ -182,8 +196,8 @@ export class RpcClient extends EventEmitter {
 			}
 			newline = this.buffer.indexOf("\n");
 		}
-		if (Buffer.byteLength(this.buffer, "utf8") > MAX_JSONL_FRAME_BYTES) {
-			this.failProtocol(new Error("prime-agent RPC frame exceeded 4 MiB"));
+		if (Buffer.byteLength(this.buffer, "utf8") > this.maxFrameBytes) {
+			this.failProtocol(new Error(`prime-agent RPC frame exceeded ${this.maxFrameLabel}`));
 		}
 	}
 
