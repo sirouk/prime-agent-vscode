@@ -284,6 +284,7 @@ export type WebviewToHost =
 	| { type: "copyConversation" }
 	| { type: "dismissInstallPrompt" }
 	| { type: "renameSession"; name: string }
+	| { type: "noticeAction"; id: string }
 	| { type: "renameHistorySession"; path: string; sessionId: string; name: string }
 	| { type: "stopSession"; path: string; sessionId: string }
 	| { type: "archiveSession"; path: string; sessionId: string }
@@ -367,7 +368,18 @@ export type HostToWebview =
 	| { type: "showHistory" }
 	| { type: "promptAccepted"; kind: "prompt" | "steer" | "followUp" }
 	| { type: "promptRejected"; error: string; clientRequestId?: string }
-	| { type: "notice"; level: "info" | "warning" | "error"; text: string }
+	| {
+			type: "notice";
+			level: "info" | "warning" | "error";
+			text: string;
+			/**
+			 * Optional one-shot recovery the operator can run from the notice. `id`
+			 * is an opaque host-issued capability, like a subagent's `browseRef`:
+			 * the webview can only ask the host to run something the host already
+			 * decided to offer.
+			 */
+			action?: { id: string; label: string };
+	  }
 	| { type: "uiState"; statusText?: string; title?: string }
 	| { type: "fileSearchResults"; requestId: number; files: FileSearchItem[] }
 	| { type: "imagePicked"; requestId: number; images: ImageAttachment[] }

@@ -279,6 +279,42 @@ controller.onAgentEvent({ type: "compaction_end", reason: "manual" });
 check("compaction_end refreshes the transcript regardless of who asked for it", refreshed === 1, String(refreshed));
 controller.client = null;
 
+// --- going back to the parent from a browsed subagent -----------------------
+// Browsing from this window's own session into a subagent pushes an "rpc"
+// breadcrumb and leaves the CHILD attached. Requiring no attachment before
+// unwinding made "‹ parent" a silent no-op for the commonest path there is.
+{
+	posts.length = 0;
+	const detached = [];
+	const originalDetachSession = controller.detachDaemonSession;
+	const originalRestore = controller.restoreOwnRpcView;
+	const originalReset = controller.resetChildrenBaseline;
+	const originalChildren = controller.scheduleChildrenRefresh;
+	let restored = 0;
+	controller.detachDaemonSession = async (_sidecar, id) => { detached.push(id); };
+	controller.restoreOwnRpcView = async () => { restored += 1; return true; };
+	controller.resetChildrenBaseline = () => {};
+	controller.scheduleChildrenRefresh = () => {};
+	controller.sidecar = { connected: true, impersonateClientId: null, dispose() {} };
+
+	controller.attached = { activeSessionId: "child-handle", sessionPath: path.join(workdir, "child.jsonl"), sessionId: "child" };
+	controller.attachedEpoch = controller.viewEpoch;
+	controller.returnTargets = [{ kind: "rpc" }];
+
+	await controller.backToParent();
+	check("back from a subagent releases the child attachment", controller.attached === null, JSON.stringify(controller.attached));
+	check("back from a subagent detaches the child by handle", detached.includes("child-handle"), JSON.stringify(detached));
+	check("back from a subagent restores this window's own session", restored === 1, String(restored));
+	check("back from a subagent consumes its breadcrumb", controller.returnTargets.length === 0, JSON.stringify(controller.returnTargets));
+
+	controller.detachDaemonSession = originalDetachSession;
+	controller.restoreOwnRpcView = originalRestore;
+	controller.resetChildrenBaseline = originalReset;
+	controller.scheduleChildrenRefresh = originalChildren;
+	controller.sidecar = null;
+	controller.attached = null;
+}
+
 // --- the install prompt points at the installer, not a repo doc page --------
 posts.length = 0;
 controller.maybeShowInstallPrompt("test reason");

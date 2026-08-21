@@ -666,9 +666,21 @@ function setObserving(value: boolean): void {
 // Notices
 // ---------------------------------------------------------------------------
 
-function addNotice(level: "info" | "warning" | "error", text: string): void {
+function addNotice(level: "info" | "warning" | "error", text: string, action?: { id: string; label: string }): void {
 	const note = el("div", `notice ${level}`);
 	note.appendChild(el("span", "", text));
+	if (action) {
+		// The id is the host's own capability token; the webview only hands it back.
+		const run = el("button", "notice-action") as HTMLButtonElement;
+		run.textContent = action.label;
+		run.title = action.label;
+		run.addEventListener("click", () => {
+			run.disabled = true;
+			post({ type: "noticeAction", id: action.id });
+			note.remove();
+		});
+		note.appendChild(run);
+	}
 	const dismiss = el("button", "notice-dismiss");
 	dismiss.title = "Dismiss";
 	dismiss.setAttribute("aria-label", "Dismiss this notice");
@@ -810,7 +822,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 		case "notice":
 			// A failure the operator has to read is painted underneath the splash.
 			if (message.level !== "info") retireBootSplash();
-			addNotice(message.level, message.text);
+			addNotice(message.level, message.text, message.action);
 			break;
 		case "installPrompt":
 			// The splash sits on top of everything — drop it or the operator can

@@ -800,6 +800,12 @@ export class SessionController implements vscode.Disposable {
 		this.lastStatsText = "";
 		this.lastUsage = {};
 		this.autoCompactSent = false;
+		// A refusal belongs to the thread that earned it, and so does the offer to
+		// retry it: carrying either across a session change would rule out models
+		// for a thread that never refused, and leave a button that acts on the
+		// session the operator just left.
+		this.compactionModelsTried.clear();
+		this.noticeActions.clear();
 		this.clearChangedFiles();
 	}
 
@@ -1082,12 +1088,100 @@ export class SessionController implements vscode.Disposable {
 	 */
 	private static compactFailureHint(detail: string): string {
 		if (/refus/i.test(detail)) {
-			return " The model declined to summarize this thread's content. Another model usually compacts it — switch model and run it again.";
+			return " The model declined to summarize this thread's content.";
 		}
 		if (/prompt is too long|context (?:window|length) exceeded|too many tokens/i.test(detail)) {
 			return " This thread is larger than the current model's context window. Switch to a model with a bigger window and run it again.";
 		}
 		return "";
+	}
+
+	/**
+	 * Pick a model to retry a refused compaction with.
+	 *
+	 * Deliberately capability-based and name-free: a refusal is a verdict from
+	 * one model about one thread, and hard-coding which models "work" would be
+	 * wrong the day a provider changes its mind. The only property that can be
+	 * checked up front is whether a candidate could hold the thread at all —
+	 * claude-haiku-4-5 answers a 484,555-token prefix with "prompt is too long"
+	 * against its 200,000 ceiling, which is a wasted round trip, not a fallback.
+	 *
+	 * So: never shrink the context window, never re-offer something already
+	 * refused for this thread, and prefer the roomiest candidate.
+	 */
+	static pickCompactionFallback(
+		models: readonly RpcModel[],
+		current: RpcModel | null | undefined,
+		tried: ReadonlySet<string>,
+	): RpcModel | null {
+		const key = (model: { provider?: string; id?: string }): string => `${model.provider ?? ""}/${model.id ?? ""}`;
+		const floor = current?.contextWindow ?? 0;
+		const candidates = models
+			.filter((model) => model.provider && model.id)
+			.filter((model) => key(model) !== key(current ?? {}))
+			.filter((model) => !tried.has(key(model)))
+			.filter((model) => (model.contextWindow ?? 0) >= floor);
+		if (candidates.length === 0) return null;
+		return candidates.reduce((best, model) =>
+			(model.contextWindow ?? 0) > (best.contextWindow ?? 0) ? model : best,
+		);
+	}
+
+	/** Models already asked to summarize THIS thread, so a retry cannot loop. */
+	private compactionModelsTried = new Set<string>();
+
+	/** Host-issued one-shot recoveries offered on a notice; see `runNoticeAction`. */
+	private noticeActions = new Map<string, () => Promise<void>>();
+
+	/**
+	 * Run a recovery the host itself offered. The webview may be compromised, so
+	 * the id is only ever a key into this map — never anything it can compose.
+	 */
+	async runNoticeAction(id: string): Promise<void> {
+		const run = this.noticeActions.get(id);
+		if (!run) return;
+		this.noticeActions.delete(id);
+		await run();
+	}
+
+	private offerNoticeAction(label: string, run: () => Promise<void>): { id: string; label: string } {
+		// One offer at a time: a stale button from an earlier failure would retry
+		// against a session the operator has since left.
+		this.noticeActions.clear();
+		const id = randomUUID();
+		this.noticeActions.set(id, run);
+		return { id, label };
+	}
+
+	private async fetchAvailableModels(): Promise<RpcModel[]> {
+		const attached = this.attached;
+		if (attached) {
+			const sidecar = await this.ensureSidecar();
+			const data = await sidecar.request<{ models?: RpcModel[] }>(
+				{ type: "get_available_models", activeSessionId: attached.activeSessionId },
+				60_000,
+			);
+			return data.models ?? [];
+		}
+		const client = this.client;
+		if (!client?.running) return [];
+		const response = await client.request({ type: "get_available_models" }, 60_000);
+		return response.success ? ((response.data as { models?: RpcModel[] }).models ?? []) : [];
+	}
+
+	/** Compact once with `model`, then put the operator's model back. */
+	private async compactWithModel(model: RpcModel): Promise<void> {
+		const original = this.state?.model ?? this.rentedState?.model ?? null;
+		const label = model.name ?? `${model.provider}/${model.id}`;
+		this.compactionModelsTried.add(`${model.provider}/${model.id}`);
+		this.broadcast({ type: "notice", level: "info", text: `Compacting with ${label}…` });
+		try {
+			await this.setModel(model.provider, model.id);
+			await this.compact();
+		} finally {
+			// The operator picked their model for the work, not for summarising.
+			if (original?.provider && original.id) await this.setModel(original.provider, original.id);
+		}
 	}
 
 	private async reportCompactFailure(detail: string): Promise<void> {
@@ -1099,10 +1193,30 @@ export class SessionController implements vscode.Disposable {
 			});
 			return;
 		}
+		const text = `Compaction failed: ${detail}${SessionController.compactFailureHint(detail)}`;
+		if (!/refus/i.test(detail)) {
+			this.broadcast({ type: "notice", level: "error", text });
+			return;
+		}
+		let fallback: RpcModel | null = null;
+		try {
+			const current = this.state?.model ?? this.rentedState?.model ?? null;
+			this.compactionModelsTried.add(`${current?.provider ?? ""}/${current?.id ?? ""}`);
+			fallback = SessionController.pickCompactionFallback(await this.fetchAvailableModels(), current, this.compactionModelsTried);
+		} catch {
+			// Catalogue unavailable: report the failure without an offer we cannot honour.
+		}
+		if (!fallback) {
+			// No button to offer, so the text has to carry the whole instruction.
+			this.broadcast({ type: "notice", level: "error", text: `${text} Another model usually compacts it — switch model and run it again.` });
+			return;
+		}
+		const label = fallback.name ?? `${fallback.provider}/${fallback.id}`;
 		this.broadcast({
 			type: "notice",
 			level: "error",
-			text: `Compaction failed: ${detail}${SessionController.compactFailureHint(detail)}`,
+			text,
+			action: this.offerNoticeAction(`Compact with ${label}`, () => this.compactWithModel(fallback)),
 		});
 	}
 
@@ -3050,9 +3164,17 @@ export class SessionController implements vscode.Disposable {
 			// session rather than on nothing — going up must never dead-end.
 			this.broadcast({ type: "notice", level: "warning", text: "The parent session is no longer live — returning to this window's session." });
 		}
-		// baseline: own RPC session
-		if (epoch !== this.viewEpoch || this.attached !== null) return;
-		if (!(await this.detachFromDaemon(null)) || epoch !== this.viewEpoch || this.attached !== null) return;
+		// baseline: own RPC session.
+		//
+		// Browsing from this window's own session into a subagent leaves that CHILD
+		// attached and pushes an "rpc" breadcrumb, so going back arrives here
+		// holding an attachment that must be released first. Refusing whenever one
+		// existed — and asking detachFromDaemon to expect none — made "‹ parent" a
+		// silent no-op for the most common path there is: root -> child -> back.
+		// A newer navigation is still rejected, by the epoch guard that means it.
+		if (epoch !== this.viewEpoch) return;
+		const landing = this.attached;
+		if (!(await this.detachFromDaemon(landing)) || epoch !== this.viewEpoch || this.attached !== null) return;
 		this.returnTargets.pop();
 		// The strip belongs to whatever session we just landed on, and the spawn
 		// baseline still holds the child's (usually empty) set — leaving it would

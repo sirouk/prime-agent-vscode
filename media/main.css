@@ -217,6 +217,28 @@ button:focus-visible {
 	background: color-mix(in srgb, transparent 80%, var(--pa-error) 20%);
 }
 
+.notice-action {
+	flex: none;
+	margin-left: auto;
+	padding: 2px 8px;
+	border: 1px solid var(--pa-accent-dim);
+	border-radius: 4px;
+	background: transparent;
+	color: var(--pa-accent);
+	font-size: 11px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.notice-action:hover {
+	background: var(--pa-accent-dim);
+}
+
+.notice-action:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
 .notice-dismiss {
 	display: inline-flex;
 	color: var(--pa-dim);

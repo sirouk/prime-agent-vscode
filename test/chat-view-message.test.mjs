@@ -72,6 +72,14 @@ try {
 		type: "browseChild",
 		browseRef: "531d0ed5-3678-405e-9b8c-e9879bd9e552",
 	});
+
+	// Notice actions are host-issued capabilities, validated like a browseRef.
+	assert.equal(parseWebviewMessage({ type: "noticeAction", id: "../forged" }), undefined);
+	assert.equal(parseWebviewMessage({ type: "noticeAction" }), undefined);
+	assert.deepEqual(parseWebviewMessage({ type: "noticeAction", id: "6e5fb7c8-5c8f-48b2-91b5-80fd8229e8f2" }), {
+		type: "noticeAction",
+		id: "6e5fb7c8-5c8f-48b2-91b5-80fd8229e8f2",
+	});
 	assert.deepEqual(parseWebviewMessage({ type: "switchSession", path: "/tmp/known.jsonl", sessionId: "known-session" }), {
 		type: "switchSession",
 		path: "/tmp/known.jsonl",

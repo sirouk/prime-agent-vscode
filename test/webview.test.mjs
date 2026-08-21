@@ -703,6 +703,24 @@ check("uiState title updates the header", document.querySelector(".session-title
 	document.querySelector(".session-title")?.textContent ?? "<none>");
 
 
+// --- a notice can carry a one-shot recovery ---------------------------------
+posted.length = 0;
+hostMessage({ type: "notice", level: "error", text: "Compaction failed: refused.",
+	action: { id: "9f1c2b7a-0000-4a11-9c3d-abcdefabcdef", label: "Compact with Roomy" } });
+{
+	const btn = [...document.querySelectorAll(".notice .notice-action")].find((b) => b.textContent === "Compact with Roomy");
+	check("a notice action renders as a button", !!btn);
+	btn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	check("clicking it posts the host's id back verbatim",
+		posted.some((m) => m.type === "noticeAction" && m.id === "9f1c2b7a-0000-4a11-9c3d-abcdefabcdef"),
+		JSON.stringify(posted.slice(-2)));
+	check("the notice retires once its action is taken",
+		![...document.querySelectorAll(".notice .notice-action")].some((b) => b.textContent === "Compact with Roomy"));
+}
+hostMessage({ type: "notice", level: "error", text: "Plain failure, nothing to offer." });
+check("a notice without an action renders no button",
+	[...document.querySelectorAll(".notice")].slice(-1)[0]?.querySelector(".notice-action") === null);
+
 // --- derived row label for an unnamed session ---
 // A first prompt is very often a pasted block. Rendered raw it arrives as one
 // run-on smear ("...HANDOFF.md first.Now for your ultimate mission:# HANDOFF"),

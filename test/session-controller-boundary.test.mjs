@@ -660,6 +660,56 @@ controller.fetchAttachedStats = originalIdentityFetchStats;
 controller.refreshAttachedState = originalIdentityRefreshState;
 controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 
+// --- choosing a model to retry a refused compaction --------------------------
+// Name-free on purpose: a refusal is one model's verdict on one thread, so the
+// only thing checkable up front is whether a candidate could hold the thread.
+// Synthetic names here — if this ever starts depending on a real model id, it
+// has overfitted and these fixtures will not save it.
+{
+	const pick = SessionController.pickCompactionFallback;
+	const current = { provider: "vendor-a", id: "big", contextWindow: 1_000_000 };
+	const catalogue = [
+		current,
+		{ provider: "vendor-a", id: "small", contextWindow: 200_000 },
+		{ provider: "vendor-b", id: "roomy", contextWindow: 2_000_000 },
+		{ provider: "vendor-b", id: "equal", contextWindow: 1_000_000 },
+	];
+	const none = new Set();
+	check("the refusing model is never offered back",
+		pick(catalogue, current, none)?.id !== "big");
+	check("a smaller context window is never offered",
+		pick(catalogue, current, none)?.id !== "small");
+	check("the roomiest qualifying model wins", pick(catalogue, current, none)?.id === "roomy",
+		JSON.stringify(pick(catalogue, current, none)));
+	check("a model already tried for this thread is skipped",
+		pick(catalogue, current, new Set(["vendor-b/roomy"]))?.id === "equal",
+		JSON.stringify(pick(catalogue, current, new Set(["vendor-b/roomy"]))));
+	check("nothing qualifying means no offer",
+		pick(catalogue, current, new Set(["vendor-b/roomy", "vendor-b/equal"])) === null);
+	check("an equal window still qualifies — only shrinking is refused",
+		pick([current, { provider: "vendor-b", id: "equal", contextWindow: 1_000_000 }], current, none)?.id === "equal");
+	check("an unknown current window does not block an offer",
+		pick(catalogue, { provider: "vendor-a", id: "big" }, none)?.id === "roomy");
+	check("an empty catalogue yields no offer", pick([], current, none) === null);
+}
+
+// --- the offer is a host-issued capability, not a webview-composed one -------
+{
+	const notices = [];
+	const originalBroadcast = controller.broadcast;
+	controller.broadcast = (message) => { if (message.type === "notice") notices.push(message); };
+	let ran = 0;
+	const offered = controller.offerNoticeAction("Compact with something", async () => { ran += 1; });
+	check("an offered action carries an opaque id", typeof offered.id === "string" && offered.id.length > 20, offered.id);
+	await controller.runNoticeAction("not-an-offer-we-made");
+	check("a forged notice action is ignored", ran === 0, String(ran));
+	await controller.runNoticeAction(offered.id);
+	check("the host's own action runs", ran === 1, String(ran));
+	await controller.runNoticeAction(offered.id);
+	check("an action is one-shot", ran === 1, String(ran));
+	controller.broadcast = originalBroadcast;
+}
+
 // --- compaction failures the operator can act on -----------------------------
 // A refusal and a context overflow are both about the model, not the thread,
 // and the raw provider text never says so. Measured on a real 6,500-message
@@ -675,7 +725,9 @@ controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 
 	await controller.reportCompactFailure("Turn prefix summarization failed: Model refused to respond (refusal)");
 	check("a refusal keeps the provider detail", /Model refused to respond/.test(notices.at(-1)?.text ?? ""));
-	check("a refusal points at switching model", /switch model/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
+	check("a refusal explains that the model declined", /declined to summarize/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
+	check("with no catalogue to offer from, the text carries the instruction",
+		/switch model/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
 
 	await controller.reportCompactFailure("Summarization failed: prompt is too long: 484555 tokens > 200000 maximum");
 	check("a context overflow points at a bigger window", /bigger window/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
@@ -690,6 +742,51 @@ controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 	check("a still-running compaction is never reported as failed",
 		notices.at(-1)?.level === "info" && /still running/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
 
+	// A refusal that has somewhere to go carries the offer with it.
+	controller.compactionStillRunning = async () => false;
+	const originalFetchModels = controller.fetchAvailableModels;
+	const originalSetModel = controller.setModel;
+	const originalCompact = controller.compact;
+	controller.state = { model: { provider: "vendor-a", id: "big", contextWindow: 1_000_000 } };
+	controller.fetchAvailableModels = async () => ([
+		{ provider: "vendor-a", id: "big", contextWindow: 1_000_000 },
+		{ provider: "vendor-b", id: "roomy", contextWindow: 2_000_000, name: "Roomy" },
+		{ provider: "vendor-c", id: "tiny", contextWindow: 100_000 },
+	]);
+	notices.length = 0;
+	await controller.reportCompactFailure("Turn prefix summarization failed: Model refused to respond (refusal)");
+	const offer = notices.at(-1);
+	check("a refusal offers a retry", !!offer?.action, JSON.stringify(offer));
+	check("the offer names the model it would use", offer?.action?.label === "Compact with Roomy", offer?.action?.label);
+
+	// Running it swaps the model, compacts, and puts the operator's model back.
+	const calls = [];
+	controller.setModel = async (provider, id) => { calls.push(`set:${provider}/${id}`); };
+	controller.compact = async () => { calls.push("compact"); };
+	await controller.runNoticeAction(offer.action.id);
+	check("the retry compacts with the offered model then restores the original",
+		calls.join(" > ") === "set:vendor-b/roomy > compact > set:vendor-a/big", calls.join(" > "));
+
+	// A second refusal must not re-offer the model that just refused.
+	notices.length = 0;
+	await controller.reportCompactFailure("Turn prefix summarization failed: Model refused to respond (refusal)");
+	check("a model already tried is not offered again",
+		notices.at(-1)?.action?.label !== "Compact with Roomy", notices.at(-1)?.action?.label ?? "(no offer)");
+
+	// Nothing roomy enough left: report the failure without an offer we cannot honour.
+	controller.fetchAvailableModels = async () => ([{ provider: "vendor-c", id: "tiny", contextWindow: 100_000 }]);
+	notices.length = 0;
+	await controller.reportCompactFailure("Turn prefix summarization failed: Model refused to respond (refusal)");
+	check("no viable model means no button", !notices.at(-1)?.action, JSON.stringify(notices.at(-1)));
+	check("...and then the text says what to do instead", /switch model/i.test(notices.at(-1)?.text ?? ""), notices.at(-1)?.text);
+	check("a button replaces the instruction rather than repeating it",
+		!/switch model/i.test(offer?.text ?? ""), offer?.text);
+
+	controller.fetchAvailableModels = originalFetchModels;
+	controller.setModel = originalSetModel;
+	controller.compact = originalCompact;
+	controller.state = null;
+	controller.compactionModelsTried.clear();
 	controller.broadcast = originalBroadcast;
 	controller.compactionStillRunning = originalStillRunning;
 }
