@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.16]
+
 - Clicking a subagent works. 1.0.15 made subagents *visible* by naming our worker's owner id on roster reads, but `attach` is gated by the same ownership rule and was still going out unnamed, so every "view ›" ended in "Could not attach to that subagent session (it may be gone)" — the daemon's `Unknown active session`, reported as a missing session. Attach cannot borrow the trick 1.0.15 used, either: a roster read is one round-trip and could name the owner on a throwaway connection, while an attachment is a live event stream that has to stay open. The identity now rides on the sidecar connection itself, so listing, attaching, prompting, aborting and compacting a subagent all speak as the client that owns it. It also removes the connection-per-refresh that the throwaway read implied.
 - The identity is given up the moment the agent process exits. That is the one hazard of holding a claim on a long-lived connection: the daemon refuses to reap a client-owned worker while any connected client still answers to its owner id, so a stale claim would leave a dead agent's worker and its IPython kernels running for as long as the window stayed open. Dropping the socket is what releases it. The claim is only ever taken up or switched — a descriptor caught mid-rewrite resolves to nothing, and that must never be read as "let go", or a live attachment would be torn down for no reason.
 - Sharing an identity with the live agent connection is safe by construction, and now says so where it matters: the daemon dedupes mutating commands on (client id, command id), our command ids are `side-<n>` where prime-agent's own client issues `daemon_<n>`, and `list` and `attach` are read-only and never journaled at all.
@@ -235,7 +237,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.15...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.16...HEAD
+[1.0.16]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.12...v1.0.13
