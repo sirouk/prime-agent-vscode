@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.19]
+
 - A compaction failure now says what to do about it. Two of them are about the model rather than the thread, and the provider's own words never say so. A refusal is the model declining this thread's content: measured on a real 6,500-message thread, `claude-opus-5` refused it in about two seconds through two different providers, while `claude-sonnet-5` and a non-Anthropic model summarized the very same content without complaint — so retrying the same model only reproduces it, and the fix is to pick another one. "Prompt is too long" is a context window smaller than the thread rather than a fault in the request (`claude-haiku-4-5` rejected 484,555 tokens against its 200,000 ceiling on that thread). Both now carry the provider's exact text plus the one gesture that resolves them. Every other failure is relayed unchanged — no invented advice.
 
 ## [1.0.18]
@@ -252,7 +254,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.18...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.19...HEAD
+[1.0.19]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.18...v1.0.19
 [1.0.18]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.17...v1.0.18
 [1.0.17]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.16...v1.0.17
 [1.0.16]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.15...v1.0.16
