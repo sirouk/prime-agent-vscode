@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.23]
+
 - The transcript stops juddering while the agent works. The token/cost line under a reply is only meant for a finished message, but it was gated on "this frame is not a delta" rather than on the message actually being done — and a snapshot repaint mid-turn renders the live reply as non-partial. So the line kept being stamped under a reply that was still being written and removed again on its next delta, a row growing and shrinking many times a second, which reads as every message on screen jumping. It now waits for the signal that the numbers are final: a `stopReason` (or an `errorMessage`, since a failed reply is equally finished). Nothing else about the line changed — a completed reply still shows its tokens and cost, and a failed one still says why.
 - The notice stack no longer costs you the bottom of the transcript. Those messages sit above the transcript rather than over it, so each one that arrives or auto-dismisses resizes the scroller underneath. Adding and retiring one now gives the tail back the same way the subagents strip already does, which only moves a reader who was already following along and does nothing to one parked mid-history.
 - The subagents header counts each state instead of lumping them together. prime-agent's roster has exactly three — running, idle, inactive — so "N live · N finished" was hiding the difference between an agent that is working and one sitting idle. It now reads "2 running · 1 idle · 2 finished", drops empty buckets rather than printing zeros, and the hover title always spells all three out. Rows use the same words the header counts, so a running child is no longer badged "active" while the header calls it something else.
@@ -274,7 +276,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.22...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.23...HEAD
+[1.0.23]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.22...v1.0.23
 [1.0.22]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.21...v1.0.22
 [1.0.21]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.20...v1.0.21
 [1.0.20]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.19...v1.0.20
