@@ -1871,33 +1871,35 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/**
-	 * Mirror of the CLI's classifySessionRosterStatus. isStreaming alone calls a
-	 * compacting session, a running bash, a queued follow-up or a session whose
-	 * subagents are still working "idle" — the CLI shows all of them running. The
-	 * trailing terms are redundant with isSessionActive but keep older daemons honest.
-	 */
-	/**
-	 * The CLI's three-way roster status. A session the daemon serves from its
-	 * on-disk registry holds no worker and is "inactive" — that includes every
-	 * archived one, which is how a session retired by a kill or a worker swap
-	 * still reads honestly instead of vanishing.
+	 * The roster status, mirroring daemon-session-list.ts classifySessionRosterStatus
+	 * term for term:
+	 *
+	 *   no activeSessionId                                  -> "inactive"
+	 *   hasActiveHeartbeat | activity "working" | busy       -> "running"
+	 *   otherwise                                            -> "idle"
+	 *
+	 * where busy is `isSessionActive || hasRunningRlmChildren` (isActiveSessionBusy).
+	 * "inactive" means the daemon is serving this one from its on-disk registry
+	 * with no worker behind it — every archived session, and every finished
+	 * subagent, lands there.
+	 *
+	 * The streaming/compacting/bash bits are NOT added on top. The daemon already
+	 * folds them into `activity`, and counting them again promoted sessions the
+	 * CLI calls idle, which is how the strip's header could disagree with the
+	 * roster it was summarising. They stay only as a fallback for a daemon old
+	 * enough not to send `activity` at all. A queued follow-up is deliberately not
+	 * "running": nothing is executing yet, and the CLI does not count it either.
 	 */
 	private static rosterStatus(s: SessionSummaryRef): "running" | "idle" | "inactive" {
 		if (!s.activeSessionId) return "inactive";
-		return SessionController.isRunningSummary(s) ? "running" : "idle";
+		if (s.hasActiveHeartbeat || s.activity === "working" || s.isSessionActive || s.hasRunningRlmChildren) return "running";
+		if (s.activity === undefined && (s.isStreaming || s.isCompacting || s.isBashRunning)) return "running";
+		return "idle";
 	}
 
+	/** Whether there is a run to stop. One source of truth with the roster status. */
 	private static isRunningSummary(s: SessionSummaryRef): boolean {
-		return Boolean(
-			s.hasActiveHeartbeat ||
-				s.activity === "working" ||
-				s.isSessionActive ||
-				s.hasRunningRlmChildren ||
-				s.isStreaming ||
-				s.isCompacting ||
-				s.isBashRunning ||
-				(s.unfinishedActionCount ?? 0) > 0,
-		);
+		return SessionController.rosterStatus(s) === "running";
 	}
 
 	/**
@@ -3000,11 +3002,10 @@ export class SessionController implements vscode.Disposable {
 					rlmDepth: rich.rlmDepth,
 					created: rich.created,
 					isStreaming: rich.isStreaming ?? false,
-					// No activeSessionId means the daemon served this one from the
-					// on-disk registry: it finished and holds no worker. Everything
-					// else follows the CLI's own running/idle split, which counts a
-					// compacting, retrying or grandchild-blocked agent as running.
-					status: !c.activeSessionId ? "inactive" : SessionController.isRunningSummary(c) ? "running" : "idle",
+					// One source of truth with history rows and with the CLI: see
+					// rosterStatus. A subagent with no worker behind it is "inactive",
+					// which for a child means finished.
+					status: SessionController.rosterStatus(c),
 					attachedClients: c.attachedClients ?? 0,
 				};
 			};

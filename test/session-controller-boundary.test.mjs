@@ -660,6 +660,35 @@ controller.fetchAttachedStats = originalIdentityFetchStats;
 controller.refreshAttachedState = originalIdentityRefreshState;
 controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 
+// --- roster status must mirror the daemon's own rule -------------------------
+// daemon-session-list.ts classifySessionRosterStatus:
+//   no activeSessionId                              -> inactive
+//   hasActiveHeartbeat | activity "working" | busy  -> running   (busy =
+//     isActiveSessionBusy = isSessionActive || hasRunningRlmChildren)
+//   otherwise                                       -> idle
+// Getting this wrong is how the strip's header disagreed with its own dots.
+{
+	const status = SessionController.rosterStatus;
+	check("no worker is inactive", status({ sessionId: "s" }) === "inactive");
+	check("an archived session with no worker is inactive", status({ sessionId: "s", lifecycle: "archived" }) === "inactive");
+	check("a resident session doing nothing is idle", status({ activeSessionId: "a", activity: "idle" }) === "idle");
+	check("activity 'working' is running", status({ activeSessionId: "a", activity: "working" }) === "running");
+	check("a heartbeat counts as running", status({ activeSessionId: "a", activity: "idle", hasActiveHeartbeat: true }) === "running");
+	check("isSessionActive counts as running", status({ activeSessionId: "a", activity: "idle", isSessionActive: true }) === "running");
+	check("a parent blocked on its subagents is running",
+		status({ activeSessionId: "a", activity: "idle", hasRunningRlmChildren: true }) === "running");
+	// The daemon already folds streaming/compacting/bash into `activity`; counting
+	// them again promoted sessions the CLI calls idle.
+	check("a stale isStreaming bit cannot override the daemon's own verdict",
+		status({ activeSessionId: "a", activity: "idle", isStreaming: true }) === "idle");
+	check("a queued follow-up is not a run in progress",
+		status({ activeSessionId: "a", activity: "idle", unfinishedActionCount: 3 }) === "idle");
+	// ...but a daemon too old to send `activity` still gets read honestly.
+	check("without activity at all, the raw busy bits still say running",
+		status({ activeSessionId: "a", isCompacting: true }) === "running");
+	check("without activity and nothing busy, it is idle", status({ activeSessionId: "a" }) === "idle");
+}
+
 // --- choosing a model to retry a refused compaction --------------------------
 // Name-free on purpose: a refusal is one model's verdict on one thread, so the
 // only thing checkable up front is whether a candidate could hold the thread.

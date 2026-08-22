@@ -393,11 +393,13 @@ hostMessage({
 });
 check("subagents strip visible with children", !!document.querySelector(".subagents-strip.visible"));
 const stripHeader = document.querySelector(".subagents-strip .subagents-header");
-check("strip header shows count", stripHeader && stripHeader.textContent.includes("Subagents (2)"), stripHeader?.textContent ?? "");
+check("strip header names each state, not one lumped total",
+	stripHeader && stripHeader.textContent.includes("Subagents (1 running · 1 idle)"), stripHeader?.textContent ?? "");
 stripHeader.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const rows = document.querySelectorAll(".subagents-strip .subagent-row");
 check("two subagent rows", rows.length === 2);
-check("active badge on streaming child", [...rows].some((r) => r.querySelector(".subagent-badge")?.textContent === "active"));
+check("a running child is badged with the same word the header counts",
+	[...rows].some((r) => r.querySelector(".subagent-badge")?.textContent === "running"));
 posted.length = 0;
 [...rows].find((r) => r.textContent.includes("verify-threads")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("browse posts the host-issued child reference", posted.some((m) => m.type === "browseChild" && m.browseRef === "browse-verify-threads"));
@@ -419,7 +421,7 @@ check("back-row appears while viewing a child", !!backRow, document.querySelecto
 check("sibling section keeps every child of the parent", [...document.querySelectorAll(".subagents-list.siblings .subagent-row")].length === 2);
 const viewingRow = document.querySelector(".subagent-row.viewing");
 check("viewed child is highlighted", !!viewingRow && viewingRow.textContent.includes("verify-threads"), viewingRow?.textContent ?? "none");
-check("count does not drop on entering a child", document.querySelector(".subagents-header").textContent.includes("Subagents (2)"), document.querySelector(".subagents-header").textContent);
+check("count does not drop on entering a child", document.querySelector(".subagents-header").textContent.includes("Subagents (1 running · 1 idle)"), document.querySelector(".subagents-header").textContent);
 // historical (finished, non-resident) subagents: separate collapsed group, not counted as live
 hostMessage({
 	type: "sessionChildren",
@@ -430,7 +432,7 @@ hostMessage({
 	],
 	parent: { id: "019fd749-root", activeSessionId: "019fd749main", name: "parent-agent" },
 });
-check("header separates live from finished", document.querySelector(".subagents-header").textContent.includes("Subagents (1 live · 2 finished)"), document.querySelector(".subagents-header").textContent);
+check("header separates idle from finished", document.querySelector(".subagents-header").textContent.includes("Subagents (1 idle · 2 finished)"), document.querySelector(".subagents-header").textContent);
 check("live list holds only the resident subagent", document.querySelectorAll(".subagents-list:not(.historical) .subagent-row").length === 1);
 check("historical group is collapsed by default", !document.querySelector(".subagents-list.historical"));
 const histHead = document.querySelector(".subagents-subhead");
@@ -717,6 +719,75 @@ check("uiState title updates the header", document.querySelector(".session-title
 	document.querySelector(".session-title")?.textContent ?? "<none>");
 
 
+// --- the strip header tallies each state, and stays right as they change -----
+{
+	const kid = (id, status) => ({ id: `u-${id}`, activeSessionId: id, browseRef: `r-${id}`, name: id,
+		runtimeKind: "subagent", rlmDepth: 1, isStreaming: status === "running", status, attachedClients: 0 });
+	const headerText = () => document.querySelector(".subagents-strip .subagents-header")?.textContent ?? "";
+	const roster = (children) => hostMessage({ type: "sessionChildren", children });
+
+	roster([kid("h0000000001", "running"), kid("h0000000002", "running"), kid("h0000000003", "idle"), kid("h0000000004", "inactive")]);
+	check("every state is named with its own count", headerText().includes("Subagents (2 running · 1 idle · 1 finished)"), headerText());
+
+	roster([kid("h0000000001", "running"), kid("h0000000002", "running")]);
+	check("empty buckets are dropped, not printed as zero", headerText().includes("Subagents (2 running)"), headerText());
+
+	roster([kid("h0000000003", "idle")]);
+	check("an idle-only strip says idle, never live", headerText().includes("Subagents (1 idle)"), headerText());
+
+	roster([kid("h0000000004", "inactive"), kid("h0000000005", "inactive")]);
+	check("a finished-only strip counts them as finished", headerText().includes("Subagents (2 finished)"), headerText());
+
+	// The counts follow the roster in real time, including a child going quiet.
+	roster([kid("h0000000001", "running"), kid("h0000000003", "idle")]);
+	check("the tally follows a status change", headerText().includes("Subagents (1 running · 1 idle)"), headerText());
+	roster([kid("h0000000001", "inactive"), kid("h0000000003", "inactive")]);
+	check("a child finishing moves it out of the live counts", headerText().includes("Subagents (2 finished)"), headerText());
+
+	// The title spells all three out even when a bucket is empty, so hovering
+	// always answers "how many of each" without arithmetic.
+	check("the header title always states all three",
+		(document.querySelector(".subagents-strip .subagents-header")?.title ?? "").startsWith("0 running · 0 idle · 2 finished"),
+		document.querySelector(".subagents-strip .subagents-header")?.title);
+}
+
+// --- the usage line must not appear under a reply still being written --------
+// renderSnapshot repaints EVERY message as non-partial, so a snapshot arriving
+// mid-turn used to stamp a token/cost line under the live reply, which its next
+// delta removed again. A row growing and shrinking many times a second reads as
+// the whole transcript juddering.
+{
+	const live = {
+		role: "assistant", model: "kimi",
+		content: [{ type: "text", text: "still writing this" }],
+		usage: { totalTokens: 1234, cost: { total: 0.0021 } },
+	};
+	hostMessage({ type: "snapshot", messages: [{ role: "user", content: "go" }, live], state: null, status: baseStatus });
+	check("a snapshot of an unfinished reply shows no token line", !document.querySelector(".usage-line"),
+		document.querySelector(".usage-line")?.textContent);
+
+	// The same message still streaming: still nothing.
+	hostMessage({ type: "event", event: { type: "message_update", message: { ...live, content: [{ type: "text", text: "still writing this more" }] } } });
+	check("a delta on an unfinished reply shows no token line", !document.querySelector(".usage-line"));
+
+	// A second snapshot mid-flight — this is the exact flicker cycle.
+	hostMessage({ type: "snapshot", messages: [{ role: "user", content: "go" }, live], state: null, status: baseStatus });
+	check("a repeated mid-turn snapshot still shows no token line", !document.querySelector(".usage-line"));
+
+	// Finished: stopReason is the honest signal that the numbers are final.
+	const done = { ...live, stopReason: "stop" };
+	hostMessage({ type: "snapshot", messages: [{ role: "user", content: "go" }, done], state: null, status: baseStatus });
+	const usage = document.querySelector(".usage-line");
+	check("a finished reply does show its tokens and cost", !!usage && /1\.2k tokens/.test(usage.textContent) && usage.textContent.includes("$0.0021"),
+		usage?.textContent);
+
+	// A failed reply has no stopReason of its own but is equally final.
+	const failed = { role: "assistant", model: "kimi", content: [], errorMessage: "provider exploded" };
+	hostMessage({ type: "snapshot", messages: [{ role: "user", content: "go" }, failed], state: null, status: baseStatus });
+	check("a failed reply still reports why", /provider exploded/.test(document.querySelector(".usage-line")?.textContent ?? ""),
+		document.querySelector(".usage-line")?.textContent);
+}
+
 // --- auto-expanding the strip when a subagent starts -------------------------
 // The value is the moment work begins; every other rule here exists so it never
 // fights the operator. State is reset through New Chat, which is the one gesture
@@ -804,6 +875,19 @@ hostMessage({ type: "notice", level: "error", text: "Compaction failed: refused.
 	check("the notice retires once its action is taken",
 		![...document.querySelectorAll(".notice .notice-action")].some((b) => b.textContent === "Compact with Roomy"));
 }
+// Dismissing goes through the same retire path that gives the tail back, and
+// retiring something already gone must be harmless (auto-dismiss can race a click).
+{
+	hostMessage({ type: "notice", level: "warning", text: "dismiss me please" });
+	const note = [...document.querySelectorAll(".notice")].find((n) => n.textContent.includes("dismiss me please"));
+	check("a notice renders with a dismiss control", !!note?.querySelector(".notice-dismiss"));
+	note.querySelector(".notice-dismiss").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	check("dismissing removes the notice", !document.body.textContent.includes("dismiss me please"));
+	// Second click on the detached node: the guard must swallow it.
+	note.querySelector(".notice-dismiss").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	check("retiring an already-removed notice is harmless", !document.body.textContent.includes("dismiss me please"));
+}
+
 hostMessage({ type: "notice", level: "error", text: "Plain failure, nothing to offer." });
 check("a notice without an action renders no button",
 	[...document.querySelectorAll(".notice")].slice(-1)[0]?.querySelector(".notice-action") === null);

@@ -1118,7 +1118,16 @@ export class Transcript {
 				desired.push(block.root);
 			}
 		}
-		if (!isPartial) {
+		// The usage line belongs to a FINISHED message, and "not partial" is not the
+		// same claim. A snapshot repaint mid-turn re-renders the live message as
+		// non-partial, so the line was appearing under a reply that was still being
+		// written and vanishing again on its next delta — a row growing and
+		// shrinking under the operator many times a second, which reads as the
+		// whole transcript juddering. A message the agent has finished always
+		// carries a stopReason (or an errorMessage); one still being written never
+		// does, and that is the only honest signal for "the numbers are final".
+		const settled = Boolean(message.stopReason) || Boolean(message.errorMessage);
+		if (!isPartial && settled) {
 			this.priceUserTurn(message.usage);
 			const meta = this.usageLine(message as AssistantMessage);
 			if (meta) {

@@ -400,16 +400,23 @@ function renderSubagentsStrip(): void {
 		subagentsStrip.appendChild(back);
 	}
 
-	// Collapsible header (always a toggle).
+	// Collapsible header (always a toggle). It reports the SAME three states the
+	// rows below it use — the daemon's roster has exactly running, idle and
+	// inactive (classifySessionRosterStatus), so folding running and idle into one
+	// "live" number made the header disagree with the dots it was summarising.
+	// Zero buckets are dropped rather than printed, so a quiet strip stays quiet.
 	const header = el("button", "subagents-header") as HTMLButtonElement;
-	const countLabel =
-		historical.length === 0
-			? `${liveCount}`
-			: liveCount === 0
-				? `${historical.length} finished`
-				: `${liveCount} live · ${historical.length} finished`;
+	const tally = { running: 0, idle: 0, inactive: 0 };
+	for (const child of [...sessionChildren, ...siblings]) tally[childStatus(child)] += 1;
+	const countParts: string[] = [];
+	if (tally.running > 0) countParts.push(`${tally.running} running`);
+	if (tally.idle > 0) countParts.push(`${tally.idle} idle`);
+	if (tally.inactive > 0) countParts.push(`${tally.inactive} finished`);
+	const countLabel = countParts.join(" · ") || "0";
 	header.append(el("span", "subagents-caret", subagentsExpanded ? "▾" : "▸"), `Subagents (${countLabel})`);
-	header.title = "Subagents related to this session — click to expand, browse one to look inside";
+	header.title =
+		`${tally.running} running · ${tally.idle} idle · ${tally.inactive} finished — ` +
+		"click to expand, browse one to look inside";
 	header.addEventListener("click", () => {
 		subagentsExpanded = !subagentsExpanded;
 		// Collapsing by hand means "keep it shut"; opening by hand takes it back.
@@ -424,20 +431,23 @@ function renderSubagentsStrip(): void {
 		const row = el("button", `subagent-row${isSibling ? " sibling" : ""}`) as HTMLButtonElement;
 		const viewing = viewedId === child.activeSessionId;
 		const status = childStatus(child);
+		// One vocabulary for the whole strip: the header counts "running · idle ·
+		// finished", so a row must not call the same state something else. The dot
+		// keeps its existing class names, which the stylesheet is written against.
 		const dotClass = status === "running" ? "active" : status === "idle" ? "idle" : "done";
 		const dot = el("span", `subagent-dot ${dotClass}`);
 		dot.title =
 			status === "running"
 				? child.isStreaming
-					? "active (responding)"
-					: "active (working)"
+					? "running (responding)"
+					: "running (working)"
 				: status === "idle"
 					? "idle — resident, waiting for work"
-					: "finished — no longer running";
+					: "finished — no worker behind it";
 		const name = el("span", "subagent-name", child.name ?? child.id);
 		const badge =
 			status === "running"
-				? el("span", "subagent-badge", "active")
+				? el("span", "subagent-badge", "running")
 				: el("span", "subagent-badge idle", status === "idle" ? "idle" : "finished");
 		const suffix = el("span", "subagent-go", viewing ? "" : "view ›");
 		row.title = `${child.runtimeKind === "subagent" ? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : (child.runtimeKind ?? "session")}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
@@ -751,7 +761,7 @@ function addNotice(level: "info" | "warning" | "error", text: string, action?: {
 		run.addEventListener("click", () => {
 			run.disabled = true;
 			post({ type: "noticeAction", id: action.id });
-			note.remove();
+			retireNotice(note);
 		});
 		note.appendChild(run);
 	}
@@ -759,10 +769,22 @@ function addNotice(level: "info" | "warning" | "error", text: string, action?: {
 	dismiss.title = "Dismiss";
 	dismiss.setAttribute("aria-label", "Dismiss this notice");
 	dismiss.appendChild(icon("close", 11));
-	dismiss.addEventListener("click", () => note.remove());
+	dismiss.addEventListener("click", () => retireNotice(note));
 	note.appendChild(dismiss);
 	notices.appendChild(note);
-	if (level === "info") setTimeout(() => note.remove(), 9000);
+	// The stack is a sibling ABOVE the transcript, so every notice that arrives or
+	// leaves resizes the scroller. Re-pin for the same reason the subagents strip
+	// does: this only moves a reader who was already following the tail, and is a
+	// no-op for one parked mid-history.
+	transcript.scrollToBottom();
+	if (level === "info") setTimeout(() => retireNotice(note), 9000);
+}
+
+/** Remove a notice and give the tail back to whoever was following it. */
+function retireNotice(note: HTMLElement): void {
+	if (!note.isConnected) return;
+	note.remove();
+	transcript.scrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
