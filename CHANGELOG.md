@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.24]
+
 - A compacted thread no longer opens mid-conversation with nothing above it. When a session is compacted, the agent keeps only what survived — 84 messages of 12,257 on one real thread — and the single record of everything before is a `compactionSummary` entry. The transcript recognised four message roles and silently dropped anything else, so that record vanished and the thread appeared to begin abruptly, with no "load earlier" affordance because there was genuinely nothing earlier left to load. The boundary is now a row of its own: "Context compacted · 255.8k tokens summarized · 84 messages kept", collapsed by default, with the summary itself inside. This is the missing-button report; the button was right about the data it had, and the data was missing its beginning.
 - Agent-authored notes are shown instead of discarded. Messages a subagent sends back to its parent arrive as `custom` entries carrying their own `display` flag, and they were dropped by the same unknown-role path — so a subagent's reply never reached the transcript at all. They now render as a labelled note, and an entry the agent marked `display: false` still stays out.
 - Reading back through a long thread loads itself. Scrolling near the top pulls in the next batch with no click, and the row you are reading does not move while older ones arrive above it — measured in a real browser, the anchor row holds its exact offset across a load. The bar stays as the marker of where the rendered window starts and remains clickable, because a thread whose rows do not fill the viewport can never scroll to trigger anything.
@@ -280,7 +282,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.23...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.24...HEAD
+[1.0.24]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.23...v1.0.24
 [1.0.23]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.22...v1.0.23
 [1.0.22]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.21...v1.0.22
 [1.0.21]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.20...v1.0.21
