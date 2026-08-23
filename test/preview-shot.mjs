@@ -356,13 +356,20 @@ async function verifyLongThread(page, out = []) {
 	out.push(mk("a 1000-message thread renders only its tail", initial > 0 && initial <= 160, `${initial} rows for ${total} messages`));
 	out.push(mk(
 		"the untendered remainder is stated, not hidden",
-		(await page.$eval(".earlier-bar .earlier-count", (e) => e.textContent).catch(() => "")).includes("earlier"),
+		(await page.$eval(".earlier-bar .earlier-load", (e) => e.textContent).catch(() => "")).includes("earlier"),
+		await page.$eval(".earlier-bar .earlier-load", (e) => e.textContent).catch(() => "<none>"),
+	));
+	out.push(mk(
+		"the bar says the thread loads itself",
+		(await page.$eval(".earlier-bar .earlier-count", (e) => e.textContent).catch(() => "")).includes("scroll up"),
 		await page.$eval(".earlier-bar .earlier-count", (e) => e.textContent).catch(() => "<none>"),
 	));
 	out.push(mk("opens at the newest message", await page.$eval(".messages", (e) => e.scrollHeight - e.scrollTop - e.clientHeight <= 12)));
 
 	// Walk backwards: the rows already on screen must not move under the reader.
-	await page.$eval(".messages", (e) => { e.scrollTop = 0; });
+	// Reading back now loads by itself, so anchor from OUTSIDE the trigger margin
+	// first — parking at 0 up front would load a batch before anything is measured.
+	await page.$eval(".messages", (e) => { e.scrollTop = 900; });
 	await page.waitForTimeout(60);
 	const anchorText = await page.$eval(".messages > .row:not(.earlier-bar)", (e) => e.textContent.slice(0, 40)).catch(() => "");
 	// Offset of that row within the viewport BEFORE the load — the bar sits above
@@ -373,7 +380,13 @@ async function verifyLongThread(page, out = []) {
 		return Math.round(el.getBoundingClientRect().top - document.querySelector(".messages").getBoundingClientRect().top);
 	}, t);
 	const offsetBefore = await offsetOf(anchorText);
-	await page.click(".earlier-load");
+	// Anchoring is tested through the button, which loads WITHOUT moving the
+	// scroll — the only way to observe the load's effect on its own. Triggering it
+	// by scrolling would fold the scroll's own displacement into the measurement.
+	// $eval, not page.click: Playwright scrolls a target into view before clicking,
+	// and the bar sits at the very top — that scroll would trip the lazy load and
+	// fold its displacement into the measurement this check exists to take.
+	await page.$eval(".earlier-load", (e) => e.click());
 	await page.waitForTimeout(120);
 	const after = await rows();
 	out.push(mk("load earlier brings in the previous batch", after > initial, `${initial} -> ${after} rows`));
@@ -381,6 +394,14 @@ async function verifyLongThread(page, out = []) {
 	out.push(mk("the row you were reading stays put while earlier ones load above it",
 		offsetBefore !== null && offsetAfter !== null && Math.abs(offsetAfter - offsetBefore) <= 8,
 		`offset ${offsetBefore} -> ${offsetAfter}`));
+
+	// ...and reading back to the top brings the next batch in with no click at all.
+	const beforeLazy = await rows();
+	await page.$eval(".messages", (e) => { e.scrollTop = 0; });
+	await page.waitForTimeout(150);
+	const afterLazy = await rows();
+	out.push(mk("reading back to the top loads the next batch on its own", afterLazy > beforeLazy,
+		`${beforeLazy} -> ${afterLazy} rows`));
 
 	// A long-running session trims from the top, but only while parked at the tail.
 	await page.$eval(".messages", (e) => { e.scrollTop = e.scrollHeight; });

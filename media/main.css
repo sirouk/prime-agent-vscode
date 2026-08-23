@@ -2583,6 +2583,66 @@ body.vscode-light pre.term {
 }
 .install-dismiss:hover { color: var(--pa-text); background: var(--pa-raised); }
 
+/* ---------- compaction boundary + agent notes ---------- */
+/* The summary IS the earlier history on a compacted thread, so it opens as a
+   real row rather than a footnote — but collapsed, because it is long. */
+
+.compaction-summary {
+	margin: 8px 10px;
+	border: 1px solid var(--pa-border-faint, var(--pa-border));
+	border-radius: 6px;
+	background: color-mix(in srgb, transparent 70%, var(--pa-raised) 30%);
+	font-size: 11px;
+}
+
+.compaction-summary > summary {
+	cursor: pointer;
+	padding: 5px 9px;
+	color: var(--pa-dim);
+	list-style: none;
+}
+
+.compaction-summary > summary::-webkit-details-marker { display: none; }
+
+.compaction-summary > summary::before {
+	content: "▸ ";
+	color: var(--pa-faint);
+}
+
+.compaction-summary[open] > summary::before { content: "▾ "; }
+
+.compaction-summary > summary:hover { color: var(--pa-text); }
+
+.compaction-summary-body {
+	padding: 2px 10px 8px;
+	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
+	color: var(--pa-text);
+	overflow-x: auto;
+}
+
+.custom-note {
+	margin: 6px 10px;
+	padding: 5px 9px;
+	border-left: 2px solid var(--pa-accent-dim);
+	background: color-mix(in srgb, transparent 75%, var(--pa-raised) 25%);
+	border-radius: 0 4px 4px 0;
+	font-size: 11px;
+}
+
+.custom-note-kind {
+	color: var(--pa-faint);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	font-size: 9.5px;
+	margin-bottom: 2px;
+}
+
+.custom-note-body {
+	color: var(--pa-dim);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
 /* ---------- roster status mark for history rows ---------- */
 /* Three states, the same three the CLI names. Only the live one moves: a
    pulsing dot on every row would make a list of finished work look busy. */

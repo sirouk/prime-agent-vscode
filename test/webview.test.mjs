@@ -751,6 +751,37 @@ check("uiState title updates the header", document.querySelector(".session-title
 		document.querySelector(".subagents-strip .subagents-header")?.title);
 }
 
+// --- a compacted thread must not open mid-conversation ----------------------
+// After compaction get_messages returns only what survived (84 of 12,257 on a
+// real thread) and the single record of everything before is a compactionSummary
+// message. Dropping it as an unknown role left a long thread starting abruptly
+// with no "load earlier" affordance — because there is genuinely nothing earlier
+// in the agent's context; the rest lives in the session file.
+{
+	hostMessage({ type: "snapshot", state: null, status: baseStatus, messages: [
+		{ role: "compactionSummary", summary: "## Goal\n- keep the workbench provider-neutral", tokensBefore: 255756, retainedMessageCount: 84 },
+		{ role: "user", content: "carry on" },
+		{ role: "custom", customType: "agent_message", display: true, content: "[from child:auditor] finding: budgets drifted" },
+		{ role: "custom", customType: "internal_bookkeeping", display: false, content: "should never be shown" },
+	] });
+	const compaction = document.querySelector(".compaction-summary");
+	check("a compacted thread shows where it was compacted", !!compaction);
+	check("the boundary states what it replaced",
+		/255\.8k tokens summarized/.test(compaction?.querySelector("summary")?.textContent ?? "") &&
+		/84 messages kept/.test(compaction?.querySelector("summary")?.textContent ?? ""),
+		compaction?.querySelector("summary")?.textContent);
+	check("the summary text itself is reachable",
+		/provider-neutral/.test(compaction?.querySelector(".compaction-summary-body")?.textContent ?? ""));
+	check("it starts collapsed, since it is long", compaction && !compaction.open);
+
+	// Agent-authored notes — this is how a subagent's reply reaches the operator.
+	const notes = [...document.querySelectorAll(".custom-note")];
+	check("an agent message is shown, not dropped", notes.some((n) => n.textContent.includes("budgets drifted")),
+		JSON.stringify(notes.map((n) => n.textContent.slice(0, 40))));
+	check("its kind is labelled", notes.some((n) => n.querySelector(".custom-note-kind")?.textContent === "agent message"));
+	check("an entry marked display:false stays hidden", !document.body.textContent.includes("should never be shown"));
+}
+
 // --- the usage line must not appear under a reply still being written --------
 // renderSnapshot repaints EVERY message as non-partial, so a snapshot arriving
 // mid-turn used to stamp a token/cost line under the live reply, which its next

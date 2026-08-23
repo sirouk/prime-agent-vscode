@@ -59,8 +59,48 @@ for (let i = 0; i < 400; i += 1) {
 }
 hostMessage({ type: "snapshot", messages: snapshot, state: null, status });
 const scroller = document.querySelector(".messages");
-check("earlier bar reports the unrendered remainder", (document.querySelector(".earlier-count")?.textContent ?? "").includes("250"),
+check("earlier bar reports the unrendered remainder", (document.querySelector(".earlier-load")?.textContent ?? "").includes("250"),
+	document.querySelector(".earlier-load")?.textContent ?? "<none>");
+check("the bar says the thread loads itself as you scroll",
+	(document.querySelector(".earlier-count")?.textContent ?? "").includes("scroll up"),
 	document.querySelector(".earlier-count")?.textContent ?? "<none>");
+
+// --- scrolling back loads the next batch without a click ---------------------
+{
+	const rendered = () => document.querySelectorAll(".messages .row").length;
+	const before = rendered();
+	scroller.scrollTop = 5000;
+	scroller.dispatchEvent(new window.Event("scroll"));
+	check("scrolling in the middle of the thread loads nothing", rendered() === before, `${before} -> ${rendered()}`);
+
+	scroller.scrollTop = 0;
+	scroller.dispatchEvent(new window.Event("scroll"));
+	check("reaching the top pulls the next batch in on its own", rendered() > before, `${before} -> ${rendered()}`);
+	check("the remaining count comes down with it",
+		(document.querySelector(".earlier-load")?.textContent ?? "").includes("150"),
+		document.querySelector(".earlier-load")?.textContent ?? "<none>");
+
+	// Drain the rest; the bar retires when there is nothing left behind it.
+	for (let i = 0; i < 5 && document.querySelector(".earlier-load"); i += 1) {
+		scroller.scrollTop = 0;
+		scroller.dispatchEvent(new window.Event("scroll"));
+	}
+	check("the bar retires once the whole thread is rendered", !document.querySelector(".earlier-load"),
+		document.querySelector(".earlier-load")?.textContent ?? "<gone>");
+	check("a scroll with nothing left to load is harmless", (() => {
+		const n = rendered();
+		scroller.scrollTop = 0;
+		scroller.dispatchEvent(new window.Event("scroll"));
+		return rendered() === n;
+	})());
+
+	// Put the fixture back: draining the window above is exactly what the
+	// trimming checks below must NOT start from.
+	hostMessage({ type: "snapshot", messages: snapshot, state: null, status });
+	check("re-opening the thread restores the windowed view",
+		(document.querySelector(".earlier-load")?.textContent ?? "").includes("250"),
+		document.querySelector(".earlier-load")?.textContent ?? "<none>");
+}
 
 for (let i = 0; i < 700; i += 1) {
 	hostMessage({ type: "event", event: { type: "message_start", message: { role: "user", content: [{ type: "text", text: `NEW${i}` }] } } });

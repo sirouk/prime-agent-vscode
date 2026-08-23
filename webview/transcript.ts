@@ -87,12 +87,32 @@ export interface TranscriptDeps {
 	onOptimisticConfirmed?: (clientRequestId: string) => void;
 }
 
+/** prime-agent's compaction marker: the summary replaces everything before it. */
+interface CompactionSummaryMessage {
+	role: "compactionSummary";
+	summary?: string;
+	tokensBefore?: number;
+	retainedMessageCount?: number;
+	timestamp?: number;
+}
+
+/** An agent-authored entry (agent messages, notes) that carries its own display flag. */
+interface CustomDisplayMessage {
+	role: "custom";
+	customType?: string;
+	content?: string;
+	display?: boolean;
+	timestamp?: number;
+}
+
 /** Rows built on open. Enough to fill several screens without paying for the tail. */
 const INITIAL_RENDER = 150;
 /** How many older messages one "load earlier" click brings in. */
 const LOAD_BATCH = 100;
 /** Ceiling on rendered rows in a long-running session, and the level trimming targets. */
 const MAX_RENDERED_ROWS = 600;
+/** How close to the top counts as "reading back", and pulls the next batch in. */
+const LAZY_LOAD_MARGIN_PX = 400;
 /** Chips drawn in the expanded changed-files strip before it says "+N more". */
 const CHANGED_FILES_MAX = 40;
 const PRUNE_TO = 400;
@@ -334,6 +354,7 @@ export class Transcript {
 			// Our own snaps land exactly at the bottom, so this re-sticks correctly
 			// and needs no suppression: scrollToBottom only runs while already stuck.
 			this.setStick(this.atBottom());
+			this.maybeLoadEarlier();
 		}, { passive: true });
 	}
 
@@ -492,19 +513,44 @@ export class Transcript {
 		const bar = el("div", "earlier-bar");
 		const button = el("button", "earlier-load") as HTMLButtonElement;
 		const remaining = this.olderMessages.length;
-		button.textContent = `Load ${Math.min(LOAD_BATCH, remaining)} earlier message${Math.min(LOAD_BATCH, remaining) === 1 ? "" : "s"}`;
-		button.title = `${remaining} earlier message${remaining === 1 ? "" : "s"} in this thread are not rendered yet`;
+		// Scrolling up pulls these in on its own now, so the bar reads as a marker
+		// of where the rendered window starts rather than a chore. It stays
+		// clickable: a thread whose rows do not fill the viewport can never scroll.
+		button.textContent = `${remaining} earlier message${remaining === 1 ? "" : "s"}`;
+		button.title = `Keep scrolling up to load them, or click to bring in ${Math.min(LOAD_BATCH, remaining)} now`;
 		button.addEventListener("click", (event) => {
 			event.stopPropagation();
 			this.loadEarlier();
 		});
-		bar.append(button, el("span", "earlier-count", `${remaining} earlier`));
+		bar.append(button, el("span", "earlier-count", "scroll up to load"));
 		this.earlierBar = bar;
 		// Always the topmost row, which keeps it above the trimmed-gap marker: the
 		// messages this button loads are older than the rows that were trimmed.
 		this.scroller.insertBefore(bar, this.scroller.firstChild);
 		this.renderPrunedNotice();
 	}
+
+	/**
+	 * Pull in the next batch as the reader approaches the top, so scrolling back
+	 * through a long thread just works instead of stopping at a button.
+	 *
+	 * Self-limiting by construction: loadEarlier restores the reading position by
+	 * the exact height it just added, so scrollTop lands well clear of the margin
+	 * and the next scroll event cannot re-trigger. The flag only guards the
+	 * degenerate case of a batch that adds no height at all.
+	 */
+	private maybeLoadEarlier(): void {
+		if (this.loadingEarlier || this.olderMessages.length === 0) return;
+		if (this.scroller.scrollTop > LAZY_LOAD_MARGIN_PX) return;
+		this.loadingEarlier = true;
+		try {
+			this.loadEarlier();
+		} finally {
+			this.loadingEarlier = false;
+		}
+	}
+
+	private loadingEarlier = false;
 
 	/** Render the next batch of older messages above the current view, in place. */
 	loadEarlier(): void {
@@ -852,7 +898,51 @@ export class Transcript {
 		} else if (role === ("bashExecution" as string)) {
 			const m = message as unknown as { command?: string };
 			this.systemNote(`! ${m.command ?? "bash command"}`);
+		} else if (role === ("compactionSummary" as string)) {
+			this.place(this.buildCompactionSummary(message as unknown as CompactionSummaryMessage));
+			this.hasContent = true;
+		} else if (role === ("custom" as string)) {
+			const m = message as unknown as CustomDisplayMessage;
+			// `display: false` is the agent asking for this to stay out of the view.
+			if (m.display === false || !m.content?.trim()) return;
+			this.place(this.buildCustomNote(m));
+			this.hasContent = true;
 		}
+	}
+
+	/**
+	 * The compaction boundary, rendered as the thread's own beginning.
+	 *
+	 * A compacted session's `get_messages` returns only what survived — 84 of
+	 * 12,257 on a real thread — and the one record of everything before is this
+	 * message. Dropping it (which is what "role we do not know" used to mean) left
+	 * a long thread opening mid-conversation with nothing above it and no "load
+	 * earlier" affordance, because there genuinely is nothing earlier to load: the
+	 * rest lives in the session file, not in the agent's context.
+	 */
+	private buildCompactionSummary(message: CompactionSummaryMessage): HTMLElement {
+		const details = el("details", "compaction-summary") as HTMLDetailsElement;
+		const kept = message.retainedMessageCount;
+		const before = message.tokensBefore;
+		const bits = ["Context compacted"];
+		if (before != null) bits.push(`${formatNumber(before)} tokens summarized`);
+		if (kept != null) bits.push(`${formatNumber(kept)} message${kept === 1 ? "" : "s"} kept`);
+		const summary = el("summary", "", bits.join(" · "));
+		summary.title = "Everything before this point was replaced by this summary. The full transcript is still in the session file.";
+		const body = el("div", "compaction-summary-body");
+		renderMarkdown(message.summary ?? "", body, this.deps.onOpenLink);
+		details.append(summary, body);
+		return details;
+	}
+
+	/** An agent-authored note the agent asked to be shown — subagent replies land here. */
+	private buildCustomNote(message: CustomDisplayMessage): HTMLElement {
+		const note = el("div", "custom-note");
+		const label = el("div", "custom-note-kind", (message.customType ?? "note").replace(/_/g, " "));
+		const body = el("div", "custom-note-body");
+		body.textContent = message.content ?? "";
+		note.append(label, body);
+		return note;
 	}
 
 	private renderUserTextWithMentions(text: string): HTMLElement {
