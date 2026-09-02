@@ -201,7 +201,10 @@ const composerDeps = {
 		transcript.showOptimisticUserMessage(clientRequestId, text, images);
 		post({
 			type: "prompt",
-			payload: { text, images, selections, streamingBehavior: composer.streamingBehavior, clientRequestId },
+			// Stamp the thread this was typed in. The host refuses the send if that
+			// is no longer the thread it would deliver to, so a view that moved
+			// under the operator cannot put their words in another conversation.
+			payload: { text, images, selections, streamingBehavior: composer.streamingBehavior, clientRequestId, sessionId: authoritativeSessionId },
 		});
 	},
 	onStop: () => post({ type: "abort" }),

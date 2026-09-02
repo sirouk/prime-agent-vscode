@@ -893,6 +893,15 @@ export class SessionController implements vscode.Disposable {
 		}
 		const attached = this.attached;
 		if (attached) {
+			// The operator's words belong to the thread they were typed in. This is
+			// the identity buildStatus() published for this attachment, which is
+			// what the composer stamped onto the payload.
+			const attachedId = attached.sessionId ?? path.basename(attached.sessionPath, ".jsonl");
+			if (payload.sessionId && payload.sessionId !== attachedId) {
+				this.rejectPrompt(payload, "This was typed in a different session than the one now on screen — nothing was sent. Your text is back in the box.", reply);
+				this.pushStatus();
+				return;
+			}
 			let sidecar: DaemonSidecar;
 			try {
 				sidecar = await this.ensureSidecar();
@@ -929,7 +938,30 @@ export class SessionController implements vscode.Disposable {
 			this.rejectPrompt(payload, "Agent is unavailable.", reply);
 			return;
 		}
-		this.output.appendLine(`[prime-agent] prompt: streaming=${this.streaming} behavior=${payload.streamingBehavior}`);
+		// The RPC frame names no session: it lands on whichever thread the hidden
+		// child currently holds. Our cached `state` is not proof of that — a
+		// repaint that failed after switch_session leaves it naming the previous
+		// thread — so ask the child itself before putting words in its mouth.
+		if (payload.sessionId) {
+			let liveId: string | undefined;
+			try {
+				const liveRes = await client.request({ type: "get_state" }, 30_000);
+				if (!this.isCurrentRpcView(client, epoch)) return;
+				if (liveRes.success) {
+					const live = liveRes.data as RpcSessionState;
+					this.state = live;
+					liveId = live?.sessionId;
+				}
+			} catch {
+				// An unanswerable child fails the send below on its own terms.
+			}
+			if (liveId && liveId !== payload.sessionId) {
+				this.rejectPrompt(payload, "This was typed in a different session than this window now holds — nothing was sent. The view has been resynced; send it again to post it here.", reply);
+				void this.refreshSnapshot({});
+				return;
+			}
+		}
+		this.output.appendLine(`[prime-agent] prompt: session=${payload.sessionId ?? this.state?.sessionId ?? "?"} streaming=${this.streaming} behavior=${payload.streamingBehavior}`);
 		this.debugLog.append(`prompt entered: streaming=${this.streaming} behavior=${payload.streamingBehavior}`);
 
 		const text = this.composeMessageText(payload);

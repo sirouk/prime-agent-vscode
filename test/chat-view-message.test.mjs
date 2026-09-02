@@ -54,6 +54,14 @@ try {
 	prompt.payload.images[0].data = "Y2hhbmdlZA==";
 	assert.equal(parsedPrompt.payload.images[0].data, "aGVsbG8=", "parser must copy nested payload data");
 
+	// The thread a prompt was composed in travels with it: the host refuses to
+	// deliver words into a conversation other than the one they were typed in,
+	// so this stamp has to survive the parser — and be rejected when forged.
+	const stamped = parseWebviewMessage({ type: "prompt", payload: { ...prompt.payload, sessionId: "01a05fe1-944a-7365-87b0-747f31bc9cf4" } });
+	assert.equal(stamped.payload.sessionId, "01a05fe1-944a-7365-87b0-747f31bc9cf4", "composed-in thread must survive parsing");
+	assert.equal(parseWebviewMessage({ type: "prompt", payload: { ...prompt.payload, sessionId: "../../etc/passwd" } }), undefined);
+	assert.equal(parsedPrompt.payload.sessionId, undefined, "an unstamped prompt still parses (older webview build)");
+
 	assert.equal(parseWebviewMessage(null), undefined);
 	assert.equal(parseWebviewMessage({ type: "unknown" }), undefined);
 	assert.equal(parseWebviewMessage({ type: "prompt", payload: { ...prompt.payload, images: [{ data: "not base64", mimeType: "image/png" }] } }), undefined);

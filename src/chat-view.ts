@@ -282,12 +282,14 @@ function parsePromptPayload(value: unknown): PromptPayload | undefined {
 
 	if (value.text.length === 0 && images.length === 0 && selections.length === 0) return undefined;
 	if (value.clientRequestId !== undefined && !isIdentifier(value.clientRequestId)) return undefined;
+	if (value.sessionId !== undefined && !isIdentifier(value.sessionId)) return undefined;
 	return {
 		text: value.text,
 		images,
 		selections,
 		streamingBehavior: value.streamingBehavior,
 		...(value.clientRequestId === undefined ? {} : { clientRequestId: value.clientRequestId }),
+		...(value.sessionId === undefined ? {} : { sessionId: value.sessionId }),
 	};
 }
 

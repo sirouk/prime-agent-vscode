@@ -218,7 +218,7 @@
     "typecheck": "tsc --noEmit",
     "package": "node esbuild.config.mjs --production && npx @vscode/vsce package --no-dependencies",
     "smoke": "node test/smoke.mjs",
-    "test": "node test/activate.test.mjs && node test/chat-view-message.test.mjs && node test/session-controller-boundary.test.mjs && node test/attach-lifecycle.test.mjs && node test/session-actions.test.mjs && node test/webview.test.mjs && node test/transcript-window.test.mjs && node test/thread-diffs.test.mjs && node test/export-md.test.mjs && node test/recent-sessions-tail.test.mjs && node test/roster-parity.test.mjs && node test/transport-regression.test.mjs && node test/owner-visibility.test.mjs",
+    "test": "node test/activate.test.mjs && node test/chat-view-message.test.mjs && node test/session-controller-boundary.test.mjs && node test/attach-lifecycle.test.mjs && node test/session-actions.test.mjs && node test/webview.test.mjs && node test/transcript-window.test.mjs && node test/thread-diffs.test.mjs && node test/export-md.test.mjs && node test/recent-sessions-tail.test.mjs && node test/roster-parity.test.mjs && node test/crosswire.test.mjs && node test/transport-regression.test.mjs && node test/owner-visibility.test.mjs",
     "test:live": "node esbuild.config.mjs && node test/daemon-parity.mjs --require-daemon && node test/owned-roster.mjs --require-daemon && node test/host-e2e.mjs && node test/smoke.mjs",
     "test:e2e": "node test/vscode-e2e.mjs",
     "test:shots": "node test/preview-shot.mjs",

@@ -250,6 +250,14 @@ export interface PromptPayload {
 	streamingBehavior: "steer" | "followUp";
 	/** Correlates an optimistic webview row with its eventual transport verdict. */
 	clientRequestId?: string;
+	/**
+	 * The thread this text was composed in, as the host last published it.
+	 * The host refuses to deliver a prompt whose thread is no longer the one it
+	 * would send to: the RPC path addresses no session on the wire (it lands on
+	 * whatever session the hidden child currently holds), so without this stamp
+	 * a view that moved between typing and Enter delivers into another thread.
+	 */
+	sessionId?: string;
 }
 
 export type WebviewToHost =
