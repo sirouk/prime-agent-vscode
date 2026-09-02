@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.28]
+
 - **Oversized image attachments are resized instead of bricking the session.** The provider's 10 MB ceiling is measured on the base64 payload, but the attach-time caps were measured on decoded bytes — so a 7.5-8 MB image was accepted, guaranteed to 400 on every request, and since the transcript is replayed on every send, one such image made the whole thread unanswerable with no way to take it back. Images over budget are now resized on attach (PNG first, then JPEG, shrinking toward the resolution the provider shows the model anyway), with a hint saying so; anything that still will not fit is refused up front with a clear message instead of silently vanishing or poisoning history. The hard ceilings themselves were also recalibrated to sit under the real wire ceiling with headroom (new `webview/image-fit.ts`, budget math pinned by unit tests against the incident dimensions).
 
 ## [1.0.27]
@@ -301,7 +303,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.27...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.28...HEAD
+[1.0.28]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.27...v1.0.28
 [1.0.27]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.26...v1.0.27
 [1.0.26]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.25...v1.0.26
 [1.0.25]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.24...v1.0.25
