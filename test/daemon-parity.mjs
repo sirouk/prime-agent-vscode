@@ -24,7 +24,7 @@
  * no gate).
  * Hard watchdog: the process exits well inside 3 minutes regardless.
  *
- * Model selection: DAEMON_PARITY_MODEL (default "chutes/zai-org/GLM-4.7";
+ * Model selection: DAEMON_PARITY_MODEL (default "chutes/zai-org/GLM-5.2-TEE";
  * set to "" to always use the daemon's default model). If the requested
  * model fails provider-side (stopReason "error" / exhausted auto-retries),
  * the harness retries once on a fresh resident session WITHOUT a model
@@ -41,7 +41,7 @@ import { createRequire } from "node:module";
 
 const PROMPT_TEXT = "Reply with exactly: PARITY-OK";
 const EXPECTED_TEXT = "PARITY-OK";
-const REQUESTED_MODEL = process.env.DAEMON_PARITY_MODEL ?? "chutes/zai-org/GLM-4.7";
+const REQUESTED_MODEL = process.env.DAEMON_PARITY_MODEL ?? "chutes/zai-org/GLM-5.2-TEE";
 const CONNECT_TIMEOUT_MS = 8_000;
 const CREATE_TIMEOUT_MS = 45_000;
 const TURN_DEADLINE_MS = 90_000;
