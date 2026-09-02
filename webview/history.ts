@@ -196,11 +196,13 @@ export class HistoryView {
 		const status = session.status ?? (session.running ? "running" : "inactive");
 		const mark = el("span", `running-mark ${status}`) as HTMLElement;
 		mark.title =
-			status === "running"
-				? "Running right now"
-				: status === "idle"
-					? "Idle — loaded and waiting for work"
-					: "Inactive — not loaded; resuming it starts a worker";
+			session.statusLabel != null
+				? `${status === "running" ? "Running" : status === "idle" ? "Idle" : "Inactive"} — flagged by the daemon as ${session.statusLabel}`
+				: status === "running"
+					? "Running right now"
+					: status === "idle"
+						? "Idle — loaded and waiting for work"
+						: "Inactive — not loaded; resuming it starts a worker";
 		mark.appendChild(el("span", "running-dot"));
 		resume.appendChild(mark);
 		const actions = el("div", "history-actions");

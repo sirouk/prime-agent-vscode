@@ -32,6 +32,31 @@ export interface DaemonHello {
 	schemaRevision?: number;
 	appVersion?: string;
 	clientId?: string;
+	/**
+	 * Feature flags the daemon held at handshake time (prime-agent.daemon rev 25+
+	 * advertises "agent_roster" for roster push, "direct_peer_transport", ...).
+	 * Feature OFFER lives here; never gate anything on the version number —
+	 * meetsDaemonCommandCompatibility in the daemon checks capabilities, not revisions.
+	 */
+	serverCapabilities?: readonly string[];
+}
+
+/**
+ * One row of the daemon's pushed agent roster (`roster_update`, rev 24+).
+ * `summary` is the same SessionSummary minus streamingMessage/sessionActions/
+ * diagnostics; the entry-level `status`/`statusLabel` are the shared classifier's
+ * verdicts (classifyAgentStatus) and must win over any local recomputation.
+ */
+export interface RosterEntry {
+	agentId: string;
+	queuedChild?: true;
+	seededCwd?: true;
+	summary?: SessionSummaryRef;
+	status?: "running" | "idle" | "inactive";
+	statusLabel?: "queued" | "recovering" | "failed";
+	lastHeardAt?: string;
+	lastHeardFromAt?: string;
+	workerId?: string;
 }
 
 export interface SessionSummaryRef {
@@ -46,6 +71,20 @@ export interface SessionSummaryRef {
 	parentActiveSessionId?: string;
 	attachedClients?: number;
 	isStreaming?: boolean;
+	runtimeKind?: string;
+	parentSessionId?: string;
+	spawnCode?: string;
+	/**
+	 * The daemon's own classifier verdict (prime-agent v0.9+, classifyAgentStatus):
+	 * queuedChild→running; no worker→inactive; busy∨heartbeat→running; else idle.
+	 * When present this is authoritative — re-deriving it client-side is exactly
+	 * how the strip used to disagree with the CLI.
+	 */
+	rosterStatus?: string;
+	/** Exceptional overlay: "queued" | "recovering" | "failed". Only set off-nominal. */
+	statusLabel?: string;
+	workerState?: string;
+	lastHeardFromAt?: string;
 	/** "live" | "draft" | "archived" — the CLI's roster shows only "live". */
 	lifecycle?: string;
 	/** > 0 marks a subagent; those belong under their parent, not in history. */
@@ -107,6 +146,12 @@ export type DaemonServerMessage = Record<string, unknown> & {
 	activeSessionId?: string;
 	event?: Record<string, unknown>;
 	meta?: { generation?: number; sequence?: number; cursor?: string };
+	/** roster_update payload (rev 24+, capability "agent_roster"). */
+	changed?: RosterEntry[];
+	removed?: string[];
+	resync?: true;
+	/** daemon_closing payload: "shutdown" | "update". */
+	reason?: string;
 };
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
@@ -435,6 +480,31 @@ export class DaemonSidecar {
 				reject(error instanceof Error ? error : new Error(String(error)));
 			}
 		});
+	}
+
+	/** Whether the connected daemon offered a server capability at handshake. */
+	hasServerCapability(name: string): boolean {
+		return this.hello?.serverCapabilities?.includes(name) === true;
+	}
+
+	/**
+	 * Subscribe to the agent roster (rev 24+, capability "agent_roster"). The
+	 * immediate reply carries the full snapshot; deltas then arrive as pushed
+	 * `roster_update` events on onEvent. The subscription dies with the socket,
+	 * so hosts must re-issue it after every reconnect. Callers should feature-detect
+	 * with hasServerCapability() first — an older daemon errors the command.
+	 */
+	async rosterSubscribe(): Promise<RosterEntry[]> {
+		const data = await this.request<{ roster?: RosterEntry[] } | undefined>({ type: "roster_subscribe" }, 20_000);
+		return data?.roster ?? [];
+	}
+
+	async rosterUnsubscribe(): Promise<void> {
+		try {
+			await this.request({ type: "roster_unsubscribe" }, 15_000);
+		} catch {
+			// An older daemon or a dying socket need no unsubscribe ceremony.
+		}
 	}
 
 	async list(all = false, options: { includeClientOwned?: boolean } = {}): Promise<SessionSummaryRef[]> {

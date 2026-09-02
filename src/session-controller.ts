@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { DaemonSidecar } from "./daemon-sidecar.js";
 import { resolveOwnerClientId } from "./daemon-owner.js";
-import type { AttachSnapshot, DaemonServerMessage, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
+import type { AttachSnapshot, DaemonServerMessage, RosterEntry, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
 import type {
 	AgentEvent,
 	AgentMessage,
@@ -155,6 +155,27 @@ export class SessionController implements vscode.Disposable {
 	private attachAttempt: AttachRef | null = null;
 	/** View generation that owned the reconnect attempt. */
 	private attachAttemptEpoch: number | null = null;
+	/**
+	 * The last daemon attach failure message. attachViaDaemon swallows the error
+	 * into a boolean; the switch path keeps the text so a recovering worker
+	 * (v0.9+ blocks attach until recovery resolves) is queued for retry instead
+	 * of demoted to the read-only observe fallback.
+	 */
+	private lastDaemonAttachError: string | null = null;
+	/** Canonical 12-char attach handle the failing attach targeted (for the retry). */
+	private lastDaemonAttachCanonicalId: string | null = null;
+	/**
+	 * Why the daemon is about to close our sidecar socket (its `daemon_closing`
+	 * broadcast). "update" means the ladder should re-attach by itself; "shutdown"
+	 * means the ladder must stop and the own-RPC view takes over.
+	 */
+	private daemonClosingReason: "update" | "shutdown" | null = null;
+	/**
+	 * The sidecar instance that currently holds a roster subscription (rev 24+,
+	 * capability "agent_roster"). Tracked per instance because a socket drop or
+	 * an owner swap kills the daemon-side subscription with the connection.
+	 */
+	private rosterSubscribedSidecar: DaemonSidecar | null = null;
 	/** Breadcrumbs for nested subagent browsing; each Back returns exactly one level. */
 	private returnTargets: Array<{ kind: "rpc" } | ({ kind: "attached" } & AttachRef)> = [];
 	private rentedState: RpcSessionState | null = null;
@@ -1871,8 +1892,10 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/**
-	 * The roster status, mirroring daemon-session-list.ts classifySessionRosterStatus
-	 * term for term:
+	 * The roster status. prime-agent v0.9+ publishes the answer on the row
+	 * (`rosterStatus`, from its shared classifyAgentStatus) — trust it. Older
+	 * daemons get the legacy fallback below, mirroring the pre-v0.9
+	 * classifySessionRosterStatus term for term:
 	 *
 	 *   no activeSessionId                                  -> "inactive"
 	 *   hasActiveHeartbeat | activity "working" | busy       -> "running"
@@ -1891,6 +1914,15 @@ export class SessionController implements vscode.Disposable {
 	 * "running": nothing is executing yet, and the CLI does not count it either.
 	 */
 	private static rosterStatus(s: SessionSummaryRef): "running" | "idle" | "inactive" {
+		// prime-agent v0.9 ranks the row itself: rosterStatus is the verdict of the
+		// shared classifier the CLI's agents view also reads (classifyAgentStatus),
+		// which counts queued children as running and does NOT count a bare lease
+		// or running-children as work of this session. Taking it verbatim is how
+		// this view, the strip, and the CLI stop disagreeing about the same row.
+		const advertised = s.rosterStatus;
+		if (advertised === "running" || advertised === "idle" || advertised === "inactive") return advertised;
+		// Fallback for pre-v0.9 daemons that never name a status: the hand-rolled
+		// mirror of the old CLI classifier.
 		if (!s.activeSessionId) return "inactive";
 		if (s.hasActiveHeartbeat || s.activity === "working" || s.isSessionActive || s.hasRunningRlmChildren) return "running";
 		if (s.activity === undefined && (s.isStreaming || s.isCompacting || s.isBashRunning)) return "running";
@@ -1943,6 +1975,7 @@ export class SessionController implements vscode.Disposable {
 				inWorkspace,
 				running: SessionController.isRunningSummary(s),
 				status: SessionController.rosterStatus(s),
+				...(s.statusLabel ? { statusLabel: s.statusLabel } : {}),
 			});
 		}
 		const activityOf = (s: RecentSession): number => {
@@ -2347,6 +2380,23 @@ export class SessionController implements vscode.Disposable {
 				this.returnTargets = [];
 				return;
 			}
+			if (SessionController.isTransientWorkerAttachError(this.lastDaemonAttachError ?? "")) {
+				// v0.9+: the daemon made attach wait on worker recovery, then told
+				// us the wait was interrupted and to retry. Queue the retry on the
+				// same ladder a socket drop uses — demoting to the read-only
+				// observe fallback would outlive the recovery it reacted to.
+				const canonical = this.lastDaemonAttachCanonicalId ?? id;
+				this.attachAttempt = { activeSessionId: canonical, sessionPath, sessionId: id };
+				this.attachAttemptEpoch = epoch;
+				this.scheduleReattach(0);
+				this.broadcast({
+					type: "notice",
+					level: "info",
+					text: "That session's worker is still recovering — the view will attach automatically when it is ready.",
+				});
+				this.restoreAttachedView(previousAttachment, epoch);
+				return;
+			}
 			const observed = await this.startObserving(id, previousAttachment, epoch, sessionPath, observedAtStart);
 			if (this.disposed || epoch !== this.viewEpoch) return;
 			if (observed) return;
@@ -2434,6 +2484,13 @@ export class SessionController implements vscode.Disposable {
 			this.sidecar.onEvent = (message) => this.onDaemonEvent(message);
 			this.sidecar.onAnyLine = (byteLength) => this.debugLog.append(`sidecar-line bytes=${byteLength}`);
 			this.sidecar.onClose = () => {
+				// A roster subscription dies with its connection; ensureSidecar must
+				// offer it again after every reconnect.
+				this.rosterSubscribedSidecar = null;
+				// `daemon_closing` told us WHY the socket is about to go: an update
+				// wants the re-attach ladder, a real shutdown does not.
+				const closing = this.daemonClosingReason;
+				this.daemonClosingReason = null;
 				if (this.attached) {
 					const attachment = this.attached;
 					const attachmentEpoch = this.attachedEpoch;
@@ -2443,10 +2500,30 @@ export class SessionController implements vscode.Disposable {
 					// below a lie: prompts would still land but no events would return.
 					this.attached = null;
 					this.attachedEpoch = null;
+					if (closing === "shutdown") {
+						// No supervisor comes back for this socket: the ladder would chase
+						// a dead daemon forever. Hand the view back to our own RPC session
+						// exactly as the session_closed path does.
+						this.attachAttempt = null;
+						this.attachAttemptEpoch = null;
+						this.clearReattachTimer();
+						this.clearRunFlags();
+						this.observationRestoring = true;
+						const epoch = ++this.viewEpoch;
+						this.pushStatus();
+						void this.restoreAfterObservationClosed(epoch);
+						return;
+					}
 					if (attachmentEpoch === this.viewEpoch) {
 						this.attachAttempt = { ...attachment };
 						this.attachAttemptEpoch = attachmentEpoch;
-						this.broadcast({ type: "notice", level: "warning", text: "Daemon connection dropped — re-attaching when it comes back." });
+						this.broadcast({
+							type: "notice",
+							level: "warning",
+							text: closing === "update"
+								? "The daemon restarted for its update — re-attaching now."
+								: "Daemon connection dropped — re-attaching when it comes back.",
+						});
 					} else {
 						this.attachAttempt = null;
 						this.attachAttemptEpoch = null;
@@ -2473,6 +2550,10 @@ export class SessionController implements vscode.Disposable {
 		if (!this.sidecar.connected) {
 			await this.sidecar.connect();
 		}
+		// Roster push is per-connection: offer it again after every (re)connect.
+		// Capability-detected, so a pre-v0.9 daemon declines and the pull model
+		// below keeps working untouched.
+		await this.setupRosterSubscription(this.sidecar);
 		// Seamless re-attach after a drop: pick up exactly where the user was.
 		// Serialized like connect(): two callers arriving while the socket was down
 		// would otherwise both issue `attach` for the same handle, and the loser
@@ -2545,7 +2626,22 @@ export class SessionController implements vscode.Disposable {
 				level: "info",
 				text: "Re-attached to the live session.",
 			});
-		} catch {
+		} catch (err) {
+			const transient = SessionController.isTransientWorkerAttachError(err instanceof Error ? err.message : String(err));
+			if (
+				transient &&
+				!this.disposed &&
+				this.attachAttempt === attempt &&
+				this.attachAttemptEpoch === attemptEpoch &&
+				this.viewEpoch === attemptEpoch &&
+				this.attached === null
+			) {
+				// The worker is still recovering; keep the attempt so the ladder
+				// retries instead of ending the view over a transient the daemon
+				// itself flagged as retryable.
+				this.scheduleReattach(0);
+				return;
+			}
 			// keep the attempt saved? user closed it in the meantime — drop
 			if (
 				!this.disposed &&
@@ -2665,6 +2761,7 @@ export class SessionController implements vscode.Disposable {
 	 * The daemon brokers it; both clients see the same stream, both can prompt.
 	 */
 	private async attachViaDaemon(activeSessionId: string, sessionPath: string, epoch = this.beginNavigation()): Promise<boolean> {
+		this.lastDaemonAttachError = null;
 		try {
 			const sidecar = await this.ensureSidecar({ reattach: false });
 			// Resolve the canonical activeSessionId: root-session uuids and 12-char
@@ -2684,6 +2781,7 @@ export class SessionController implements vscode.Disposable {
 			}
 			await this.waitForDaemonDetach(canonicalId);
 			if (this.disposed || epoch !== this.viewEpoch) return false;
+			this.lastDaemonAttachCanonicalId = canonicalId;
 			const result = await sidecar.attach(canonicalId);
 			if (this.disposed || epoch !== this.viewEpoch) {
 				try {
@@ -2746,9 +2844,23 @@ export class SessionController implements vscode.Disposable {
 			this.applyAttachedSnapshot(snapshot);
 			return true;
 		} catch (error) {
+			this.lastDaemonAttachError = error instanceof Error ? error.message : String(error);
 			this.output.appendLine(`[prime-agent] daemon attach failed: ${String(error)}`);
 			return false;
 		}
+	}
+
+	/**
+	 * prime-agent v0.9 blocks create/attach while a worker recovers instead of
+	 * answering fast (ee8fd6996). The failures it then raises are transient by
+	 * contract — the daemon tells the caller to retry — so they must NOT demote
+	 * the view to the read-only observe fallback or the read-only wall sticks
+	 * for the life of the window.
+	 */
+	private static isTransientWorkerAttachError(message: string): boolean {
+		return /worker recovery was interrupted|retry opening the session|worker is (stopping|starting|recovering|unavailable|not connected)|registered to a failed worker|recovery was interrupted/i.test(
+			message,
+		);
 	}
 
 	/**
@@ -2878,6 +2990,7 @@ export class SessionController implements vscode.Disposable {
 	 */
 	private releaseOwnerIdentity(): void {
 		this.ownerIdCache = null;
+		this.rosterSubscribedSidecar = null;
 		if (!this.sidecar?.impersonateClientId) return;
 		this.sidecar.dispose();
 		this.sidecar = null;
@@ -3006,6 +3119,7 @@ export class SessionController implements vscode.Disposable {
 					// rosterStatus. A subagent with no worker behind it is "inactive",
 					// which for a child means finished.
 					status: SessionController.rosterStatus(c),
+					...(c.statusLabel ? { statusLabel: c.statusLabel } : {}),
 					attachedClients: c.attachedClients ?? 0,
 				};
 			};
@@ -3210,6 +3324,18 @@ export class SessionController implements vscode.Disposable {
 	/** Route daemon events for the attached session into the normal pipeline. */
 	private onDaemonEvent(message: DaemonServerMessage): void {
 		this.debugLog.append(`daemon-event: type=${message.type} sid=${String(message.activeSessionId).slice(0, 20)}${this.attached ? ` attached=${this.attached.activeSessionId.slice(0, 20)}` : " no-attach"}`);
+		// Global frames first: neither carries an activeSessionId, and both must
+		// be honored even when no session is attached (the daemon announces its
+		// own close on the bare connection, and roster push drives history + the
+		// subagents strip for the whole window).
+		if (message.type === "daemon_closing") {
+			this.onDaemonClosing(message.reason);
+			return;
+		}
+		if (message.type === "roster_update") {
+			this.onRosterUpdate(message);
+			return;
+		}
 		const attached = this.attached;
 		if (!attached || !this.isCurrentAttachment(attached)) return;
 		const msgSessionId = message.activeSessionId;
@@ -3254,6 +3380,57 @@ export class SessionController implements vscode.Disposable {
 				this.pushStatus();
 				void this.restoreAfterObservationClosed(epoch);
 			}
+	}
+
+	/**
+	 * The daemon is about to close every client socket (its own shutdown, or a
+	 * self-update cutover). Announced BEFORE the EOF so "the view will come back"
+	 * and "the daemon went away" stop being the same mystery to the operator, and
+	 * so the close handler knows whether a reconnect ladder is even wanted.
+	 */
+	private onDaemonClosing(reason: string | undefined): void {
+		const closing = reason === "update" ? "update" : "shutdown";
+		this.daemonClosingReason = closing;
+		this.broadcast({
+			type: "notice",
+			level: "info",
+			text:
+				closing === "update"
+					? "The prime-agent daemon is updating — the view will re-attach automatically when it is back."
+					: "The prime-agent daemon is shutting down.",
+		});
+	}
+
+	/**
+	 * Roster push (rev 24+, capability "agent_roster"): subagent/history state
+	 * changed, so refresh from the ledger-served list at change cadence instead of
+	 * agent-event cadence. `resync:true` marks a wholesale replacement; both are
+	 * handled by the same throttled re-read, and the strip/history fingerprints
+	 * suppress the paint when nothing visible moved.
+	 */
+	private onRosterUpdate(_message: DaemonServerMessage): void {
+		this.scheduleHistoryRefresh();
+		this.scheduleChildrenRefresh();
+	}
+
+	/**
+	 * Subscribe this sidecar to agent-roster push when the daemon offers it.
+	 * Fire-and-forget safe: a refusal (older daemon, mid-update) just leaves the
+	 * host on the pull model it already has, and a later reconnect tries again.
+	 */
+	private async setupRosterSubscription(sidecar: DaemonSidecar): Promise<void> {
+		if (this.rosterSubscribedSidecar === sidecar) return;
+		this.rosterSubscribedSidecar = null;
+		// Older sidecar fakes (tests) and any pre-capability daemon lack the probe
+		// entirely — treat both as "push not offered, pull model continues".
+		if (!sidecar.connected || typeof sidecar.hasServerCapability !== "function" || !sidecar.hasServerCapability("agent_roster")) return;
+		try {
+			await sidecar.rosterSubscribe();
+			this.rosterSubscribedSidecar = sidecar;
+			this.debugLog.append(`roster: subscribed (schemaRevision ${sidecar.hello?.schemaRevision ?? "?"})`);
+		} catch (err) {
+			this.debugLog.append(`roster: subscribe failed (pull model continues): ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	private async refreshAttachedState(): Promise<void> {

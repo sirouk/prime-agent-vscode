@@ -175,6 +175,8 @@ export interface SessionChild {
 	 * (a resident subagent between turns reports exactly the same bit).
 	 */
 	status?: "running" | "idle" | "inactive";
+	/** Exceptional off-nominal state the daemon flags: "queued" | "recovering" | "failed". */
+	statusLabel?: string;
 	attachedClients?: number;
 }
 
@@ -341,6 +343,8 @@ export interface RecentSession {
 	 * stays for the controls that only care whether there is a run to stop.
 	 */
 	status?: "running" | "idle" | "inactive";
+	/** Exceptional off-nominal state the daemon flags: "queued" | "recovering" | "failed". */
+	statusLabel?: string;
 	name?: string;
 	firstPrompt?: string;
 	inWorkspace: boolean;

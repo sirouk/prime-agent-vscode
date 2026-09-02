@@ -437,18 +437,31 @@ function renderSubagentsStrip(): void {
 		const dotClass = status === "running" ? "active" : status === "idle" ? "idle" : "done";
 		const dot = el("span", `subagent-dot ${dotClass}`);
 		dot.title =
-			status === "running"
-				? child.isStreaming
-					? "running (responding)"
-					: "running (working)"
-				: status === "idle"
-					? "idle — resident, waiting for work"
-					: "finished — no worker behind it";
+			child.statusLabel != null
+				? `${child.statusLabel} — flagged by the daemon: ${
+						child.statusLabel === "queued"
+							? "spawn accepted, worker not started yet"
+							: child.statusLabel === "recovering"
+								? "worker went quiet past the staleness threshold and is being recovered"
+								: "worker failed; waiting for a client with fresh runtime context"
+					}`
+				: status === "running"
+					? child.isStreaming
+						? "running (responding)"
+						: "running (working)"
+					: status === "idle"
+						? "idle — resident, waiting for work"
+						: "finished — no worker behind it";
 		const name = el("span", "subagent-name", child.name ?? child.id);
+		// An off-nominal daemon label (queued/recovering/failed) means exactly what
+		// it says and outranks the coarse running/idle/finished bucket. It is the
+		// same label the CLI's agents view prints, so the strip stops soft
+		// describing a stuck worker as merely "idle".
+		const badgeText = child.statusLabel ?? (status === "running" ? "running" : status === "idle" ? "idle" : "finished");
 		const badge =
-			status === "running"
-				? el("span", "subagent-badge", "running")
-				: el("span", "subagent-badge idle", status === "idle" ? "idle" : "finished");
+			status === "running" && !child.statusLabel
+				? el("span", "subagent-badge", badgeText)
+				: el("span", `subagent-badge idle${child.statusLabel ? " labeled" : ""}`, badgeText);
 		const suffix = el("span", "subagent-go", viewing ? "" : "view ›");
 		row.title = `${child.runtimeKind === "subagent" ? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : (child.runtimeKind ?? "session")}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
 		if (viewing) {
