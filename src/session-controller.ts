@@ -2382,17 +2382,32 @@ export class SessionController implements vscode.Disposable {
 			}
 			if (SessionController.isTransientWorkerAttachError(this.lastDaemonAttachError ?? "")) {
 				// v0.9+: the daemon made attach wait on worker recovery, then told
-				// us the wait was interrupted and to retry. Queue the retry on the
-				// same ladder a socket drop uses — demoting to the read-only
-				// observe fallback would outlive the recovery it reacted to.
-				const canonical = this.lastDaemonAttachCanonicalId ?? id;
-				this.attachAttempt = { activeSessionId: canonical, sessionPath, sessionId: id };
-				this.attachAttemptEpoch = epoch;
-				this.scheduleReattach(0);
+				// us the wait was interrupted and to retry. From a plain own-RPC
+				// view the retry rides the same ladder a socket drop uses —
+				// demoting to the read-only observe fallback would outlive the
+				// recovery it reacted to. That ladder is built for
+				// attached === null only: queued from an attached view it could
+				// never arm (isReattaching() stays false), and from an observing
+				// view a successful re-attach would be rolled back as stale —
+				// an attach/rollback loop. Those keep their current view; the
+				// worker settles in seconds and a fresh click lands normally.
+				if (this.attached === null && this.observingId === null && !this.observationRestoring) {
+					const canonical = this.lastDaemonAttachCanonicalId ?? id;
+					this.attachAttempt = { activeSessionId: canonical, sessionPath, sessionId: id };
+					this.attachAttemptEpoch = epoch;
+					this.scheduleReattach(0);
+					this.broadcast({
+						type: "notice",
+						level: "info",
+						text: "That session's worker is still recovering — the view will attach automatically when it is ready.",
+					});
+					this.pushStatus();
+					return;
+				}
 				this.broadcast({
 					type: "notice",
 					level: "info",
-					text: "That session's worker is still recovering — the view will attach automatically when it is ready.",
+					text: "That session's worker is still recovering — try again in a moment.",
 				});
 				this.restoreAttachedView(previousAttachment, epoch);
 				return;
@@ -2483,69 +2498,7 @@ export class SessionController implements vscode.Disposable {
 			this.sidecar.impersonateClientId = owner ?? null;
 			this.sidecar.onEvent = (message) => this.onDaemonEvent(message);
 			this.sidecar.onAnyLine = (byteLength) => this.debugLog.append(`sidecar-line bytes=${byteLength}`);
-			this.sidecar.onClose = () => {
-				// A roster subscription dies with its connection; ensureSidecar must
-				// offer it again after every reconnect.
-				this.rosterSubscribedSidecar = null;
-				// `daemon_closing` told us WHY the socket is about to go: an update
-				// wants the re-attach ladder, a real shutdown does not.
-				const closing = this.daemonClosingReason;
-				this.daemonClosingReason = null;
-				if (this.attached) {
-					const attachment = this.attached;
-					const attachmentEpoch = this.attachedEpoch;
-					// The daemon dropped our attach registration with the socket, so we
-					// are NOT following this session any more. Leaving `attached` set
-					// makes the re-attach guard below permanently false and the notice
-					// below a lie: prompts would still land but no events would return.
-					this.attached = null;
-					this.attachedEpoch = null;
-					if (closing === "shutdown") {
-						// No supervisor comes back for this socket: the ladder would chase
-						// a dead daemon forever. Hand the view back to our own RPC session
-						// exactly as the session_closed path does.
-						this.attachAttempt = null;
-						this.attachAttemptEpoch = null;
-						this.clearReattachTimer();
-						this.clearRunFlags();
-						this.observationRestoring = true;
-						const epoch = ++this.viewEpoch;
-						this.pushStatus();
-						void this.restoreAfterObservationClosed(epoch);
-						return;
-					}
-					if (attachmentEpoch === this.viewEpoch) {
-						this.attachAttempt = { ...attachment };
-						this.attachAttemptEpoch = attachmentEpoch;
-						this.broadcast({
-							type: "notice",
-							level: "warning",
-							text: closing === "update"
-								? "The daemon restarted for its update — re-attaching now."
-								: "Daemon connection dropped — re-attaching when it comes back.",
-						});
-					} else {
-						this.attachAttempt = null;
-						this.attachAttemptEpoch = null;
-						// A newer explicit navigation owns the display. Keep it
-						// non-interactive until that navigation either completes or
-						// restores an authoritative RPC snapshot.
-						this.observationRestoring = true;
-						// ...but that navigation may itself be blocked on the socket
-						// that just died. Nothing else would ever clear the lock, so
-						// fall back to this window's own session after a grace period.
-						const restoreEpoch = this.viewEpoch;
-						const settle = setTimeout(() => {
-							if (this.disposed || restoreEpoch !== this.viewEpoch) return;
-							if (this.attached || this.observingId || !this.observationRestoring) return;
-							void this.restoreAfterObservationClosed(restoreEpoch);
-						}, 2_000);
-						settle.unref?.();
-					}
-					this.pushStatus();
-					if (attachmentEpoch === this.viewEpoch) this.scheduleReattach(0);
-				}
-			};
+			this.sidecar.onClose = () => this.onSidecarClosed();
 		}
 		if (!this.sidecar.connected) {
 			await this.sidecar.connect();
@@ -2569,6 +2522,95 @@ export class SessionController implements vscode.Disposable {
 			await this.reattaching;
 		}
 		return this.sidecar;
+	}
+
+	/**
+	 * The daemon connection died. Decide — from the daemon_closing reason the
+	 * supervisor may have announced first — whether the view rides the
+	 * re-attach ladder or goes home to this window's own RPC session.
+	 * Extracted from the socket callback so the lifecycle is testable
+	 * without a live socket.
+	 */
+	private onSidecarClosed(): void {
+		// A roster subscription dies with its connection; ensureSidecar must
+		// offer it again after every reconnect.
+		this.rosterSubscribedSidecar = null;
+		// `daemon_closing` told us WHY the socket is about to go: an update
+		// wants the re-attach ladder, a real shutdown does not.
+		const closing = this.daemonClosingReason;
+		this.daemonClosingReason = null;
+		if (this.attached) {
+			const attachment = this.attached;
+			const attachmentEpoch = this.attachedEpoch;
+			// The daemon dropped our attach registration with the socket, so we
+			// are NOT following this session any more. Leaving `attached` set
+			// makes the re-attach guard below permanently false and the notice
+			// below a lie: prompts would still land but no events would return.
+			this.attached = null;
+			this.attachedEpoch = null;
+			if (closing === "shutdown") {
+				// No supervisor comes back for this socket: the ladder would chase
+				// a dead daemon forever. Hand the view back to our own RPC session
+				// exactly as the session_closed path does.
+				this.attachAttempt = null;
+				this.attachAttemptEpoch = null;
+				this.clearReattachTimer();
+				this.clearRunFlags();
+				this.observationRestoring = true;
+				const epoch = ++this.viewEpoch;
+				this.pushStatus();
+				void this.restoreAfterObservationClosed(epoch);
+				return;
+			}
+			if (attachmentEpoch === this.viewEpoch) {
+				this.attachAttempt = { ...attachment };
+				this.attachAttemptEpoch = attachmentEpoch;
+				this.broadcast({
+					type: "notice",
+					level: "warning",
+					text: closing === "update"
+						? "The daemon restarted for its update — re-attaching now."
+						: "Daemon connection dropped — re-attaching when it comes back.",
+				});
+			} else {
+				this.attachAttempt = null;
+				this.attachAttemptEpoch = null;
+				// A newer explicit navigation owns the display. Keep it
+				// non-interactive until that navigation either completes or
+				// restores an authoritative RPC snapshot.
+				this.observationRestoring = true;
+				// ...but that navigation may itself be blocked on the socket
+				// that just died. Nothing else would ever clear the lock, so
+				// fall back to this window's own session after a grace period.
+				const restoreEpoch = this.viewEpoch;
+				const settle = setTimeout(() => {
+					if (this.disposed || restoreEpoch !== this.viewEpoch) return;
+					if (this.attached || this.observingId || !this.observationRestoring) return;
+					void this.restoreAfterObservationClosed(restoreEpoch);
+				}, 2_000);
+				settle.unref?.();
+			}
+			this.pushStatus();
+			if (attachmentEpoch === this.viewEpoch) this.scheduleReattach(0);
+		}
+		// Not attached, but a re-attach wait may be riding the ladder (a drop
+		// mid-ladder, or the queued wait for a recovering worker). A shutdown
+		// means no supervisor is coming back for that handle: stop the ladder
+		// and give the view back to this window's own session. An update (or a
+		// plain drop) keeps the ladder riding, exactly as before.
+		if (closing === "shutdown" && this.attachAttempt !== null) {
+			const attemptEpoch = this.attachAttemptEpoch;
+			this.attachAttempt = null;
+			this.attachAttemptEpoch = null;
+			this.clearReattachTimer();
+			if (attemptEpoch === this.viewEpoch) {
+				this.clearRunFlags();
+				this.observationRestoring = true;
+				const epoch = ++this.viewEpoch;
+				this.pushStatus();
+				void this.restoreAfterObservationClosed(epoch);
+			}
+		}
 	}
 
 	/** One re-attach attempt for the dropped view. Never run concurrently with itself. */
@@ -3391,12 +3433,18 @@ export class SessionController implements vscode.Disposable {
 	private onDaemonClosing(reason: string | undefined): void {
 		const closing = reason === "update" ? "update" : "shutdown";
 		this.daemonClosingReason = closing;
+		// Only promise a re-attach to a view that is actually following a daemon
+		// session; for a window on its own RPC session the daemon coming or going
+		// is background news.
+		const following = this.attached !== null || this.isReattaching();
 		this.broadcast({
 			type: "notice",
 			level: "info",
 			text:
 				closing === "update"
-					? "The prime-agent daemon is updating — the view will re-attach automatically when it is back."
+					? following
+						? "The prime-agent daemon is updating — the view will re-attach automatically when it is back."
+						: "The prime-agent daemon is updating — it will be back on its own."
 					: "The prime-agent daemon is shutting down.",
 		});
 	}

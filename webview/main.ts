@@ -443,7 +443,9 @@ function renderSubagentsStrip(): void {
 							? "spawn accepted, worker not started yet"
 							: child.statusLabel === "recovering"
 								? "worker went quiet past the staleness threshold and is being recovered"
-								: "worker failed; waiting for a client with fresh runtime context"
+								: child.statusLabel === "failed"
+									? "worker failed; waiting for a client with fresh runtime context"
+									: "an exceptional state this build does not know by name"
 					}`
 				: status === "running"
 					? child.isStreaming
