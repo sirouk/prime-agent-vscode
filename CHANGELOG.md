@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.25]
+
 - **prime-agent v0.9.1 parity — session status now means what the CLI means.** v0.9 replaced the CLI's local status formula with one shared daemon-side classifier and started publishing the verdict on every roster row (`rosterStatus`) plus an exceptional label (`statusLabel`: queued / recovering / failed). The extension still re-derived status with the old formula and — worst case — counted a merely leased session as "running" where the CLI said "idle". The verdict on the row is now trusted verbatim whenever a daemon publishes it, with the hand-rolled mirror kept only as the fallback for pre-v0.9 daemons. The new exceptional label renders in the subagents strip badge and history tooltips, so a recovering or failed worker is named instead of passing as quietly "idle".
 - **Daemon shutdowns and self-updates are announced, not mysterious.** v0.9 broadcasts `daemon_closing` before dropping every client socket, and the extension answered both cases the same blind way: re-attach forever. An update now says so up front ("The prime-agent daemon is updating — the view will re-attach automatically") and still rides the re-attach ladder back to the same session. A real shutdown stops the ladder entirely — no chasing a dead supervisor — and hands the view back to the extension's own session, the same way a session that was closed for us always did.
 - **Attaching to a session whose worker is still recovering queues instead of demoting.** v0.9 makes attach wait on worker recovery and can then fail with explicit *retry* errors ("worker recovery was interrupted; retry opening the session", "worker is stopping/recovering/starting"). The old answer treated any attach failure as permanent and parked the view in read-only observe until the operator clicked again, long after the worker came back. Retryable failures now ride the same backoff ladder a socket drop uses, with a notice explaining the view will attach when the worker is ready; "Unknown active session" and timeouts still take the observe path, and nothing auto-retries an attach whose outcome is uncertain.
@@ -287,7 +289,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.24...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.25...HEAD
+[1.0.25]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.24...v1.0.25
 [1.0.24]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.23...v1.0.24
 [1.0.23]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.22...v1.0.23
 [1.0.22]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.21...v1.0.22
