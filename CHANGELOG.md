@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.26]
+
 - **The recovering-worker wait now only queues where it can actually fire.** 1.0.25's queued auto-attach for a recovering worker rode machinery built for a disconnected view (`attached === null`); clicked from an *attached* view the queue could never arm — the notice promised an auto-attach that silently never happened — and from an *observing* view a successful re-attach would have been rolled back as stale, forever. Both now keep their current view with an honest "try again in a moment"; the plain own-session view keeps the working auto-attach ladder, and its status strip now reflects the wait immediately.
 - **A daemon shutdown mid-re-attach stops the ladder too.** The shutdown handling added in 1.0.25 restored the view when the socket died *while attached*, but a shutdown arriving while the ladder was still re-attaching (or waiting out a worker recovery) left the ladder chasing a daemon that was never coming back, every 30 seconds, forever. The close handler now abandons the wait on `reason: "shutdown"` and hands the view back to this window's own session; updates and plain drops keep riding the ladder exactly as before. The close handling moved out of the socket callback into `onSidecarClosed()` so all four reason×state combinations are pinned by unit tests.
 - A window sitting on its own session is no longer promised "the view will re-attach automatically" when the daemon announces an update — bystanders get the plain fact; only a view actually following a daemon session gets the re-attach promise. And a future daemon status label the strip does not know by name is described as exactly that, instead of inheriting the "worker failed" tooltip.
@@ -293,7 +295,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.25...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.26...HEAD
+[1.0.26]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.25...v1.0.26
 [1.0.25]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.24...v1.0.25
 [1.0.24]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.23...v1.0.24
 [1.0.23]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.22...v1.0.23
