@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.27]
+
 - **A message can no longer be delivered to a thread other than the one it was typed in.** Prompts travel two ways: the attached path names its session on the wire, but the own-session path names *no* session — it lands on whichever thread the hidden agent process currently holds. Those normally agree. They stop agreeing when the view moves between typing and Enter: after a session switch whose repaint fails, the panel still shows the previous thread while the process has already moved, and the host's own cached idea of "which session" is stale in exactly the same way — so it cannot be used to check itself. The composer now stamps every prompt with the thread it was composed in, and the host refuses to deliver it anywhere else: the own-session path asks the agent process which session it actually holds rather than trusting its cache, and the attached path checks the stamp against the live attachment. A refused send is never lost — the text and its attachments come straight back to the box, the view resyncs to the thread it really holds, and the notice says plainly that nothing was sent. Prompts from an older webview build (no stamp) are delivered exactly as before.
 
 ## [1.0.26]
@@ -297,7 +299,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.26...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.27...HEAD
+[1.0.27]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.26...v1.0.27
 [1.0.26]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.25...v1.0.26
 [1.0.25]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.24...v1.0.25
 [1.0.24]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.23...v1.0.24
