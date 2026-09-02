@@ -4055,7 +4055,10 @@ export class SessionController implements vscode.Disposable {
 			webp: "image/webp",
 		};
 		const MAX_IMAGES = 8;
-		const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+		// Matches webview/image-fit.ts: the provider ceiling is measured on the
+		// encoded payload, so the decoded cap must leave base64 headroom. The
+		// webview resizes anything over this before it ever reaches the wire.
+		const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 		const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
 		const images: ImageAttachment[] = [];
 		let totalBytes = 0;
@@ -4080,7 +4083,7 @@ export class SessionController implements vscode.Disposable {
 		}
 		if (!stillCurrent()) return;
 		if (uris.length > MAX_IMAGES || skippedOversized > 0) {
-			reply({ type: "notice", level: "warning", text: "Some images were skipped (maximum 8 images, 8 MiB each, 16 MiB total)." });
+			reply({ type: "notice", level: "warning", text: "Some images were skipped (maximum 8 images, 7 MiB each, 16 MiB total)." });
 		}
 		reply({ type: "imagePicked", requestId, images });
 	}

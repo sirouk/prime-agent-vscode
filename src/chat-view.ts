@@ -185,7 +185,9 @@ function wireWebview(webview: vscode.Webview, controller: SessionController): vs
 const MAX_PROMPT_TEXT_CHARS = 200_000;
 // Keep this transport envelope aligned with the image picker and composer.
 const MAX_PROMPT_IMAGES = 8;
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+// Matches webview/image-fit.ts MAX_DECODED_IMAGE_BYTES: 7 MiB decodes to
+// ~9.79 MB of base64, under the provider 's 10 MB ceiling-measured-on-the-wire.
+const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 const MAX_IMAGE_DATA_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_SELECTIONS = 16;

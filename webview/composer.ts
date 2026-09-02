@@ -4,6 +4,7 @@
  */
 
 import { Dropdown, type DropdownItem } from "./dropdown.js";
+import { fitImageDataUrl, MAX_DECODED_IMAGE_BYTES, planImageFit } from "./image-fit.js";
 import { el, icon, iconButton, svgIcon } from "./dom.js";
 import type { ImageAttachment, ModelRef, RpcModel, RpcSlashCommand, SelectionAttachment } from "../src/protocol.js";
 
@@ -12,7 +13,11 @@ const CARET_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", 
 /** Previous prompts kept for Up/Down recall. Deep enough for a long thread. */
 const PROMPT_HISTORY_MAX = 200;
 const MAX_IMAGES = 8;
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+// 7 MiB decoded ≈ 9.79 MB base64, under the provider's 10 MB wire ceiling
+// (measured on the encoded payload, not the file). A byte-level send cap this
+// low would just refuse screenshots, so oversized images are resized on
+// attach instead — see image-fit.js.
+const MAX_IMAGE_BYTES = MAX_DECODED_IMAGE_BYTES;
 const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
 
@@ -561,16 +566,46 @@ export class Composer {
 			this.showHint("Current model is text-only — switch to a vision model to attach images.");
 			return;
 		}
+		// Keep the fully synchronous accept path for everything the provider
+		// already accepts; only an image over the byte budget pays for the
+		// encoder's microtasks (and its canvas).
+		const oversized: ImageAttachment[] = [];
 		let totalBytes = this.images.reduce((total, image) => total + base64Bytes(image.data), 0);
 		let accepted = 0;
 		for (const image of images) {
+			if (planImageFit(base64Bytes(image.data)).action !== "send") {
+				oversized.push(image);
+				continue;
+			}
 			const bytes = base64Bytes(image.data);
 			if (this.images.length >= MAX_IMAGES || bytes > MAX_IMAGE_BYTES || totalBytes + bytes > MAX_TOTAL_IMAGE_BYTES) continue;
 			this.images.push(image);
 			totalBytes += bytes;
 			accepted += 1;
 		}
-		if (accepted < images.length) this.showHint("Some images were skipped (maximum 8 images, 8 MiB each, 16 MiB total).");
+		if (accepted < images.length - oversized.length) this.showHint("Some images were skipped (maximum 8 images, 7 MiB each after resizing, 16 MiB total).");
+		this.renderChips();
+		if (oversized.length > 0) void this.fitAndAppendOversized(oversized);
+	}
+
+	/** Shrink what the provider would refuse, then append under the normal budget. */
+	private async fitAndAppendOversized(oversized: ImageAttachment[]): Promise<void> {
+		let accepted = 0;
+		let resizedCount = 0;
+		let totalBytes = this.images.reduce((total, image) => total + base64Bytes(image.data), 0);
+		for (const raw of oversized) {
+			if (this.images.length >= MAX_IMAGES) break;
+			const fitted = await fitImageDataUrl({ data: raw.data, mimeType: raw.mimeType });
+			const candidate = fitted ?? raw;
+			const bytes = base64Bytes(candidate.data);
+			if (bytes > MAX_IMAGE_BYTES || totalBytes + bytes > MAX_TOTAL_IMAGE_BYTES) continue;
+			this.images.push({ ...candidate, name: raw.name });
+			if (fitted?.resized) resizedCount += 1;
+			totalBytes += bytes;
+			accepted += 1;
+		}
+		if (accepted < oversized.length) this.showHint("Some images were skipped (maximum 8 images, 7 MiB each after resizing, 16 MiB total).");
+		else this.showHint(resizedCount === 1 ? "Image resized to fit provider limits." : `${resizedCount} images resized to fit provider limits.`);
 		this.renderChips();
 	}
 
@@ -1147,27 +1182,34 @@ export class Composer {
 		const existingBytes = () => this.images.reduce((total, image) => total + base64Bytes(image.data), 0);
 		let skipped = files.length > MAX_IMAGES;
 		for (const file of files.slice(0, MAX_IMAGES)) {
-			if (file.size > MAX_IMAGE_BYTES || this.images.length >= MAX_IMAGES || existingBytes() + file.size > MAX_TOTAL_IMAGE_BYTES) {
+			// No byte pre-check on the raw file any more: oversized images are
+			// resized on read below (the provider's ceiling is measured on the
+			// encoded payload). Only the attachment- and total-budget counts
+			// still hard-stop here.
+			if (this.images.length >= MAX_IMAGES || existingBytes() + Math.min(file.size, MAX_IMAGE_BYTES) > MAX_TOTAL_IMAGE_BYTES) {
 				skipped = true;
 				continue;
 			}
 			const reader = new FileReader();
-			reader.onload = () => {
+			reader.onload = async () => {
 				const dataUrl = reader.result as string;
 				const [header, data] = dataUrl.split(",");
 				const mimeType = header.replace("data:", "").replace(";base64", "");
 				if (!SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) return;
-				const bytes = base64Bytes(data);
+				const fitted = planImageFit(base64Bytes(data)).action === "send" ? { data, mimeType, resized: false } : await fitImageDataUrl({ data, mimeType });
+				const candidate = fitted ?? { data, mimeType, resized: false };
+				const bytes = base64Bytes(candidate.data);
 				if (this.images.length >= MAX_IMAGES || bytes > MAX_IMAGE_BYTES || existingBytes() + bytes > MAX_TOTAL_IMAGE_BYTES) {
-					this.showHint("Some images were skipped (maximum 8 images, 8 MiB each, 16 MiB total).");
+					this.showHint("Some images were skipped (maximum 8 images, 7 MiB each after resizing, 16 MiB total).");
 					return;
 				}
-				this.images.push({ data, mimeType, name: file.name || "image" });
+				this.images.push({ data: candidate.data, mimeType: candidate.mimeType, name: file.name || "image" });
+				if (candidate.resized) this.showHint("Image resized to fit provider limits.");
 				this.renderChips();
 			};
 			reader.readAsDataURL(file);
 		}
-		if (skipped) this.showHint("Some images were skipped (maximum 8 images, 8 MiB each, 16 MiB total).");
+		if (skipped) this.showHint("Some images were skipped (maximum 8 images, 7 MiB each, 16 MiB total).");
 	}
 
 	// ---------------------------------------------------------------

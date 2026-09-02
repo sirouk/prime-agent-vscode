@@ -981,7 +981,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			break;
 		case "imagePicked":
 			if (!pendingImageRequests.delete(message.requestId)) break;
-			if (message.images.length > 0) composer.addImages(message.images);
+			if (message.images.length > 0) void composer.addImages(message.images);
 			break;
 		case "insertSelection":
 			composer.addSelection(message.selection);
