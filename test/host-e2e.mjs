@@ -30,7 +30,11 @@ const daemonSocket = process.env.HOST_E2E_DAEMON_SOCKET ?? path.join(workdir, "d
 // pre-spawned `--mode daemon` here looks like to it.
 let daemonProcess = null;
 process.env.PRIME_AGENT_DAEMON_SOCKET = daemonSocket;
-process.env.PRIME_AGENT_ARGS = `--session-dir ${path.join(workdir, "sessions")} --daemon-socket ${daemonSocket}`;
+// This gate verifies host wiring, not the operator's default-model provider.
+// Pin turns to a model that reliably answers (same policy as daemon-parity);
+// HOST_E2E_MODEL overrides, HOST_E2E_MODEL="" runs the configured default.
+const E2E_MODEL = process.env.HOST_E2E_MODEL ?? "chutes/zai-org/GLM-5.2-TEE";
+process.env.PRIME_AGENT_ARGS = `--session-dir ${path.join(workdir, "sessions")} --daemon-socket ${daemonSocket}${E2E_MODEL ? ` --model ${E2E_MODEL}` : ""}`;
 vscodeStub.workspace.workspaceFolders = [{ uri: { fsPath: workdir, scheme: "file" }, name: "e2e", index: 0 }];
 
 let failed = 0;
@@ -125,7 +129,7 @@ try {
 		const daemonSessionDir = path.join(workdir, "daemon-sessions");
 		fs.mkdirSync(daemonSessionDir, { recursive: true });
 		const createRes = await driver.request(
-			{ type: "create", lifecycle: "resident", name: residentName, config: { cwd: workdir, sessionDir: daemonSessionDir } },
+			{ type: "create", lifecycle: "resident", name: residentName, config: { cwd: workdir, sessionDir: daemonSessionDir, ...(E2E_MODEL ? { model: E2E_MODEL } : {}) } },
 			20_000,
 		);
 		check("resident session created for attach", createRes?.id != null, `id=${createRes?.id ?? "<none>"}`);

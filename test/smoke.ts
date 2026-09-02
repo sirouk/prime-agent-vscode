@@ -30,10 +30,21 @@ async function waitFor(predicate, timeoutMs, label) {
 
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-vs-ext-smoke-"));
 const sessionDir = path.join(workdir, "sessions");
+
+/**
+ * This gate verifies RPC wiring, not the operator's default-model provider.
+ * Pin the turn to a model that reliably answers (same policy as
+ * test/daemon-parity.mjs); SMOKE_MODEL overrides, SMOKE_MODEL="" runs the
+ * configured default model instead.
+ */
+function modelArgs() {
+	const model = process.env.SMOKE_MODEL ?? "chutes/zai-org/GLM-5.2-TEE";
+	return model ? ["--model", model] : [];
+}
 const client = new RpcClient({
 	command: process.env.PRIME_AGENT_COMMAND ?? "prime-agent",
 	cwd: workdir,
-	args: ["--session-dir", sessionDir],
+	args: ["--session-dir", sessionDir, ...modelArgs()],
 });
 
 const events = [];
@@ -108,7 +119,7 @@ try {
 	client.stop();
 	await new Promise((r) => setTimeout(r, 300));
 	check("process stops", !client.running);
-	const client2 = new RpcClient({ command: process.env.PRIME_AGENT_COMMAND ?? "prime-agent", cwd: workdir, args: ["--session-dir", sessionDir] });
+	const client2 = new RpcClient({ command: process.env.PRIME_AGENT_COMMAND ?? "prime-agent", cwd: workdir, args: ["--session-dir", sessionDir, ...modelArgs()] });
 	client2.start();
 	await new Promise((r) => setTimeout(r, 300));
 	const s3 = await client2.request({ type: "get_state" }, 30_000);
