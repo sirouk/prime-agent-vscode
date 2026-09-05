@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.30]
+
 - **"‹ parent" goes up, not back.** The subagents strip offers two kinds of row: children of the session on screen, and its siblings. Both were treated as a descent, so stepping from one subagent to a sibling pushed another breadcrumb — and the parent link, which is labelled and tooltipped as the way *up*, walked back through the siblings the operator had visited instead. A sibling shares its parent with the session you were just in, so the way up is unchanged and no breadcrumb is recorded; genuine descents (a child of the current view, including a spawn card) still record theirs, and the trail from a grandchild still lands on its own parent.
 
 ## [1.0.29]
@@ -312,7 +314,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.29...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.30...HEAD
+[1.0.30]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.29...v1.0.30
 [1.0.29]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.28...v1.0.29
 [1.0.28]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.27...v1.0.28
 [1.0.27]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.26...v1.0.27
