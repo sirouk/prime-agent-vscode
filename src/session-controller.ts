@@ -3369,22 +3369,33 @@ export class SessionController implements vscode.Disposable {
 			this.restoreAttachedView(previous, epoch);
 			return false;
 		}
+		// A descent pushes a breadcrumb; a lateral move must not.
+		//
+		// The strip offers exactly two kinds of row: children of the session on
+		// screen, and its siblings. Stepping to a sibling does not go anywhere
+		// deeper — B has the same parent A did — so the entry already on the stack
+		// is still the right way up, and pushing another made "‹ parent" walk back
+		// through the siblings the operator had visited instead of going up.
+		//
+		// From this window's own session there are no siblings, so every browsable
+		// row is a descent.
+		const descending = previous === null || capability.parentId === previous.activeSessionId;
 		// Install the breadcrumb before the target's final snapshot finishes. Back
 		// can then recover the parent if the user changes their mind mid-attach.
 		const breadcrumb = previous ? ({ kind: "attached", ...previous } as const) : ({ kind: "rpc" } as const);
-		this.returnTargets.push(breadcrumb);
+		if (descending) this.returnTargets.push(breadcrumb);
 		// Attach FIRST, let go second. Tearing the current session down up front
 		// meant a subagent the daemon can no longer rehydrate left the operator
 		// detached, with the strip and its "‹ parent" row destroyed and nothing
 		// left to click — the freeze reported in the build thread.
 		const attached = await this.attachViaDaemon(capability.activeSessionId, child.sessionFile ?? "", epoch);
 		if (this.disposed || epoch !== this.viewEpoch) {
-			if (this.returnTargets.at(-1) === breadcrumb) this.returnTargets.pop();
+			if (descending && this.returnTargets.at(-1) === breadcrumb) this.returnTargets.pop();
 			return false;
 		}
 		if (!attached) {
 			this.broadcast({ type: "notice", level: "error", text: "Could not attach to that subagent session (it may be gone)." });
-			if (this.returnTargets.at(-1) === breadcrumb) this.returnTargets.pop();
+			if (descending && this.returnTargets.at(-1) === breadcrumb) this.returnTargets.pop();
 			this.restoreAttachedView(previous, epoch);
 			this.scheduleChildrenRefresh();
 			return false;

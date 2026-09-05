@@ -315,6 +315,90 @@ controller.client = null;
 	controller.attached = null;
 }
 
+// --- "\u2039 parent" goes UP, not BACK ---------------------------------------
+// The strip offers children of the session on screen and its siblings. Stepping
+// to a sibling is a lateral move — B has the same parent A did — so it must not
+// deepen the trail. Pushing a breadcrumb there made "\u2039 parent" walk back
+// through the siblings the operator had visited instead of going up.
+{
+	posts.length = 0;
+	const originals = {
+		ensureSidecar: controller.ensureSidecar,
+		listSessions: controller.listSessions,
+		attachViaDaemon: controller.attachViaDaemon,
+		detachDaemonSession: controller.detachDaemonSession,
+		restoreOwnRpcView: controller.restoreOwnRpcView,
+		resetChildrenBaseline: controller.resetChildrenBaseline,
+		scheduleChildrenRefresh: controller.scheduleChildrenRefresh,
+	};
+	let restored = 0;
+	controller.sidecar = { connected: true, impersonateClientId: null, dispose() {} };
+	controller.ensureSidecar = async () => controller.sidecar;
+	// kid-a and kid-b are siblings under this window's own session; grand is a
+	// child of kid-b, so browsing into it is a genuine descent.
+	controller.listSessions = async () => [
+		{ activeSessionId: "kid-a", sessionFile: path.join(workdir, "kid-a.jsonl"), runtimeKind: "subagent", parentActiveSessionId: "root-handle" },
+		{ activeSessionId: "kid-b", sessionFile: path.join(workdir, "kid-b.jsonl"), runtimeKind: "subagent", parentActiveSessionId: "root-handle" },
+		{ activeSessionId: "grand", sessionFile: path.join(workdir, "grand.jsonl"), runtimeKind: "subagent", parentActiveSessionId: "kid-b" },
+	];
+	controller.attachViaDaemon = async (activeSessionId, sessionPath) => {
+		controller.attached = { activeSessionId, sessionPath, sessionId: activeSessionId };
+		controller.attachedEpoch = controller.viewEpoch;
+		return true;
+	};
+	controller.detachDaemonSession = async () => {};
+	controller.restoreOwnRpcView = async () => { restored += 1; return true; };
+	controller.resetChildrenBaseline = () => {};
+	controller.scheduleChildrenRefresh = () => {};
+
+	const offer = (ref, activeSessionId, parentId) => {
+		controller.browseableChildren.set(ref, { activeSessionId, parentId, contextId: controller.childrenContext });
+		return ref;
+	};
+	const trail = () => controller.returnTargets.map((t) => (t.kind === "rpc" ? "rpc" : t.activeSessionId));
+
+	controller.returnTargets = [];
+	controller.attached = null;
+	// The stubbed restore above never runs the real code that clears this, and a
+	// view still marked "restoring" refuses to browse at all.
+	controller.observationRestoring = false;
+
+	check("browsing into a subagent attaches to it", await controller.browseChild(offer("to-a", "kid-a", "root-handle")) && controller.attached?.activeSessionId === "kid-a",
+		JSON.stringify(controller.attached));
+	check("descending from the own session leaves one way back", JSON.stringify(trail()) === '["rpc"]', JSON.stringify(trail()));
+
+	check("stepping to a sibling attaches to it", await controller.browseChild(offer("to-b", "kid-b", "root-handle")) && controller.attached?.activeSessionId === "kid-b",
+		JSON.stringify(controller.attached));
+	check("...and does NOT deepen the trail behind it", JSON.stringify(trail()) === '["rpc"]', JSON.stringify(trail()));
+
+	// The bug as reported: from the second subagent, up must reach the parent,
+	// not the sibling that was on screen a moment ago.
+	await controller.backToParent();
+	check("up from a sibling reaches the parent, not the previously viewed sibling",
+		controller.attached === null && restored === 1, `attached=${JSON.stringify(controller.attached)} restored=${restored}`);
+	check("and the trail is spent", JSON.stringify(trail()) === "[]", JSON.stringify(trail()));
+
+	// A real descent still records its own way back.
+	controller.returnTargets = [];
+	controller.attached = null;
+	// beginRpcRestore() re-armed the restore lock that the stubbed restore never
+	// clears; the browse above would be refused again without this.
+	controller.observationRestoring = false;
+	await controller.browseChild(offer("to-b2", "kid-b", "root-handle"));
+	await controller.browseChild(offer("to-grand", "grand", "kid-b"));
+	check("a genuine descent still records the session it came from", JSON.stringify(trail()) === '["rpc","kid-b"]', JSON.stringify(trail()));
+	await controller.backToParent();
+	check("up from a grandchild lands on its own parent", controller.attached?.activeSessionId === "kid-b", JSON.stringify(controller.attached));
+	check("...and pops only that step", JSON.stringify(trail()) === '["rpc"]', JSON.stringify(trail()));
+
+	Object.assign(controller, originals);
+	controller.sidecar = null;
+	controller.attached = null;
+	controller.attachedEpoch = null;
+	controller.returnTargets = [];
+	controller.browseableChildren.clear();
+}
+
 // --- the install prompt points at the installer, not a repo doc page --------
 posts.length = 0;
 controller.maybeShowInstallPrompt("test reason");
