@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- **Opening a subagent lands on its newest message, and keeps following it.** The transcript is a flex child, so the subagents strip appearing beneath it cuts the scroller's height while `scrollTop` stays exactly where it was. No scroll event fires for that, so nothing noticed: the reader was left precisely the strip's height above the tail — 42px on landing, 72px once more subagents arrived — with the follow lock still claiming they were following, so not even the jump-to-latest pill was offered. Between turns nothing brought them back down. The scroller now re-pins whenever its viewport resizes, which covers the strip appearing or growing, returning to the parent, the composer growing, and the panel being dragged. It only ever re-pins a reader who was already at the bottom: someone who scrolled away is never dragged back, and still gets the pill. Pinned by browser measurements of all four cases.
+
 ## [1.0.30]
 
 - **"‹ parent" goes up, not back.** The subagents strip offers two kinds of row: children of the session on screen, and its siblings. Both were treated as a descent, so stepping from one subagent to a sibling pushed another breadcrumb — and the parent link, which is labelled and tooltipped as the way *up*, walked back through the siblings the operator had visited instead. A sibling shares its parent with the session you were just in, so the way up is unchanged and no breadcrumb is recorded; genuine descents (a child of the current view, including a spawn card) still record theirs, and the trail from a grandchild still lands on its own parent.

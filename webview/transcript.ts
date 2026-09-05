@@ -356,7 +356,26 @@ export class Transcript {
 			this.setStick(this.atBottom());
 			this.maybeLoadEarlier();
 		}, { passive: true });
+		// A viewport that SHRINKS moves the bottom without moving the reader.
+		//
+		// The scroller is a flex child, so the subagents strip appearing under it,
+		// the composer growing, or the panel being resized all cut its height while
+		// scrollTop stays put — and since scrollTop never changes, no scroll event
+		// fires and nothing notices. The reader is left exactly that many pixels
+		// above the newest output with the lock still claiming they are following,
+		// so not even the jump pill is offered. Landing in a subagent is where it
+		// bites: the strip gains a parent row and a sibling list in the same frame
+		// the thread is painted, and the tail lands just under the fold.
+		//
+		// Re-pin, never force: scrollToBottom() is a no-op for a reader who chose
+		// to scroll away, so a resize cannot drag anyone back down.
+		if (typeof ResizeObserver !== "undefined") {
+			this.viewportObserver = new ResizeObserver(() => this.scrollToBottom());
+			this.viewportObserver.observe(this.scroller);
+		}
 	}
+
+	private viewportObserver: ResizeObserver | null = null;
 
 	/**
 	 * Within a hair of the bottom. Deliberately tight: the old 48px deadzone meant

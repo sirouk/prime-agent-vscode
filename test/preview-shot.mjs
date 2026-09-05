@@ -383,6 +383,84 @@ async function verifyScrollFollow(page, out = []) {
 	const afterDismiss = await metrics();
 	out.push(mk("dismissing them does not move it either", afterDismiss.top === held.top, `top ${held.top} -> ${afterDismiss.top}`));
 	out.push(mk("dismiss actually removed them", (await page.$$(".notice")).length === 0));
+
+	// 9. A viewport that SHRINKS moves the bottom without moving the reader.
+	//    The scroller is a flex child, so the subagents strip appearing under it
+	//    cuts its height while scrollTop stays put — and because scrollTop never
+	//    changes, no scroll event fires and nothing notices. Landing in a subagent
+	//    left the reader exactly the strip's height above the newest output, with
+	//    the lock still claiming they were following, so not even the jump pill
+	//    was offered.
+	const thread = [];
+	for (let i = 0; i < 14; i += 1) {
+		thread.push({ role: "user", content: `Question ${i} in the thread.` });
+		thread.push({ role: "assistant", model: "k", stopReason: "stop", content: [{ type: "text", text: `Answer ${i}. ` + "Filler prose to give the transcript real height. ".repeat(5) }] });
+	}
+	const land = (sessionId) => page.evaluate(
+		({ messages, id }) => host({ type: "snapshot", messages, state: null, status: { ...baseStatus, sessionId: id }, steerDefault: "steer" }),
+		{ messages: thread, id: sessionId },
+	);
+	// The roster the host sends right after attaching to a subagent: a parent row
+	// to go back through, and the sibling list it sits in.
+	const insideSubagent = (siblingCount) => page.evaluate((count) => host({
+		type: "sessionChildren",
+		parent: { id: "p", activeSessionId: "root-1", name: "main agent", runtimeKind: "root" },
+		viewedActiveSessionId: "sub-1",
+		siblings: Array.from({ length: count }, (_, i) => ({
+			id: `s${i}`, activeSessionId: i === 0 ? "sub-1" : `sub-${i}`, browseRef: i === 0 ? undefined : `b${i}`,
+			name: `worker-${i}`, runtimeKind: "subagent", rlmDepth: 1, status: "idle", isStreaming: false,
+		})),
+		children: [],
+	}), siblingCount);
+
+	await land("sub-1");
+	await page.waitForTimeout(120);
+	const landed = await metrics();
+	out.push(mk("a freshly opened thread lands on its newest message", landed.max - landed.top <= 2, `gap=${landed.max - landed.top}`));
+	await insideSubagent(2);
+	await page.waitForTimeout(200);
+	const withStrip = await metrics();
+	const stripHeight = await page.$eval(".subagents-strip", (e) => Math.round(e.getBoundingClientRect().height)).catch(() => 0);
+	out.push(mk(
+		"the subagents strip appearing does not leave the tail under the fold",
+		withStrip.max - withStrip.top <= 2,
+		`gap=${withStrip.max - withStrip.top}, strip=${stripHeight}px`,
+	));
+
+	// The other direction is the one that must not regress: a reader who chose to
+	// scroll away stays where they are when the strip grows under them.
+	await page.hover(".messages");
+	await page.mouse.wheel(0, -300);
+	await page.waitForTimeout(80);
+	const scrolledAway = await metrics();
+	await page.evaluate(() => document.querySelector(".subagents-header")?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+	await page.waitForTimeout(200);
+	const grownUnder = await metrics();
+	out.push(mk(
+		"expanding the strip never drags a scrolled-away reader down",
+		grownUnder.top === scrolledAway.top && grownUnder.max > scrolledAway.max,
+		`top ${scrolledAway.top} -> ${grownUnder.top}, scrollable ${scrolledAway.max} -> ${grownUnder.max}`,
+	));
+	out.push(mk("...and the pill is still their way back", await page.$eval(".jump-to-latest", (e) => e.classList.contains("visible")).catch(() => false)));
+
+	// A subagent spawning grows the strip again; someone at the tail keeps it.
+	await page.click(".jump-to-latest");
+	await page.waitForTimeout(120);
+	await insideSubagent(6);
+	await page.waitForTimeout(200);
+	const spawned = await metrics();
+	out.push(mk("more subagents arriving keeps the tail in view", spawned.max - spawned.top <= 2, `gap=${spawned.max - spawned.top}`));
+
+	// Going back up: the strip changes shape again as the parent's own roster
+	// replaces the child's, and the landing must still be the newest message.
+	await land("root-1");
+	await page.waitForTimeout(120);
+	await page.evaluate(() => host({ type: "sessionChildren", viewedActiveSessionId: "root-1", children: [
+		{ id: "c1", activeSessionId: "sub-1", browseRef: "b1", name: "worker-1", runtimeKind: "subagent", rlmDepth: 1, status: "running", isStreaming: true },
+	] }));
+	await page.waitForTimeout(200);
+	const backUp = await metrics();
+	out.push(mk("returning to the parent lands on its newest message too", backUp.max - backUp.top <= 2, `gap=${backUp.max - backUp.top}`));
 	return out;
 }
 
