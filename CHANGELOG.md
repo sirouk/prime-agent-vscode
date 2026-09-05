@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.29]
+
 - **A fresh setup no longer fails with `spawn prime-agent ENOENT`.** The upstream installer is `npm install -g`, so the CLI lands in npm's global bin — a Homebrew prefix, an nvm version directory, or the installer's own bundled-node prefix — and the `PATH` entry for it is written into a shell profile. An editor launched from the Dock or Finder inherits the launchd `PATH` (`/etc/paths`), which contains none of those, so a perfectly good install could not be launched; and because `process.env.PATH` is fixed when the extension host starts, installing the CLI and pressing **Retry** — exactly what the install card told the operator to do — could never succeed either. Lookup now runs fresh on every start attempt and searches beyond the inherited `PATH`: the operator's real login-shell `PATH` (read through an interactive shell, since the installer writes its export to `~/.zshrc`, with a 5s budget and no way to hang a start), then the documented install locations. Whatever is found, its directory joins the agent's own `PATH`, so the `node` behind npm's `#!/usr/bin/env node` shim is reachable too. When nothing is found, the install card now names where it looked. A missing CLI also stops stacking one identical error toast per action — seventeen call sites reach the start path, and the screenshot that opened this bug had seven.
 - **A toast no longer pushes the thread out from under you.** Notices were a flow sibling above the transcript, so each one shortened the scroller by its own height — the tail moved away from a reader following it, and a held position moved too. Opening a subagent was the worst case, since the notice and the new thread arrive together and left the reader chasing the bottom. They now float over the top of the thread, dismissible as before, and the transcript never resizes (pinned by a browser measurement: `clientHeight` unchanged, scroll position untouched on both arrival and dismissal).
 - **A parent whose subagents are still working no longer reads as idle.** Its own turn really has ended, so every control keeps its honest meaning — but the status strip said plain "live" beside three running subagents, which looks like the run died. It now says how many are still working and shows the busy dot, repainted from the roster alone.
@@ -308,7 +310,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.28...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.29...HEAD
+[1.0.29]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.28...v1.0.29
 [1.0.28]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.27...v1.0.28
 [1.0.27]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.26...v1.0.27
 [1.0.26]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.25...v1.0.26
