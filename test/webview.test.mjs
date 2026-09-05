@@ -523,6 +523,34 @@ const tickReset = meter.querySelector(".context-tick");
 check("tick returns to the agent default", tickReset?.style.left === "94%" && !tickReset.className.includes("override"),
 	`${tickReset?.style.left ?? "<none>"} ${tickReset?.className ?? ""}`);
 check("reset keeps the popover open", flyout.className.includes("visible"), flyout.className);
+// An open flyout must survive a live run. Status pushes land several times a
+// second while the agent answers, and each one used to write the stored
+// percentage back over the slider — the handle snapped away mid-drag and the
+// setting could not be changed at all until the run finished.
+{
+	const tSliderLive = flyout.querySelector(".threshold-slider");
+	tSliderLive.value = "40";
+	tSliderLive.dispatchEvent(new window.Event("input", { bubbles: true }));
+	for (let i = 0; i < 5; i += 1) {
+		hostMessage({ type: "status", status: { ...baseStatus, streaming: true, compactThresholdPercent: 55, compactDefaultPercent: 94 } });
+	}
+	check("a stream of identical statuses leaves the operator's slider alone", tSliderLive.value === "40", tSliderLive.value);
+	check("...and the flyout stays open", flyout.className.includes("visible"), flyout.className);
+	// Committing hands the value to the host and releases the control.
+	posted.length = 0;
+	tSliderLive.dispatchEvent(new window.Event("change", { bubbles: true }));
+	check("committing the drag posts the operator's value", posted.some((m) => m.type === "setCompactThreshold" && m.percent === 40),
+		JSON.stringify(posted.slice(-2)));
+	// A genuinely new value, with nothing being dragged, still lands.
+	hostMessage({ type: "compactThreshold", percent: 65 });
+	check("a real change still repaints an idle open flyout", tSliderLive.value === "65", tSliderLive.value);
+	// Context numbers go missing on plenty of mid-stream pushes; that must not
+	// tear the gauge (and the flyout inside it) out from under the operator.
+	hostMessage({ type: "status", status: { ...baseStatus, contextPercent: null, contextTokens: null, contextWindow: undefined } });
+	check("a status with no context numbers leaves the open gauge up", meter.style.display !== "none", `display=${meter.style.display}`);
+	check("...and the flyout with it", flyout.className.includes("visible"), flyout.className);
+}
+
 flyout.closest(".context-meter")?.classList.remove("visible");
 document.body.click();
 // A later status without an agent default is a new session's truth, not an
@@ -922,6 +950,55 @@ hostMessage({ type: "notice", level: "error", text: "Compaction failed: refused.
 hostMessage({ type: "notice", level: "error", text: "Plain failure, nothing to offer." });
 check("a notice without an action renders no button",
 	[...document.querySelectorAll(".notice")].slice(-1)[0]?.querySelector(".notice-action") === null);
+
+// Toasts overlay the thread instead of sitting above it in flow. As a flow
+// sibling each one shortened the scroller by its own height, which pushed the
+// tail out from under a reader following it — worst when opening a subagent,
+// where the notice and the new thread arrive together.
+{
+	const dock = document.querySelector(".notices-dock");
+	check("the notice stack lives in its own dock", !!dock && dock.querySelector(".notices") !== null);
+	check("every notice renders inside that dock",
+		[...document.querySelectorAll(".notice")].every((note) => dock.contains(note)));
+	const children = [...document.querySelector("#app").children];
+	check("the dock sits above the views, so toasts land over the thread",
+		children.indexOf(dock) < children.indexOf(document.querySelector(".chat-view")));
+	check("the persistent banners stay above the dock, never covered by a toast",
+		children.indexOf(document.querySelector(".install-banner")) < children.indexOf(dock));
+}
+
+// --- a parent with working subagents is not idle ---------------------------
+// The parent's own turn really has ended, so `streaming` stays false and every
+// control keeps its honest meaning. Reading plain "live" beside working
+// subagents said the run had died when it had not.
+{
+	hostMessage({ type: "status", status: { ...baseStatus, streaming: false } });
+	hostMessage({ type: "sessionChildren", children: [
+		{ id: "w-1", activeSessionId: "dddd4444", name: "worker-one", runtimeKind: "subagent", rlmDepth: 1, status: "running", isStreaming: true, attachedClients: 0 },
+		{ id: "w-2", activeSessionId: "dddd4445", name: "worker-two", runtimeKind: "subagent", rlmDepth: 1, status: "idle", isStreaming: false, attachedClients: 0 },
+	] });
+	const label = document.querySelector(".live-label");
+	check("an idle parent reports the subagents still working for it",
+		label.textContent === "live · 1 subagent working", label.textContent);
+	check("...and the connection dot reads busy, not idle",
+		document.querySelector(".conn-dot").className.includes("busy"),
+		document.querySelector(".conn-dot").className);
+	// Plural, and repainted from the roster alone — no status push follows one.
+	hostMessage({ type: "sessionChildren", children: [
+		{ id: "w-1", activeSessionId: "dddd4444", name: "worker-one", runtimeKind: "subagent", rlmDepth: 1, status: "running", isStreaming: true, attachedClients: 0 },
+		{ id: "w-2", activeSessionId: "dddd4445", name: "worker-two", runtimeKind: "subagent", rlmDepth: 1, status: "running", isStreaming: true, attachedClients: 0 },
+	] });
+	check("the roster alone repaints the count", document.querySelector(".live-label").textContent === "live · 2 subagents working",
+		document.querySelector(".live-label").textContent);
+	// The parent's own run outranks the note: "running" already says it is working.
+	hostMessage({ type: "status", status: { ...baseStatus, streaming: true } });
+	check("a streaming parent still just says running", document.querySelector(".live-label").textContent === "running",
+		document.querySelector(".live-label").textContent);
+	hostMessage({ type: "status", status: { ...baseStatus, streaming: false } });
+	hostMessage({ type: "sessionChildren", children: [] });
+	check("no working subagents, no note", document.querySelector(".live-label").textContent === "live",
+		document.querySelector(".live-label").textContent);
+}
 
 // --- derived row label for an unnamed session ---
 // A first prompt is very often a pasted block. Rendered raw it arrives as one

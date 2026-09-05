@@ -190,31 +190,54 @@ button:focus-visible {
 
 /* ---------- notices ---------- */
 
+/* Zero-height dock: the toasts inside it are absolutely positioned, so the
+   transcript below never changes size when one arrives or leaves and a reader
+   following the tail is not pushed off it. */
+.notices-dock {
+	position: relative;
+	height: 0;
+	z-index: 40;
+}
+
 .notices {
+	position: absolute;
+	top: 0;
+	left: 0;
+	right: 0;
 	display: flex;
 	flex-direction: column;
+	gap: 4px;
+	padding: 6px 8px 0;
+	/* Only the toasts themselves take clicks; the gaps beside them belong to the
+	   thread underneath. */
+	pointer-events: none;
 }
 
 .notice {
+	pointer-events: auto;
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	gap: 8px;
 	padding: 7px 10px;
 	font-size: 11.5px;
-	border-bottom: 1px solid var(--pa-border);
+	border: 1px solid var(--pa-border);
+	border-radius: 6px;
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
 }
 
+/* Opaque, unlike the in-flow versions these replace: a translucent toast over a
+   live transcript is unreadable. */
 .notice.info {
-	background: var(--pa-accent-dim);
+	background: color-mix(in srgb, var(--pa-surface-2, var(--vscode-menu-background)) 84%, var(--pa-accent) 16%);
 }
 
 .notice.warning {
-	background: color-mix(in srgb, transparent 82%, var(--pa-warn) 18%);
+	background: color-mix(in srgb, var(--pa-surface-2, var(--vscode-menu-background)) 82%, var(--pa-warn) 18%);
 }
 
 .notice.error {
-	background: color-mix(in srgb, transparent 80%, var(--pa-error) 20%);
+	background: color-mix(in srgb, var(--pa-surface-2, var(--vscode-menu-background)) 80%, var(--pa-error) 20%);
 }
 
 .notice-action {

@@ -392,7 +392,10 @@ export class Composer {
 	// waiting for the next line of code added to this method.
 	setContext(percent: number | null | undefined, tokens: number | null | undefined, contextWindow: number | undefined): void {
 		if (percent == null || contextWindow == null) {
-			this.contextWrap.style.display = "none";
+			// Never pull the gauge out from under an open threshold flyout: the panel
+			// is a child of it, so one status push with no context numbers — routine
+			// mid-stream — would close the control the operator is using.
+			if (!this.thresholdFlyoutOpen()) this.contextWrap.style.display = "none";
 			return;
 		}
 		this.contextWindowCurrent = contextWindow ?? this.contextWindowCurrent;
@@ -411,6 +414,10 @@ export class Composer {
 	private compactDefaultPercent: number | null = null;
 	private thresholdFlyout: HTMLElement | null = null;
 	private contextTick: HTMLElement | null = null;
+	/** Signature of the state last painted into the flyout; see renderThresholdFlyout. */
+	private thresholdPainted: string | null = null;
+	/** True from grabbing the slider until the drag is committed or abandoned. */
+	private thresholdInteracting = false;
 
 	setCompactThreshold(percent: number | null, defaultPercent: number | null = null): void {
 		this.compactThreshold = percent;
@@ -459,15 +466,36 @@ export class Composer {
 		const offBtn = el("button", "threshold-reset") as HTMLButtonElement;
 		offBtn.title = "Reset to the agent default compaction";
 		offBtn.appendChild(icon("reset", 12));
+		// The drag owns the control from the moment it starts. "input" is the
+		// backstop: happy-dom and keyboard adjustment never send a pointer event.
+		const holdSlider = (): void => {
+			this.thresholdInteracting = true;
+		};
+		const releaseSlider = (): void => {
+			this.thresholdInteracting = false;
+		};
+		slider.addEventListener("pointerdown", holdSlider);
+		slider.addEventListener("pointerup", releaseSlider);
+		slider.addEventListener("pointercancel", releaseSlider);
+		slider.addEventListener("blur", releaseSlider);
 		slider.addEventListener("input", () => {
+			holdSlider();
 			valueEl.textContent = `${slider.value}%`;
 		});
 		slider.addEventListener("change", () => {
+			releaseSlider();
+			// Invite the repaint that the host's echo brings: a drag renders a bare
+			// "40%", and the settled panel wants the full title and token count. Only
+			// matters when the drag lands back on the value already painted, which
+			// would otherwise read as "nothing new" and leave the bare text standing.
+			this.thresholdPainted = null;
 			this.deps.onSetCompactThreshold(Number(slider.value));
 		});
 		const resetFlyoutToDefault = (): void => {
 			this.compactThreshold = null;
-			this.renderThresholdFlyout();
+			// The operator's own click, and it runs with the panel open, so this is
+			// exactly the case the open-flyout guard has to make an exception for.
+			this.renderThresholdFlyout(true);
 			this.renderContextTick();
 		};
 		offBtn.addEventListener("click", (event) => {
@@ -488,9 +516,33 @@ export class Composer {
 		return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${Math.round(n / 1_000)}k` : `${n}`;
 	}
 
-	private renderThresholdFlyout(): void {
+	private thresholdFlyoutOpen(): boolean {
+		return this.thresholdFlyout?.classList.contains("visible") ?? false;
+	}
+
+	/**
+	 * Paint host state into the flyout.
+	 *
+	 * An open flyout is refused two kinds of repaint, because both write the
+	 * stored percentage back over the slider the operator is holding:
+	 *
+	 *  - one that carries nothing new. Status pushes land several times a second
+	 *    during a stream, each repeating the same threshold, and each one used to
+	 *    snap the handle back out from under the drag — which is what made the
+	 *    setting impossible to change while the agent was answering.
+	 *  - any repaint at all while the slider is actually being worked, even one
+	 *    carrying a genuine change.
+	 *
+	 * A real change while the operator is not touching it still lands, so a
+	 * default arriving after the panel opened, or a threshold set from elsewhere,
+	 * shows up as it always did. `force` is for this panel's own actions.
+	 */
+	private renderThresholdFlyout(force = false): void {
 		const panel = this.thresholdFlyout;
 		if (!panel) return;
+		const signature = `${this.compactThreshold}|${this.compactDefaultPercent}|${this.contextWindowCurrent}`;
+		if (!force && this.thresholdFlyoutOpen() && (this.thresholdInteracting || signature === this.thresholdPainted)) return;
+		this.thresholdPainted = signature;
 		const tokensAt = (pct: number | null): string =>
 			pct != null && this.contextWindowCurrent ? ` · ${this.abbrevTokens(Math.round((pct / 100) * this.contextWindowCurrent))}` : "";
 		const titleEl = panel.querySelector(".threshold-title") as HTMLElement | null;
@@ -526,6 +578,9 @@ export class Composer {
 	 * open/close cycle.
 	 */
 	private closeThresholdFlyout(): void {
+		// A close during a drag (a session switch, say) would otherwise leave the
+		// control marked as held forever, and nothing could repaint it again.
+		this.thresholdInteracting = false;
 		this.thresholdFlyout?.classList.remove("visible");
 		if (this.thresholdCloser) {
 			document.removeEventListener("mousedown", this.thresholdCloser, true);
@@ -539,7 +594,9 @@ export class Composer {
 			this.closeThresholdFlyout();
 			return;
 		}
-		this.renderThresholdFlyout();
+		// Opening is the one moment host state should win: seed the controls from it
+		// before the panel becomes the operator's.
+		this.renderThresholdFlyout(true);
 		panel.classList.add("visible");
 		setTimeout(() => {
 			// A second open may have raced this frame; keep exactly one listener.

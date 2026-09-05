@@ -154,7 +154,15 @@ document.addEventListener("click", (event) => {
 // Notices + views
 // ---------------------------------------------------------------------------
 
+// Toasts float OVER the thread instead of sitting above it. As a flow sibling
+// each arriving notice shortened the scroller by its own height, which pushed
+// the tail out from under a reader who was following it — most visibly when
+// opening a subagent, where the notice and the new thread land together and the
+// reader is left chasing the bottom. The dock is zero-height, so the transcript
+// never resizes and no scroll compensation is needed.
+const noticesDock = el("div", "notices-dock");
 const notices = el("div", "notices");
+noticesDock.appendChild(notices);
 
 const observeBanner = el("div", "observe-banner");
 observeBanner.style.display = "none";
@@ -574,7 +582,7 @@ function renderInstallBanner(url: string, reason: string): void {
 	installBanner.appendChild(card);
 	installBanner.classList.add("visible");
 }
-app.append(topbar, menu, notices, installBanner, observeBanner, chatView, historyView.root, subagentsStrip, composer.root, statusStrip);
+app.append(topbar, menu, installBanner, observeBanner, noticesDock, chatView, historyView.root, subagentsStrip, composer.root, statusStrip);
 historyView.root.style.display = "none";
 
 function showView(view: "chat" | "history"): void {
@@ -713,17 +721,7 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 		renderSubagentsStrip();
 	}
 	currentStatus = status;
-	connDot.className = `conn-dot${status.connected ? (status.streaming ? " busy" : " live") : ""}`;
-	liveLabel.textContent = status.compacting
-		? "compacting…"
-		: status.retrying
-			? "retrying…"
-			: status.connected
-				? status.streaming
-					? "running"
-					: "live"
-				: "offline";
-	liveLabel.className = `live-label${status.connected ? " on" : ""}`;
+	renderLiveLabel(status);
 
 	if (!titleEditing) {
 		if (status.sessionName) {
@@ -754,8 +752,43 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 	// Unconditional: skipping this on a status that carries no override left the
 	// previous session's tick painted on the bar of the session now on screen.
 	composer.setCompactThreshold(status.compactThresholdPercent ?? null, status.compactDefaultPercent ?? null);
-	if (status.statusText) liveLabel.textContent = status.statusText;
 	setObserving(!!status.observingId);
+}
+
+/** Subagents of the session on screen that are still working. */
+function workingSubagentCount(): number {
+	return sessionChildren.filter((child) => childStatus(child) === "running").length;
+}
+
+/**
+ * The header's liveness word. Split out of applyStatus so a roster update can
+ * repaint it without waiting for the next status push.
+ *
+ * A parent whose subagents are still working is not idle. Its own turn really
+ * has ended — `streaming` stays false and every control keeps its honest
+ * meaning, so Stop still stops nothing that is running here and a typed message
+ * is still a fresh prompt — but reading "live" beside three working subagents
+ * says the run died when it did not.
+ */
+function renderLiveLabel(status: StatusSnapshot): void {
+	const working = workingSubagentCount();
+	const base = status.compacting
+		? "compacting…"
+		: status.retrying
+			? "retrying…"
+			: status.connected
+				? status.streaming
+					? "running"
+					: "live"
+				: "offline";
+	const text = status.statusText || base;
+	const busy = status.connected && (status.streaming || working > 0);
+	liveLabel.textContent =
+		status.connected && !status.streaming && working > 0
+			? `${text} · ${working} subagent${working === 1 ? "" : "s"} working`
+			: text;
+	liveLabel.className = `live-label${status.connected ? " on" : ""}`;
+	connDot.className = `conn-dot${status.connected ? (busy ? " busy" : " live") : ""}`;
 }
 
 function setObserving(value: boolean): void {
@@ -790,19 +823,12 @@ function addNotice(level: "info" | "warning" | "error", text: string, action?: {
 	dismiss.addEventListener("click", () => retireNotice(note));
 	note.appendChild(dismiss);
 	notices.appendChild(note);
-	// The stack is a sibling ABOVE the transcript, so every notice that arrives or
-	// leaves resizes the scroller. Re-pin for the same reason the subagents strip
-	// does: this only moves a reader who was already following the tail, and is a
-	// no-op for one parked mid-history.
-	transcript.scrollToBottom();
 	if (level === "info") setTimeout(() => retireNotice(note), 9000);
 }
 
-/** Remove a notice and give the tail back to whoever was following it. */
 function retireNotice(note: HTMLElement): void {
 	if (!note.isConnected) return;
 	note.remove();
-	transcript.scrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +931,9 @@ function dispatchHostMessage(message: HostToWebview): void {
 			}
 			const opened = maybeAutoExpandSubagents(startedSubagents);
 			renderSubagentsStrip();
+			// The roster is what knows a subagent started or finished; the header
+			// would otherwise keep saying "live" until the next status push.
+			if (currentStatus) renderLiveLabel(currentStatus);
 			// Expanding shrinks the transcript viewport. This only moves a reader who
 			// was already following the tail; one parked mid-history keeps their place.
 			if (opened) transcript.scrollToBottom();

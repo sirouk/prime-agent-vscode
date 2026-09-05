@@ -340,6 +340,49 @@ async function verifyScrollFollow(page, out = []) {
 		out.push(mk("thinking stays as the reader left it when the turn finishes", !(await details.evaluate((e) => e.open))));
 		out.push(mk("tool card is still open after the turn finishes", await page.$eval(".tool", (e) => e.classList.contains("open"))));
 	}
+
+	// 8. A toast must not move the thread. As a flow sibling above the scroller,
+	//    every notice shortened it by its own height — which pushed the tail out
+	//    from under a reader following it and moved a held position too. Opening a
+	//    subagent is where this bit hardest: the notice and the new thread land
+	//    together, so the reader arrives already chasing the bottom.
+	const notify = (text) => page.evaluate((t) => host({ type: "notice", level: "error", text: t }), text);
+	const viewport = () => page.$eval(".messages", (e) => e.clientHeight);
+
+	await page.$eval(".messages", (e) => { e.scrollTop = e.scrollHeight; });
+	await page.waitForTimeout(60);
+	const heightBefore = await viewport();
+	await notify("Subagent reported an error you can dismiss.");
+	await page.waitForTimeout(120);
+	out.push(mk("a toast renders over the thread", await page.$eval(".notice", (e) => !!e).catch(() => false)));
+	out.push(mk(
+		"a toast does not resize the transcript",
+		(await viewport()) === heightBefore,
+		`clientHeight ${heightBefore} -> ${await viewport()}`,
+	));
+	const parked = await metrics();
+	out.push(mk("a reader at the tail is still at the tail", parked.max - parked.top <= 12, `gap=${parked.max - parked.top}`));
+
+	// And from a held position: neither arriving nor dismissing may move it.
+	await page.hover(".messages");
+	await page.mouse.wheel(0, -240);
+	await page.waitForTimeout(60);
+	const held = await metrics();
+	await notify("A second one, arriving while the reader is parked mid-history.");
+	await page.waitForTimeout(120);
+	const afterSecond = await metrics();
+	out.push(mk(
+		"a toast never moves a held reading position",
+		afterSecond.top === held.top,
+		`top ${held.top} -> ${afterSecond.top}`,
+	));
+	await page.evaluate(() => {
+		for (const button of document.querySelectorAll(".notice-dismiss")) button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+	});
+	await page.waitForTimeout(120);
+	const afterDismiss = await metrics();
+	out.push(mk("dismissing them does not move it either", afterDismiss.top === held.top, `top ${held.top} -> ${afterDismiss.top}`));
+	out.push(mk("dismiss actually removed them", (await page.$$(".notice")).length === 0));
 	return out;
 }
 
