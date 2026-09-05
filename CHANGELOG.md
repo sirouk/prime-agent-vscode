@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.31]
+
 - **Opening a subagent lands on its newest message, and keeps following it.** The transcript is a flex child, so the subagents strip appearing beneath it cuts the scroller's height while `scrollTop` stays exactly where it was. No scroll event fires for that, so nothing noticed: the reader was left precisely the strip's height above the tail — 42px on landing, 72px once more subagents arrived — with the follow lock still claiming they were following, so not even the jump-to-latest pill was offered. Between turns nothing brought them back down. The scroller now re-pins whenever its viewport resizes, which covers the strip appearing or growing, returning to the parent, the composer growing, and the panel being dragged. It only ever re-pins a reader who was already at the bottom: someone who scrolled away is never dragged back, and still gets the pill. Pinned by browser measurements of all four cases.
 
 ## [1.0.30]
@@ -316,7 +318,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.30...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.31...HEAD
+[1.0.31]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.30...v1.0.31
 [1.0.30]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.29...v1.0.30
 [1.0.29]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.28...v1.0.29
 [1.0.28]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.27...v1.0.28
