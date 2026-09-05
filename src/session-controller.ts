@@ -11,6 +11,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
+import { locateAgent, type LocatedAgent } from "./agent-locator.js";
 import { DaemonSidecar } from "./daemon-sidecar.js";
 import { resolveOwnerClientId } from "./daemon-owner.js";
 import type { AttachSnapshot, DaemonServerMessage, RosterEntry, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
@@ -120,6 +121,20 @@ export class SessionController implements vscode.Disposable {
 	 * UI — status strip, composer, install recommendation — hangs off this.
 	 */
 	private reachable = false;
+	/** Result of the last CLI lookup, for the install card's explanation. */
+	private locatedAgent: LocatedAgent | null = null;
+	/**
+	 * One error toast per unreachable CLI, not one per action. Seventeen call
+	 * sites reach ensureStarted(), and before this a missing binary stacked an
+	 * identical notice for every one of them.
+	 */
+	private spawnErrorNotified = false;
+	/**
+	 * Bumped by every stop(). The CLI lookup can take a few seconds when the agent
+	 * is not on the inherited PATH, and a stop landing inside that window must not
+	 * be undone by the attempt it interrupted spawning a process nothing owns.
+	 */
+	private startGeneration = 0;
 	private sinks = new Set<WebviewSink>();
 	private disposables: vscode.Disposable[] = [];
 	private watcher: vscode.FileSystemWatcher | null = null;
@@ -352,8 +367,26 @@ export class SessionController implements vscode.Disposable {
 		if (envArgs) args.push(...envArgs.split(/\s+/));
 
 		this.output.appendLine(`[prime-agent] starting: ${command} --mode rpc (${args.length} configured argument${args.length === 1 ? "" : "s"})`);
-		const client = new RpcClient({ command, args, cwd: this.workspaceRoot, onWire: (s) => this.debugLog.append(s) });
+		// Fresh every attempt, never cached: the extension host's PATH is frozen at
+		// window start, so an operator who installs the CLI and clicks Retry has to
+		// be able to succeed without restarting the window.
+		const generation = this.startGeneration;
+		const located = await locateAgent(command, (line) => this.output.appendLine(line));
+		this.output.appendLine(`[prime-agent] ${located.detail}`);
+		this.locatedAgent = located;
+		if (this.disposed || generation !== this.startGeneration) return;
+		const client = new RpcClient({
+			command: located.command,
+			args,
+			cwd: this.workspaceRoot,
+			env: located.envPath ? { PATH: located.envPath } : undefined,
+			onWire: (s) => this.debugLog.append(s),
+		});
 		this.client = client;
+		// A start that follows a working agent deserves to speak up again. The
+		// suppression below exists only so one unreachable CLI cannot stack an
+		// identical toast for every action the operator takes.
+		if (this.reachable) this.spawnErrorNotified = false;
 		this.reachable = false;
 		this.intentionalStop = false;
 
@@ -374,18 +407,25 @@ export class SessionController implements vscode.Disposable {
 			this.output.appendLine(`[prime-agent] spawn error: ${err.message}`);
 			this.reachable = false;
 			if (!this.isForegroundRpcClient(client)) return;
-			this.broadcast({
-				type: "notice",
-				level: "error",
-				text: `Could not start "${command}". Install Prime Agent or set primeAgent.command in settings.`,
-			});
+			if (!this.spawnErrorNotified) {
+				this.spawnErrorNotified = true;
+				this.broadcast({
+					type: "notice",
+					level: "error",
+					text: `Could not start "${command}". Install Prime Agent or set primeAgent.command in settings.`,
+				});
+			}
 			// A spawn failure is definitive — don't make a first-time operator wait
 			// out the 25s watchdog behind the connecting splash before we say why.
 			if (this.installWatchdog) {
 				clearTimeout(this.installWatchdog);
 				this.installWatchdog = null;
 			}
-			this.maybeShowInstallPrompt(`"${command}" could not be launched — ${err.message}`);
+			// The card is the only place an operator learns *where* we looked, and
+			// "we searched your login shell too" is what stops them re-running an
+			// installer that already worked.
+			const searched = this.locatedAgent?.source === "unresolved" ? ` (${this.locatedAgent.detail})` : "";
+			this.maybeShowInstallPrompt(`"${command}" could not be launched — ${err.message}${searched}`);
 			this.pushStatus();
 		});
 		// A protocol fault kills the connection and the agent with it. Nothing
@@ -445,6 +485,10 @@ export class SessionController implements vscode.Disposable {
 
 	stop(): void {
 		this.intentionalStop = true;
+		this.startGeneration += 1;
+		// An explicit stop/restart is a deliberate act; the next failure is news
+		// again even if it is the same failure.
+		this.spawnErrorNotified = false;
 		this.client?.stop();
 		this.client = null;
 		this.state = null;

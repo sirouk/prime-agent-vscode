@@ -125,9 +125,19 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
 
 - VS Code 1.90+.
 
-If `prime-agent` is not on `PATH`, set `primeAgent.command` to an absolute path, e.g.
-`/path/to/prime-agent/prime-agent.sh` for a source checkout. When the extension can't reach the
-CLI it says so in the chat view and links the upstream install guide.
+Nothing else should be needed: the installer above and this extension are meant to be the
+whole setup. An editor launched from the Dock or Finder inherits the system `PATH`, which never
+contains npm's global bin — where that installer puts `prime-agent` — so the extension looks
+beyond it: the inherited `PATH` first, then the `PATH` your login shell actually has, then the
+usual install locations (the installer's own bundled-node prefix, an nvm prefix, Homebrew).
+Whatever it finds, that directory goes on the agent's own `PATH` too, so the `node` beside it is
+reachable. The lookup runs fresh on every start, so installing the CLI and pressing **Retry**
+works without restarting the window.
+
+Set `primeAgent.command` to an absolute path only for a setup none of that can find — e.g.
+`/path/to/prime-agent/prime-agent.sh` for a source checkout. When the extension still can't
+reach the CLI it says so in the chat view, names where it looked, and links the upstream install
+guide.
 
 ## Settings
 

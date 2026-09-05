@@ -7,8 +7,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { delimiter } from "node:path";
-import * as fs from "node:fs";
+import { searchDirs, splitPath } from "./agent-locator.js";
 import { MAX_JSONL_FRAME_BYTES, MAX_JSONL_FRAME_LABEL } from "./wire-limits.js";
 
 export interface RpcClientOptions {
@@ -141,25 +140,17 @@ export class RpcClient extends EventEmitter {
 		});
 	}
 
-	/** Resolve a bare command name to an absolute path where possible so spawn errors are clearer. */
+	/**
+	 * Resolve a bare command name to an absolute path where possible so spawn
+	 * errors are clearer. This sees only the inherited PATH; the wider search
+	 * that covers a GUI-launched editor lives in agent-locator.ts, and the
+	 * controller hands the result here as an absolute path.
+	 */
 	private resolveCommand(command: string): string {
 		if (command.includes("/") || command.includes("\\")) {
 			return command;
 		}
-		const pathEnv = process.env.PATH ?? "";
-		const extensions = process.platform === "win32" ? [".cmd", ".exe", ".bat", ""] : [""];
-		for (const dir of pathEnv.split(delimiter)) {
-			for (const ext of extensions) {
-				const candidate = `${dir}/${command}${ext}`;
-				try {
-					fs.accessSync(candidate, fs.constants.X_OK);
-					return candidate;
-				} catch {
-					// keep looking
-				}
-			}
-		}
-		return command;
+		return searchDirs(command, splitPath(process.env.PATH)) ?? command;
 	}
 
 	/**
