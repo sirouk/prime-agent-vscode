@@ -389,6 +389,8 @@ apply_release_changes "$chosen_tag" "$DRY_RUN"
 # agent-extension/background-jobs is deliberately shipped: "Prime Agent: Install
 # Background Jobs Agent Extension" copies it out of the packaged extension into
 # ~/.prime/agent/extensions/, so a vsix without it makes that command fail.
+# .github/workflows/publish.yml asserts the SAME list in CI: a release that only
+# updates this copy passes here and then fails at the publish step.
 unexpected="$(./node_modules/.bin/vsce ls --no-dependencies 2>/dev/null | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|dist/extension\.js|agent-extension/background-jobs/(index|jobs)\.ts|media/(main\.js|main\.css|panels\.css|icon\.png|icon\.svg))$' || true)"
 if [ -n "$unexpected" ]; then
     printf '[release] refusing to package: unexpected files would ship inside the .vsix:\n' >&2
