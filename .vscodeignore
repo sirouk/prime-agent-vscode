@@ -20,6 +20,12 @@ release.sh
 install.sh
 .github/**
 
+# agent-extension/ is DELIBERATELY shipped: it is the Prime Agent extension the
+# Processes panel prefers as its data source, and "Prime Agent: Install
+# Background Jobs Agent Extension" copies it out of the packaged extension into
+# ~/.prime/agent/extensions/. Excluding it makes that command fail at runtime.
+agent-extension/**/*.map
+
 dist/*.map
 dist/controller.cjs
 dist/daemon-sidecar.cjs

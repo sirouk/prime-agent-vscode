@@ -71,6 +71,31 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
   activity pulse — running, idle, or (in their own collapsed "Historical" group) finished;
   browse inside any of them, the one you are reading stays listed and highlighted, siblings
   stay one click away, and back-to-parent returns.
+- **Processes**: collapsible panel above the subagents strip listing commands the agent
+  started that are still alive — the lane nothing else on screen could show, since a command
+  that outlives its turn leaves the header reading plain "live". The panel opens itself when
+  something survives a turn, names the command rather than the shell wrapper it runs inside,
+  keeps a finished command as a receipt instead of letting the row vanish, and shows the last
+  ~100 lines of its output on click. It has two sources, and says which one a row came from:
+  - **Jobs owned by the bundled agent extension** (see below) — real exit codes, the job's
+    own stdout and stderr, and a Stop button that signals the job's process group. These are
+    also the jobs that wake the agent when they finish.
+  - **Anything else the agent left running**, reconstructed locally from the worker's process
+    journal and `ps` — never from the daemon, so it keeps updating after the turn ends. Such
+    a row knows a process ended but not how, so it claims no exit status and offers no Stop.
+    Its output preview can only show a file the command redirects to: a bare `bash()` command's
+    stdout is buffered inside the agent's kernel and cannot be read without taking it from the
+    agent, which the panel says rather than showing an empty box. POSIX only.
+- **Background jobs agent extension**: run **Prime Agent: Install Background Jobs Agent
+  Extension…** from the command palette to copy the bundled extension into
+  `~/.prime/agent/extensions/`, then start a new session. It gives the agent a `background`
+  tool for commands that outlive a turn and a `/jobs` command for you. Prime Agent's own
+  `bash()` keeps a command's output inside the IPython kernel and notifies nobody when it
+  ends, so a job the agent stops awaiting has no exit code, no reachable output and no way to
+  be stopped. A job run through this tool is a child of the agent process instead: the OS
+  delivers its exit code, its output goes to a file any client can read, stopping it is a
+  signal to a process group, and when it finishes the agent is woken with the result rather
+  than left idle beside work it forgot about.
 - **Thread diffs**: collapsible "Changes" panel above the composer stitches the real diff
   payloads Prime Agent publishes when its bundled `edit` skill rewrites a file — for the
   current thread *and* its subagents, per file, expandable, with an Open-file shortcut and

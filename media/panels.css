@@ -202,3 +202,217 @@
 	color: var(--pa-faint, var(--pa-dim));
 	padding: 5px 8px 2px;
 }
+
+/* ---------- processes panel (above the subagents strip) ----------
+   Same visual family as the thread-diff panel and the subagents strip: this is
+   one more lane of "work that exists outside the message you are reading", so it
+   must not read as a different kind of object. */
+
+.pr-panel {
+	display: none;
+	flex-direction: column;
+	font-size: 10.5px;
+	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
+	border-bottom: 1px solid var(--pa-border-faint, var(--pa-border));
+	background: color-mix(in srgb, transparent 60%, var(--pa-raised, var(--pa-surface)) 40%);
+	max-height: 300px;
+	overflow-y: auto;
+}
+
+.pr-panel.visible {
+	display: flex;
+}
+
+.pr-header,
+.pr-subhead {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 10px;
+	font-size: 10px;
+	color: var(--pa-dim);
+	width: 100%;
+	text-align: left;
+}
+
+.pr-header:hover,
+.pr-subhead:hover {
+	color: var(--pa-accent);
+}
+
+.pr-subhead {
+	padding-left: 14px;
+	font-size: 9.5px;
+}
+
+.pr-caret {
+	font-size: 8px;
+	flex: 0 0 auto;
+}
+
+.pr-list {
+	display: flex;
+	flex-direction: column;
+	padding: 0 4px 4px;
+}
+
+.pr-list.finished {
+	opacity: 0.72;
+}
+
+.pr-row {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	padding: 3px 8px;
+	border-radius: 6px;
+	font-size: 10.5px;
+	text-align: left;
+	width: 100%;
+}
+
+.pr-row:hover {
+	background: var(--pa-raised);
+}
+
+.pr-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--pa-faint);
+	flex-shrink: 0;
+}
+
+.pr-dot.active {
+	background: var(--pa-accent);
+	box-shadow: 0 0 4px var(--pa-accent-glow);
+}
+
+.pr-command {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10px;
+}
+
+.pr-time {
+	flex: 0 0 auto;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 9.5px;
+	color: var(--pa-dim);
+	font-variant-numeric: tabular-nums;
+}
+
+.pr-preview {
+	margin: 2px 8px 6px 21px;
+	border: 1px solid var(--pa-border-faint, var(--pa-border));
+	border-radius: 6px;
+	overflow: hidden;
+}
+
+.pr-preview-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 7px;
+	font-size: 9px;
+	color: var(--pa-dim);
+	background: var(--pa-raised);
+}
+
+.pr-source {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	direction: rtl;
+	text-align: left;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.pr-trunc {
+	flex: 0 0 auto;
+	border: 1px solid var(--pa-border);
+	border-radius: 7px;
+	padding: 0 5px;
+}
+
+.pr-refresh {
+	flex: 0 0 auto;
+	color: var(--pa-dim);
+	display: inline-flex;
+	align-items: center;
+}
+
+.pr-refresh:hover {
+	color: var(--pa-accent);
+}
+
+.pr-output {
+	margin: 0;
+	padding: 6px 8px;
+	max-height: 180px;
+	overflow: auto;
+	white-space: pre;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10px;
+	line-height: 1.45;
+}
+
+.pr-note,
+.pr-foot {
+	padding: 6px 8px;
+	font-size: 9.5px;
+	color: var(--pa-dim);
+	line-height: 1.5;
+}
+
+.pr-foot {
+	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
+}
+
+/* Exit status, shown only where it is actually known: a job the agent extension
+   owned. An observed row has no status to print and renders none. */
+.pr-status {
+	flex: 0 0 auto;
+	font-size: 8.5px;
+	color: var(--pa-accent);
+	border: 1px solid var(--pa-accent-dim);
+	border-radius: 7px;
+	padding: 0 5px;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.pr-status.bad {
+	color: var(--pa-error);
+	border-color: color-mix(in srgb, transparent 60%, var(--pa-error) 40%);
+}
+
+.pr-kill {
+	flex: 0 0 auto;
+	color: var(--pa-dim);
+	display: inline-flex;
+	align-items: center;
+	opacity: 0;
+	transition: opacity 0.12s ease;
+}
+
+.pr-row:hover .pr-kill,
+.pr-row:focus-within .pr-kill {
+	opacity: 1;
+}
+
+.pr-kill:hover {
+	color: var(--pa-error);
+}
+
+.pr-row:focus-visible {
+	outline: 1px solid var(--pa-accent-dim);
+	outline-offset: -1px;
+}
+
+.pr-subhead.has-failure {
+	color: var(--pa-error);
+}

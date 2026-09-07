@@ -299,6 +299,14 @@ convCopy.addEventListener("click", (event) => {
 });
 statusStrip.append(connDot, liveLabel, sessionIdLabel, el("span", "spacer"), statsLabel, convCopy);
 
+// Background processes the agent started; mounted above the subagents strip.
+const processesPanel = new ProcessesPanel({
+	onPreview: (ref) => post({ type: "previewProcess", ref }),
+	onKill: (ref) => post({ type: "killProcess", ref }),
+});
+/** Rows the host currently reports as running, for the header's liveness word. */
+let runningProcessCount = 0;
+
 // Subagents strip: collapsible panel floating on top of the composer.
 const subagentsStrip = el("div", "subagents-strip") as HTMLElement;
 let subagentsExpanded = false;
@@ -593,6 +601,7 @@ function showView(view: "chat" | "history"): void {
 	// on content, so without this they hang over the history list with no
 	// composer under them. "" hands display back to their own .visible class.
 	subagentsStrip.style.display = view === "chat" ? "" : "none";
+	processesPanel.root.style.display = view === "chat" ? "" : "none";
 	changedFilesBar.style.display = view === "chat" ? "" : "none";
 	threadDiffsPanel.root.style.display = view === "chat" ? "" : "none";
 	if (view === "history") historyView.showLoading();
@@ -782,11 +791,16 @@ function renderLiveLabel(status: StatusSnapshot): void {
 					: "live"
 				: "offline";
 	const text = status.statusText || base;
-	const busy = status.connected && (status.streaming || working > 0);
-	liveLabel.textContent =
-		status.connected && !status.streaming && working > 0
-			? `${text} · ${working} subagent${working === 1 ? "" : "s"} working`
-			: text;
+	const busy = status.connected && (status.streaming || working > 0 || runningProcessCount > 0);
+	// Each lane is named for what it is. Folding processes into the subagent
+	// count, or into `streaming`, would put work behind a word that does not
+	// describe it — and Stop would then appear to own something it cannot stop.
+	const lanes: string[] = [];
+	if (status.connected && !status.streaming && working > 0) lanes.push(`${working} subagent${working === 1 ? "" : "s"} working`);
+	if (status.connected && runningProcessCount > 0) {
+		lanes.push(`${runningProcessCount} process${runningProcessCount === 1 ? "" : "es"} running`);
+	}
+	liveLabel.textContent = lanes.length > 0 ? `${text} · ${lanes.join(" · ")}` : text;
 	liveLabel.className = `live-label${status.connected ? " on" : ""}`;
 	connDot.className = `conn-dot${status.connected ? (busy ? " busy" : " live") : ""}`;
 }
@@ -889,6 +903,14 @@ function dispatchHostMessage(message: HostToWebview): void {
 			break;
 		case "status":
 			applyStatus(message.status);
+			break;
+		case "processes":
+			processesPanel.setProcesses(message.processes, currentStatus?.streaming ?? false);
+			runningProcessCount = message.processes.filter((entry) => entry.state === "running").length;
+			if (currentStatus) renderLiveLabel(currentStatus);
+			break;
+		case "processOutput":
+			processesPanel.setPreview(message.preview);
 			break;
 		case "models":
 			composer.setModels(message.models);
@@ -1102,6 +1124,7 @@ post({ type: "ready" });
 // Per-thread diff panel (appended wiring only)
 // ---------------------------------------------------------------------------
 
+import { ProcessesPanel } from "./processes.js";
 import { ThreadDiffsPanel } from "./thread-diffs.js";
 
 const threadDiffsPanel = new ThreadDiffsPanel({
@@ -1114,6 +1137,10 @@ const threadDiffsPanel = new ThreadDiffsPanel({
 // edits above the subagent strip and buried the agent's own changes under them.
 subagentsStrip.after(changedFilesBar);
 changedFilesBar.after(threadDiffsPanel.root);
+// Processes sit ABOVE the subagents strip: it is the only lane with no other
+// representation on screen, so when it appears it must appear in one fixed
+// place rather than wedged between two panels the eye is already tracking.
+subagentsStrip.before(processesPanel.root);
 
 // Handled outside dispatchHostMessage so this wiring stays append-only; the
 // panel is driven purely by the host's cumulative `threadDiffs` pushes.

@@ -289,7 +289,7 @@ gate_tests() {
     local failures=0
     run_gate "tsc --noEmit" "npm exec -- tsc --noEmit" || failures=$((failures+1))
     run_gate "esbuild build" "node esbuild.config.mjs" || failures=$((failures+1))
-    for layer in test/activate.test.mjs test/chat-view-message.test.mjs test/session-controller-boundary.test.mjs test/attach-lifecycle.test.mjs test/session-actions.test.mjs test/webview.test.mjs test/transcript-window.test.mjs test/thread-diffs.test.mjs test/export-md.test.mjs test/recent-sessions-tail.test.mjs test/transport-regression.test.mjs test/owner-visibility.test.mjs; do
+    for layer in test/activate.test.mjs test/chat-view-message.test.mjs test/session-controller-boundary.test.mjs test/attach-lifecycle.test.mjs test/session-actions.test.mjs test/webview.test.mjs test/transcript-window.test.mjs test/thread-diffs.test.mjs test/processes.test.mjs test/agent-jobs.test.mjs test/background-jobs.test.mjs test/export-md.test.mjs test/recent-sessions-tail.test.mjs test/transport-regression.test.mjs test/owner-visibility.test.mjs; do
         run_gate "$layer" "node $layer" || failures=$((failures+1))
     done
     run_gate "daemon parity" "node test/daemon-parity.mjs --require-daemon" || failures=$((failures+1))

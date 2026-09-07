@@ -1719,5 +1719,162 @@ clearBox(); arrow("ArrowUp");
 check("...and clearing it starts recall again at the newest", textarea.value === "steer now", JSON.stringify(textarea.value));
 clearBox();
 
+// --- processes panel -------------------------------------------------------
+// The lane that had no representation before: a command the agent left running
+// after its turn ended. The panel must appear on its own for exactly that case,
+// name the command rather than the gate script, and never render an empty box
+// where the host said there is nothing readable.
+
+const processesPanel = () => document.querySelector(".pr-panel");
+const panelRow = () => document.querySelector(".pr-row");
+
+hostMessage({ type: "processes", processes: [] });
+check("no processes means no panel", !processesPanel()?.classList.contains("visible"));
+
+const RUNNING = {
+	ref: "proc-ref-1",
+	pid: 4242,
+	command: "codex exec --ephemeral '/graphify . --update'",
+	fullCommand: "codex exec --ephemeral '/graphify . --update'",
+	state: "running",
+	startedMs: Date.now() - 62_000,
+	hasOutput: true,
+};
+hostMessage({ type: "processes", processes: [RUNNING] });
+check("a running process shows the panel", processesPanel()?.classList.contains("visible"));
+check(
+	"the header counts what is running",
+	document.querySelector(".pr-header")?.textContent.includes("1 running"),
+	document.querySelector(".pr-header")?.textContent,
+);
+check("a process that outlived the turn opens the panel by itself", !!panelRow());
+check("the row names the agent's command", panelRow()?.textContent.includes("codex exec"), panelRow()?.textContent);
+check("the row shows how long it has been running", panelRow()?.textContent.includes("1m02s"), panelRow()?.textContent);
+check(
+	"the header names the process lane separately from subagents",
+	document.querySelector(".live-label")?.textContent.includes("1 process running"),
+	document.querySelector(".live-label")?.textContent,
+);
+
+panelRow().dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const asked = posted.filter((message) => message.type === "previewProcess").at(-1);
+check("clicking a row asks the host for its output", asked?.ref === "proc-ref-1", JSON.stringify(asked));
+check("the preview says it is loading until the host answers", document.querySelector(".pr-note")?.textContent.includes("Reading"));
+
+hostMessage({
+	type: "processOutput",
+	preview: { ref: "proc-ref-1", lines: ["building graph", "10258 nodes"], source: "/tmp/graphify.log", truncated: true },
+});
+check(
+	"the output lands in the preview",
+	document.querySelector(".pr-output")?.textContent === "building graph\n10258 nodes",
+	document.querySelector(".pr-output")?.textContent,
+);
+check("the preview names the file it read", document.querySelector(".pr-source")?.textContent === "/tmp/graphify.log");
+check("the preview says what it is NOT showing", !!document.querySelector(".pr-foot"));
+
+// Nothing readable must read as an explanation, never as "no output".
+hostMessage({ type: "processOutput", preview: { ref: "proc-ref-1", lines: [], note: "buffered inside the agent's kernel" } });
+check(
+	"an unreadable command explains itself instead of showing an empty box",
+	document.querySelector(".pr-note")?.textContent.includes("buffered inside the agent's kernel"),
+	document.querySelector(".pr-note")?.textContent,
+);
+check("no empty output box is rendered", !document.querySelector(".pr-output"));
+
+hostMessage({
+	type: "processes",
+	processes: [{ ...RUNNING, state: "exited", endedMs: RUNNING.startedMs + 90_000 }],
+});
+check(
+	"a finished command becomes a receipt rather than vanishing",
+	document.querySelector(".pr-header")?.textContent.includes("1 finished"),
+	document.querySelector(".pr-header")?.textContent,
+);
+check(
+	"the header stops claiming a running process",
+	!document.querySelector(".live-label")?.textContent.includes("process running"),
+	document.querySelector(".live-label")?.textContent,
+);
+
+// An extension-owned job says more than an observed one can, and the panel has
+// to show the difference: a real exit status, and a Stop that is only offered
+// where the agent can actually deliver it.
+
+hostMessage({
+	type: "processes",
+	processes: [
+		{
+			ref: "job-ref-1",
+			pid: 5150,
+			command: "npm run build:all",
+			fullCommand: "npm run build:all",
+			state: "running",
+			startedMs: Date.now() - 5_000,
+			hasOutput: true,
+			killable: true,
+			source: "agent",
+		},
+	],
+});
+check("an agent-owned running job offers a stop", !!document.querySelector(".pr-kill"));
+document.querySelector(".pr-kill").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const killAsk = posted.filter((message) => message.type === "killProcess").at(-1);
+check("the stop button asks the host to kill that job", killAsk?.ref === "job-ref-1", JSON.stringify(killAsk));
+check("stopping does not also open the preview", !document.querySelector(".pr-preview"));
+
+hostMessage({
+	type: "processes",
+	processes: [
+		{
+			ref: "job-ref-1",
+			pid: 5150,
+			command: "npm run build:all",
+			fullCommand: "npm run build:all",
+			state: "exited",
+			startedMs: Date.now() - 95_000,
+			endedMs: Date.now(),
+			exitCode: 2,
+			hasOutput: true,
+			source: "agent",
+		},
+	],
+});
+check(
+	"a failure is counted in the collapsed Finished header",
+	document.querySelector(".pr-subhead")?.textContent.includes("1 failed"),
+	document.querySelector(".pr-subhead")?.textContent,
+);
+// Finished rows live in their own collapsed group; open it to read them.
+document.querySelector(".pr-subhead").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check(
+	"a finished job shows the exit code the agent extension reported",
+	document.querySelector(".pr-status")?.textContent === "exit 2",
+	document.querySelector(".pr-status")?.textContent,
+);
+check("a non-zero exit is marked as a failure", document.querySelector(".pr-status")?.classList.contains("bad"));
+check("a finished job no longer offers a stop", !document.querySelector(".pr-kill"));
+
+// An observed row knows a process ended and nothing about how. It must not
+// borrow the vocabulary of a row that actually has an exit code.
+hostMessage({
+	type: "processes",
+	processes: [
+		{
+			ref: "obs-ref-1",
+			pid: 6000,
+			command: "sleep 300",
+			fullCommand: "sleep 300",
+			state: "exited",
+			startedMs: Date.now() - 30_000,
+			endedMs: Date.now(),
+			source: "observed",
+		},
+	],
+});
+document.querySelector(".pr-subhead")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("an observed row claims no exit status", !document.querySelector(".pr-status"));
+check("an observed row offers no stop", !document.querySelector(".pr-kill"));
+
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

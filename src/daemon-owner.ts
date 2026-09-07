@@ -33,6 +33,12 @@ export interface WorkerDescriptorRef {
 	workerId?: string;
 	pid?: number;
 	rootActiveSessionId?: string;
+	/**
+	 * `<workerId>.orphans.jsonl` — the append-only record the bash tool writes
+	 * for every process group it spawns. The daemon reaps strays from it; we
+	 * read it to know what the agent started (see process-tracker.ts).
+	 */
+	orphanProcessJournalPath?: string;
 	ownerClientId?: string;
 	updatedAt?: string;
 	createdAt?: string;
@@ -147,6 +153,26 @@ function timeOf(descriptor: WorkerDescriptorRef): number {
  * Undefined is a normal answer and means "read the roster as ourselves".
  */
 export function resolveOwnerClientId(lookup: OwnerLookup): string | undefined {
+	// A worker with a stop intent is on its way out; claiming its identity would
+	// only cancel the cleanup the daemon already decided to run.
+	return newestLiveDescriptor(lookup, (d) => !!d.ownerClientId && !d.stopRequestedAt)?.ownerClientId;
+}
+
+/**
+ * The descriptor of the live worker hosting this session, whoever owns it.
+ *
+ * Same match as `resolveOwnerClientId` minus the ownership filter: a session
+ * brokered by the daemon for a terminal client has no `ownerClientId` and still
+ * has a worker, a pid and an orphan journal. Read-only, like everything here.
+ */
+export function resolveWorkerDescriptor(lookup: OwnerLookup): WorkerDescriptorRef | undefined {
+	return newestLiveDescriptor(lookup, () => true);
+}
+
+function newestLiveDescriptor(
+	lookup: OwnerLookup,
+	accept: (descriptor: WorkerDescriptorRef) => boolean,
+): WorkerDescriptorRef | undefined {
 	if (!lookup.sessionFile && !lookup.activeSessionId) return undefined;
 	// The worker registry lives under the daemon's agentDir, which only equals
 	// the session file's parent when the default layout is in use. A configured
@@ -160,10 +186,7 @@ export function resolveOwnerClientId(lookup: OwnerLookup): string | undefined {
 	let best: { descriptor: WorkerDescriptorRef; at: number } | undefined;
 	for (const file of files) {
 		const descriptor = readDescriptor(file);
-		if (!descriptor?.ownerClientId) continue;
-		// A worker with a stop intent is on its way out; claiming its identity
-		// would only cancel the cleanup the daemon already decided to run.
-		if (descriptor.stopRequestedAt) continue;
+		if (!descriptor || !accept(descriptor)) continue;
 		const matches =
 			samePath(descriptor.createCommand?.sessionPath, lookup.sessionFile) ||
 			(!!lookup.activeSessionId && descriptor.rootActiveSessionId === lookup.activeSessionId);
@@ -174,5 +197,5 @@ export function resolveOwnerClientId(lookup: OwnerLookup): string | undefined {
 		// live descriptor is the one hosting us now.
 		if (!best || at > best.at) best = { descriptor, at };
 	}
-	return best?.descriptor.ownerClientId;
+	return best?.descriptor;
 }

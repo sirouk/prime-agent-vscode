@@ -89,6 +89,44 @@ const daemonSidecarConfig = {
 	external: ["vscode"],
 };
 
+// test/agent-jobs.test.mjs drives the host-side index of extension-reported jobs.
+const agentJobsConfig = {
+	...shared,
+	entryPoints: ["src/agent-jobs.ts"],
+	bundle: true,
+	format: "cjs",
+	platform: "node",
+	target: "node18",
+	outfile: "dist/agent-jobs.cjs",
+	external: ["vscode"],
+};
+
+// test/background-jobs.test.mjs drives the Prime Agent extension's job manager.
+// Bundled rather than run from source because the extension is TypeScript that
+// ships to `~/.prime/agent/extensions/`, where Prime Agent compiles it itself.
+const backgroundJobsConfig = {
+	...shared,
+	entryPoints: ["agent-extension/background-jobs/jobs.ts"],
+	bundle: true,
+	format: "cjs",
+	platform: "node",
+	target: "node18",
+	outfile: "dist/background-jobs.cjs",
+};
+
+// test/processes.test.mjs drives the background-process tracker directly, the
+// same way the sidecar and session-action bundles are built for their gates.
+const processTrackerConfig = {
+	...shared,
+	entryPoints: ["src/process-tracker.ts"],
+	bundle: true,
+	format: "cjs",
+	platform: "node",
+	target: "node18",
+	outfile: "dist/process-tracker.cjs",
+	external: ["vscode"],
+};
+
 const smokeConfig = {
 	...shared,
 	entryPoints: ["test/smoke.ts"],
@@ -111,4 +149,7 @@ if (watch) {
 	await esbuild.build(controllerConfig);
 	await esbuild.build(daemonSidecarConfig);
 	await esbuild.build(sessionActionsConfig);
+	await esbuild.build(processTrackerConfig);
+	await esbuild.build(backgroundJobsConfig);
+	await esbuild.build(agentJobsConfig);
 }

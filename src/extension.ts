@@ -68,6 +68,9 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand("primeAgent.compact", () => runCommand("Compact", () => controller!.compact())),
 		vscode.commands.registerCommand("primeAgent.exportChat", () => runCommand("Export chat", () => controller!.exportChat())),
 		vscode.commands.registerCommand("primeAgent.restart", () => runCommand("Restart", () => controller!.restart())),
+		vscode.commands.registerCommand("primeAgent.installAgentExtension", () =>
+			runCommand("Install agent extension", () => controller!.installBackgroundJobsExtension()),
+		),
 		vscode.commands.registerCommand("primeAgent.history", () => {
 			reveal();
 			controller!.showHistoryView();

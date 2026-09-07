@@ -180,6 +180,56 @@ export interface SessionChild {
 	attachedClients?: number;
 }
 
+/**
+ * A process the agent started, as the host observed it (process-tracker.ts).
+ *
+ * `ref` is an opaque host-issued capability, like a subagent's `browseRef`: the
+ * webview can ask for an output preview of something the host already decided to
+ * offer, and can never name a pid or a path of its own.
+ */
+export interface SessionProcess {
+	ref: string;
+	/** Absent only when a job failed before the OS gave it a pid. */
+	pid?: number;
+	/** Single-line label for the row. */
+	command: string;
+	/** The command as spawned, for the tooltip. Bounded by the host. */
+	fullCommand: string;
+	state: "running" | "exited";
+	startedMs: number;
+	endedMs?: number;
+	/**
+	 * Exit status, present only for a job the `background-jobs` agent extension
+	 * owned. A process merely observed from the outside has no exit code to
+	 * report — the journal records that it ended, never how.
+	 */
+	exitCode?: number;
+	/** Signal that ended it, when it did not exit on its own. */
+	signal?: string;
+	/** A file this command writes was found, so a preview has something to read. */
+	hasOutput?: boolean;
+	/** The host can stop this one. Only true for extension-owned jobs. */
+	killable?: boolean;
+	/**
+	 * Where the row came from, and therefore how much it can honestly claim.
+	 * "agent" is a job the extension owns inside the agent; "observed" is one this
+	 * host reconstructed from the worker's process journal and `ps`.
+	 */
+	source?: "agent" | "observed";
+}
+
+/** Answer to `previewProcess`: what the command wrote, or why we have nothing. */
+export interface ProcessOutputPreview {
+	ref: string;
+	lines: string[];
+	/** Absolute path the lines came from. */
+	source?: string;
+	/** Present instead of lines when there is nothing readable to show. */
+	note?: string;
+	/** True when older output was dropped to bound the read. */
+	truncated?: boolean;
+}
+
 export interface FileSearchItem {
 	path: string;
 	isDir: boolean;
@@ -289,6 +339,8 @@ export type WebviewToHost =
 	| { type: "pickThinkingLevel" }
 	| { type: "toggleFavoriteModel"; provider: string; modelId: string }
 	| { type: "browseChild"; browseRef: string }
+	| { type: "previewProcess"; ref: string }
+	| { type: "killProcess"; ref: string }
 	| { type: "backToParent" }
 	| { type: "forkFromUser"; ordinal: number }
 	| { type: "copyConversation" }
@@ -384,6 +436,8 @@ export type HostToWebview =
 	| { type: "models"; models: RpcModel[] }
 	| { type: "commands"; commands: RpcSlashCommand[] }
 	| { type: "history"; sessions: RecentSession[] }
+	| { type: "processes"; processes: SessionProcess[] }
+	| { type: "processOutput"; preview: ProcessOutputPreview }
 	| { type: "showHistory" }
 	| { type: "promptAccepted"; kind: "prompt" | "steer" | "followUp" }
 	| { type: "promptRejected"; error: string; clientRequestId?: string }

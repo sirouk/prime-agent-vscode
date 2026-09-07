@@ -334,6 +334,10 @@ export function parseWebviewMessage(value: unknown): WebviewToHost | undefined {
 			return isRequestId(value.ordinal) && value.ordinal <= MAX_FORK_ORDINAL ? { type: "forkFromUser", ordinal: value.ordinal } : undefined;
 		case "browseChild":
 			return isIdentifier(value.browseRef) ? { type: "browseChild", browseRef: value.browseRef } : undefined;
+		case "previewProcess":
+			return isIdentifier(value.ref) ? { type: "previewProcess", ref: value.ref } : undefined;
+		case "killProcess":
+			return isIdentifier(value.ref) ? { type: "killProcess", ref: value.ref } : undefined;
 		case "noticeAction":
 			return isIdentifier(value.id) ? { type: "noticeAction", id: value.id } : undefined;
 		case "renameSession":
@@ -452,6 +456,12 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			return;
 		case "browseChild":
 			await controller.browseChild(message.browseRef);
+			return;
+		case "previewProcess":
+			await controller.previewProcess(message.ref);
+			return;
+		case "killProcess":
+			await controller.killProcess(message.ref);
 			return;
 		case "noticeAction":
 			await controller.runNoticeAction(message.id);
