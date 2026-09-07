@@ -30,6 +30,9 @@ dist/*.map
 dist/controller.cjs
 dist/daemon-sidecar.cjs
 dist/session-actions.cjs
+dist/process-tracker.cjs
+dist/agent-jobs.cjs
+dist/background-jobs.cjs
 
 # Knowledge-graph output. Gitignored, which is exactly why it needs a line here:
 # vsce globs with dot:true and never reads .gitignore, so being invisible to git

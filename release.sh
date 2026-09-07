@@ -386,7 +386,10 @@ apply_release_changes "$chosen_tag" "$DRY_RUN"
 # that showed up untracked: graphify-out shipped 4 MB of symbol map naming the
 # very sources .vscodeignore excludes. Assert the whole file set instead — a
 # denylist only ever knows about yesterday's mistake.
-unexpected="$(./node_modules/.bin/vsce ls --no-dependencies 2>/dev/null | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|dist/extension\.js|media/(main\.js|main\.css|panels\.css|icon\.png|icon\.svg))$' || true)"
+# agent-extension/background-jobs is deliberately shipped: "Prime Agent: Install
+# Background Jobs Agent Extension" copies it out of the packaged extension into
+# ~/.prime/agent/extensions/, so a vsix without it makes that command fail.
+unexpected="$(./node_modules/.bin/vsce ls --no-dependencies 2>/dev/null | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|dist/extension\.js|agent-extension/background-jobs/(index|jobs)\.ts|media/(main\.js|main\.css|panels\.css|icon\.png|icon\.svg))$' || true)"
 if [ -n "$unexpected" ]; then
     printf '[release] refusing to package: unexpected files would ship inside the .vsix:\n' >&2
     printf '%s\n' "$unexpected" | sed 's/^/[release]   /' >&2
