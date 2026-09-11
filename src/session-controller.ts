@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { locateAgent, type LocatedAgent } from "./agent-locator.js";
 import { DaemonSidecar } from "./daemon-sidecar.js";
-import { defaultAgentDir, resolveOwnerClientId, type OwnerLookup } from "./daemon-owner.js";
+import { defaultAgentDir, resolveOwnerClientId, resolveWorkerDescriptor, type OwnerLookup } from "./daemon-owner.js";
 import type { AttachSnapshot, DaemonServerMessage, RosterEntry, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
 import type {
 	AgentEvent,
@@ -124,6 +124,12 @@ export class SessionController implements vscode.Disposable {
 	 * UI — status strip, composer, install recommendation — hangs off this.
 	 */
 	private reachable = false;
+	/**
+	 * The RPC subprocess starts as a client-owned worker. Once promoted to
+	 * resident, other prime-agent clients can see it and RPC disconnect no
+	 * longer reaps the agent.
+	 */
+	private rpcSessionPromoted = false;
 	/** Result of the last CLI lookup, for the install card's explanation. */
 	private locatedAgent: LocatedAgent | null = null;
 	/**
@@ -156,6 +162,11 @@ export class SessionController implements vscode.Disposable {
 	private observedSession: { activeSessionId: string; sessionId?: string; sessionPath?: string } | null = null;
 	/** A just-closed observed session stays non-interactive until our own view repaints. */
 	private observationRestoring = false;
+	/**
+	 * View epoch that owns an in-flight New Session. Prompts must not land on
+	 * the previous session while the empty new page is on screen.
+	 */
+	private creatingSessionEpoch: number | null = null;
 	/** Daemon sidecar for resident-session parity (attach/prompt/abort on live sessions). */
 	private sidecar: DaemonSidecar | null = null;
 	/** Serialize release/attach hand-offs for one daemon handle. */
@@ -218,6 +229,24 @@ export class SessionController implements vscode.Disposable {
 	) {
 		this.startWatcher();
 		this.scheduleProcessRefresh(0);
+		this.disposables.push(
+			vscode.workspace.onDidChangeConfiguration((event) => {
+				if (
+					event.affectsConfiguration("primeAgent.liveTranscript") ||
+					event.affectsConfiguration("primeAgent.streamToolOutput")
+				) {
+					this.pushStatusLight();
+				}
+			}),
+		);
+	}
+
+	private liveTranscript(): boolean {
+		return vscode.workspace.getConfiguration("primeAgent").get<boolean>("liveTranscript", false) === true;
+	}
+
+	private streamToolOutput(): boolean {
+		return vscode.workspace.getConfiguration("primeAgent").get<boolean>("streamToolOutput", false) === true;
 	}
 
 	get workspaceRoot(): string {
@@ -477,6 +506,7 @@ export class SessionController implements vscode.Disposable {
 		// Give the process a moment to fail fast on spawn problems before declaring success.
 		await new Promise((resolve) => setTimeout(resolve, 150));
 		await this.refreshSnapshot();
+		if (this.reachable) await this.promoteOwnRpcSession();
 	}
 
 	async restart(): Promise<void> {
@@ -496,10 +526,13 @@ export class SessionController implements vscode.Disposable {
 		// An explicit stop/restart is a deliberate act; the next failure is news
 		// again even if it is the same failure.
 		this.spawnErrorNotified = false;
+		// Kill the RPC client process only. After promote, the daemon worker is
+		// resident and survives this disconnect — same as closing a TUI.
 		this.client?.stop();
 		this.client = null;
 		this.state = null;
 		this.reachable = false;
+		this.rpcSessionPromoted = false;
 		this.clearRunFlags();
 		if (this.installWatchdog) {
 			clearTimeout(this.installWatchdog);
@@ -586,6 +619,8 @@ export class SessionController implements vscode.Disposable {
 				// A command that outlives the turn becomes unexplained the instant the
 				// turn ends, so promote it now rather than up to a poll later.
 				this.scheduleProcessRefresh(0);
+				// Rank only moves when the turn is done and the agent is waiting.
+				this.scheduleHistoryRefresh();
 				break;
 			case "compaction_start":
 				this.compacting = true;
@@ -622,6 +657,7 @@ export class SessionController implements vscode.Disposable {
 		// A `background` tool result is a job announcing that it started; the
 		// completion arrives as a custom message and lands via rebuildFromMessages.
 		if (this.agentJobs.track(event)) this.republishProcesses();
+		if (this.isCreatingSession()) return;
 		this.broadcast({ type: "event", event });
 		// Hot path: reuse cached stats; expensive stats refresh only on transitions.
 		if (
@@ -808,6 +844,43 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** Claim a new displayed-session intent before any validation or startup await. */
+	private isCreatingSession(): boolean {
+		return this.creatingSessionEpoch === this.viewEpoch;
+	}
+
+	private beginCreatingSession(): void {
+		this.creatingSessionEpoch = this.viewEpoch;
+		this.resetChildrenBaseline();
+		this.resetViewedSessionState();
+		this.clearRunFlags();
+		this.threadDiffs.clear();
+		this.broadcast({ type: "sessionChildren", children: [] });
+		this.broadcast({
+			type: "snapshot",
+			messages: [],
+			state: null,
+			status: this.buildStatus(),
+			steerDefault: vscode.workspace.getConfiguration("primeAgent").get<"steer" | "followUp">("defaultStreamingBehavior", "steer"),
+		});
+		this.pushStatus();
+	}
+
+	private abortCreatingSession(previous: AttachRef | null, previousMessages: AgentMessage[], epoch: number): void {
+		if (this.disposed || epoch !== this.viewEpoch) return;
+		this.creatingSessionEpoch = null;
+		this.cachedMessages = previousMessages;
+		this.restoreAttachedView(previous, epoch);
+		this.broadcast({
+			type: "snapshot",
+			messages: previousMessages,
+			state: this.rentedState ?? this.state,
+			status: this.buildStatus(),
+			steerDefault: vscode.workspace.getConfiguration("primeAgent").get<"steer" | "followUp">("defaultStreamingBehavior", "steer"),
+		});
+		this.restoreDraft();
+		this.pushStatus();
+	}
+
 	private beginNavigation(): number {
 		const epoch = ++this.viewEpoch;
 		// A socket-drop reconnect belongs to the view that dropped. Once the user
@@ -820,6 +893,10 @@ export class SessionController implements vscode.Disposable {
 
 	/** Block operations that would otherwise silently address the hidden RPC session. */
 	private guardObservedReadOnly(action: string): boolean {
+		if (this.isCreatingSession()) {
+			this.broadcast({ type: "notice", level: "warning", text: `Please wait for the new session to finish creating before ${action}.` });
+			return true;
+		}
 		if (this.attached && this.attachedEpoch !== this.viewEpoch) {
 			this.broadcast({ type: "notice", level: "warning", text: `Please wait for the session switch to finish before ${action}.` });
 			return true;
@@ -863,6 +940,7 @@ export class SessionController implements vscode.Disposable {
 			this.attached === null &&
 			this.observingId === null &&
 			!this.observationRestoring &&
+			!this.isCreatingSession() &&
 			!this.isReattaching()
 		);
 	}
@@ -875,6 +953,7 @@ export class SessionController implements vscode.Disposable {
 			this.attached === null &&
 			this.observingId === null &&
 			!this.isReattaching() &&
+			!this.isCreatingSession() &&
 			(allowRestoring || !this.observationRestoring) &&
 			epoch === this.viewEpoch
 		);
@@ -951,6 +1030,10 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async prompt(payload: PromptPayload, reply: (message: HostToWebview) => void = (message) => this.broadcast(message)): Promise<void> {
+		if (this.isCreatingSession()) {
+			this.rejectPrompt(payload, "The new session is still being created — nothing was sent.", reply);
+			return;
+		}
 		if (this.guardObservedReadOnly("sending a prompt")) {
 			this.rejectPrompt(payload, "The observed session is read-only in this window.", reply);
 			return;
@@ -1110,40 +1193,50 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async newSession(): Promise<void> {
+		if (this.creatingSessionEpoch === this.viewEpoch) return;
 		if (this.guardObservedReadOnly("starting a new session")) return;
+		this.broadcast({ type: "newThread" });
 		const previousAttachment = this.attached;
+		const previousMessages = this.cachedMessages;
 		const epoch = this.beginNavigation();
 		const observedAtStart = this.observingId;
+		this.beginCreatingSession();
 		await this.ensureStarted();
 		if (!this.client || this.disposed || epoch !== this.viewEpoch) {
-			this.restoreAttachedView(previousAttachment, epoch);
+			this.abortCreatingSession(previousAttachment, previousMessages, epoch);
 			return;
 		}
-		const client = this.client;
-		let response;
+		// RPC `new_session` replaces the runtime inside the current worker and
+		// aborts a running turn. Create a new resident worker instead so the
+		// previous session keeps running and stays visible to other clients.
 		try {
-			response = await client.request({ type: "new_session" });
-		} catch (err) {
-			if (this.client === client && !this.disposed && epoch === this.viewEpoch) {
-				this.broadcast({ type: "notice", level: "error", text: `New session failed: ${err instanceof Error ? err.message : String(err)}` });
-				this.restoreAttachedView(previousAttachment, epoch);
+			await this.promoteOwnRpcSession();
+			const sidecar = await this.ensureSidecar({ reattach: false });
+			if (this.disposed || epoch !== this.viewEpoch) {
+				this.abortCreatingSession(previousAttachment, previousMessages, epoch);
+				return;
 			}
-			return;
-		}
-		if (this.client !== client || this.disposed || epoch !== this.viewEpoch) return;
-		if (response.success) {
-			if (!(await this.detachFromDaemon()) || epoch !== this.viewEpoch) return;
+			const created = await sidecar.createResident({ cwd: this.workspaceRoot });
+			if (this.disposed || epoch !== this.viewEpoch) {
+				this.abortCreatingSession(previousAttachment, previousMessages, epoch);
+				return;
+			}
+			if (!(await this.detachFromDaemon(previousAttachment)) || epoch !== this.viewEpoch) return;
 			if (!(await this.clearObservation(observedAtStart, epoch))) return;
-			// History and New Session start a new top-level view. A breadcrumb into
-			// a prior session would make Back cross an explicit session boundary.
 			this.returnTargets = [];
-			this.resetChildrenBaseline();
-			this.resetViewedSessionState();
-			this.beginRpcRestore();
-			if (await this.restoreOwnRpcView(epoch)) this.scheduleChildrenRefresh();
-		} else {
-			this.broadcast({ type: "notice", level: "error", text: `New session failed: ${response.error ?? "unknown error"}` });
-			this.restoreAttachedView(previousAttachment, epoch);
+			const attached = await this.attachViaDaemon(created.activeSessionId!, created.sessionFile ?? "", epoch);
+			if (!attached && epoch === this.viewEpoch) {
+				this.creatingSessionEpoch = null;
+				this.broadcast({ type: "notice", level: "error", text: "New session failed: could not attach to the new worker." });
+				this.observationRestoring = true;
+				this.pushStatus();
+				void this.restoreAfterObservationClosed(epoch);
+			}
+		} catch (err) {
+			if (!this.disposed && epoch === this.viewEpoch) {
+				this.broadcast({ type: "notice", level: "error", text: `New session failed: ${err instanceof Error ? err.message : String(err)}` });
+				this.abortCreatingSession(previousAttachment, previousMessages, epoch);
+			}
 		}
 	}
 
@@ -1653,7 +1746,6 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	private historyRefreshTimer: NodeJS.Timeout | null = null;
-
 	/** Debounced history refresh after rename-affecting signals (CLI or other clients). */
 	private scheduleHistoryRefresh(): void {
 		if (this.historyRefreshTimer) clearTimeout(this.historyRefreshTimer);
@@ -2184,21 +2276,21 @@ export class SessionController implements vscode.Disposable {
 			// A session the roster capped away still deserves to be findable.
 			const modified = info.modified ? Date.parse(info.modified) : Number.NaN;
 			hits.push({
-				id: info.id,
-				path: info.path,
-				cwd: info.cwd,
-				timestamp: info.created ?? info.modified ?? new Date().toISOString(),
-				modifiedMs: Number.isFinite(modified) ? modified : undefined,
-				name: info.name,
-				firstPrompt: info.firstMessage,
-				inWorkspace: normalizeFsPath(info.cwd) === root,
-				// `running` stays unset: the saved catalog has no runtime state, and
-				// "we did not ask" must not render as "not running". The status dot
-				// says "inactive" for the same reason the on-disk scan does — this
-				// row exists only because the roster did not carry it.
-				status: "inactive",
-				matchSnippet: snippet,
-			});
+					id: info.id,
+					path: info.path,
+					cwd: info.cwd,
+					timestamp: info.created ?? info.modified ?? new Date().toISOString(),
+					modifiedMs: Number.isFinite(modified) ? modified : undefined,
+					name: info.name,
+					firstPrompt: info.firstMessage,
+					inWorkspace: normalizeFsPath(info.cwd) === root,
+					// `running` stays unset: the saved catalog has no runtime state, and
+					// "we did not ask" must not render as "not running". The status dot
+					// says "inactive" for the same reason the on-disk scan does — this
+					// row exists only because the roster did not carry it.
+					status: "inactive",
+					matchSnippet: snippet,
+				});
 		}
 		// Copy rather than tag `base` in place — it is the cache replayed on the
 		// next visit, and a snippet for a query the operator has already cleared
@@ -2967,11 +3059,6 @@ export class SessionController implements vscode.Disposable {
 			}
 			if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return this.rollbackAttachment(sidecar, attachment);
 			void this.refreshAttachedState();
-			this.broadcast({
-				type: "notice",
-				level: "info",
-				text: "Attached to the live session — you can work here and in the terminal simultaneously.",
-			});
 			this.scheduleChildrenRefresh();
 			this.resetViewedSessionState();
 			this.threadDiffs.clear();
@@ -2980,6 +3067,7 @@ export class SessionController implements vscode.Disposable {
 			await this.fetchAttachedStats();
 			if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return this.rollbackAttachment(sidecar, attachment);
 			this.observationRestoring = false;
+			this.creatingSessionEpoch = null;
 			this.applyAttachedSnapshot(snapshot);
 			return true;
 		} catch (error) {
@@ -3113,6 +3201,43 @@ export class SessionController implements vscode.Disposable {
 	 */
 	private async listSessions(sidecar: DaemonSidecar): Promise<SessionSummaryRef[]> {
 		return sidecar.list(true, { includeClientOwned: true });
+	}
+
+	/**
+	 * RPC mode creates a client-owned worker. Promote it to resident so:
+	 * other prime-agent processes can see the conversation, and closing the
+	 * RPC stdin does not reap the agent. Idempotent.
+	 */
+	private async promoteOwnRpcSession(): Promise<void> {
+		if (this.rpcSessionPromoted || this.disposed) return;
+		const sessionFile = this.state?.sessionFile;
+		if (!sessionFile) return;
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 5; attempt++) {
+			const descriptor = resolveWorkerDescriptor({ sessionFile });
+			const activeSessionId = descriptor?.rootActiveSessionId;
+			if (!activeSessionId) {
+				await new Promise((resolve) => setTimeout(resolve, 200));
+				continue;
+			}
+			if (!descriptor?.ownerClientId) {
+				this.rpcSessionPromoted = true;
+				return;
+			}
+			try {
+				const sidecar = await this.ensureSidecar({ reattach: false });
+				await sidecar.promoteOwnedSession(activeSessionId);
+				this.rpcSessionPromoted = true;
+				this.output.appendLine(`[prime-agent] promoted RPC session ${activeSessionId} to resident`);
+				return;
+			} catch (err) {
+				lastError = err;
+				await new Promise((resolve) => setTimeout(resolve, 200));
+			}
+		}
+		if (lastError) {
+			this.output.appendLine(`[prime-agent] promote_owned_session failed: ${String(lastError)}`);
+		}
 	}
 
 	/**
@@ -3890,6 +4015,10 @@ export class SessionController implements vscode.Disposable {
 	 * stale and applying it moves the caret to the end.
 	 */
 	async refreshSnapshot(options: { epoch?: number; allowRestoring?: boolean; keepDraft?: boolean } = {}): Promise<boolean> {
+		if (this.isCreatingSession()) {
+			this.pushStatus();
+			return false;
+		}
 		// Hiding and re-showing the view reloads the webview, which asks for a
 		// fresh snapshot. Our own background RPC client is still running, so
 		// without this branch the attached transcript is repainted with the
@@ -4093,6 +4222,30 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	private buildStatus(statsText = this.lastStatsText): StatusSnapshot {
+		if (this.isCreatingSession()) {
+			const st = (this.rentedState ?? this.state) as RpcSessionState | null;
+			const model = st?.model ?? null;
+			const label = model ? `${model.provider}/${model.id}` : "prime-agent";
+			return {
+				connected: this.reachable || Boolean(this.attached) || Boolean(this.sidecar?.connected),
+				streaming: false,
+				compacting: false,
+				retrying: false,
+				restoring: true,
+				modelLabel: label,
+				thinkingLevel: st?.thinkingLevel ?? "off",
+				availableThinkingLevels: supportedThinkingLevels(model),
+				statsText: "",
+				statusText: "creating session…",
+				modelProvider: model?.provider,
+				modelId: model?.id,
+				observingId: null,
+				compactThresholdPercent: null,
+				compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
+			};
+		}
 		if (this.observingId) {
 			const observed = this.observedSession;
 			return {
@@ -4111,6 +4264,8 @@ export class SessionController implements vscode.Disposable {
 				observingId: this.observingId,
 				compactThresholdPercent: this.compactThreshold(),
 				compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
 			};
 		}
 		if (this.isReattaching()) {
@@ -4136,6 +4291,8 @@ export class SessionController implements vscode.Disposable {
 				observingId: this.observingId,
 				compactThresholdPercent: this.compactThreshold(),
 				compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
 				...this.lastUsage,
 			};
 		}
@@ -4170,15 +4327,17 @@ export class SessionController implements vscode.Disposable {
 				statusText: switching
 					? "switching sessions…"
 					: compacting
-					? "compacting (shared with terminal)"
+					? "compacting"
 					: streaming
-						? "running (shared with terminal)"
-						: "attached (shared with terminal)",
+						? "running"
+						: "attached",
 				modelProvider: model?.provider,
 				modelId: model?.id,
 				observingId: this.observingId,
 				compactThresholdPercent: this.compactThreshold(),
 				compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
 				...this.lastUsage,
 			};
 		}
@@ -4208,6 +4367,8 @@ export class SessionController implements vscode.Disposable {
 			observingId: this.observingId,
 			compactThresholdPercent: this.compactThreshold(),
 			compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
 			...this.lastUsage,
 		};
 	}

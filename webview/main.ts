@@ -207,6 +207,7 @@ const composerDeps = {
 		const clientRequestId = `${promptClientScope}-${++nextPromptClientRequestId}`;
 		pendingPrompts.set(clientRequestId, { text, images: [...images], selections: [...selections] });
 		transcript.showOptimisticUserMessage(clientRequestId, text, images);
+		transcript.markSending();
 		post({
 			type: "prompt",
 			// Stamp the thread this was typed in. The host refuses the send if that
@@ -245,7 +246,11 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 	onOpenDiff: (path) => post({ type: "openDiff", path }),
 	onForkFromUser: (ordinal) => post({ type: "forkFromUser", ordinal }),
 	onSpawnedCardClick: (browseRef) => post({ type: "browseChild", browseRef }),
-	onNewSession: () => post({ type: "newSession" }),
+	onNewSession: () => {
+		composer.flushDraft();
+		startNewThread();
+		post({ type: "newSession" });
+	},
 	onShowHistory: () => {
 		showView("history");
 		historyView.showLoading();
@@ -607,7 +612,7 @@ function showView(view: "chat" | "history"): void {
 	if (view === "history") historyView.showLoading();
 }
 
-newChatBtn.addEventListener("click", () => {
+function startNewThread(): void {
 	showView("chat");
 	subagentsExpanded = false;
 	// A new thread starts with no instruction from the operator about this strip.
@@ -615,6 +620,38 @@ newChatBtn.addEventListener("click", () => {
 	spawnSeenBaseline = false;
 	resetSubagentActivityBaseline();
 	renderSubagentsStrip();
+	pendingPrompts.clear();
+	authoritativeSessionId = undefined;
+	transcript.clearSpawnCards?.();
+	transcript.renderSnapshot([]);
+	composer.resetForSessionBoundary();
+	composer.setStreaming(false);
+	composer.setEnabled(false, "Creating session…");
+	if (currentStatus) {
+		currentStatus = {
+			...currentStatus,
+			sessionId: undefined,
+			sessionName: undefined,
+			streaming: false,
+			restoring: true,
+			statusText: "creating session…",
+			statsText: "",
+		};
+		renderLiveLabel(currentStatus);
+		sessionIdLabel.textContent = "";
+		sessionIdLabel.title = "";
+		statsLabel.textContent = "";
+	}
+}
+
+function openHistory(): void {
+	showView("history");
+	post({ type: "requestHistory" });
+}
+
+newChatBtn.addEventListener("click", () => {
+	composer.flushDraft();
+	startNewThread();
 	post({ type: "newSession" });
 });
 historyBtn.addEventListener("click", () => {
@@ -756,7 +793,16 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	// The strip says "offline"; the composer has to mean it, or the operator's
 	// prompt disappears into a 120s timeout with a green dot above it.
-	composer.setEnabled(status.connected && !status.restoring);
+	transcript.setLiveTranscript(status.liveTranscript === true);
+	transcript.setStreamToolOutput(status.streamToolOutput === true);
+	composer.setEnabled(
+		status.connected && !status.restoring,
+		status.restoring
+			? (status.statusText === "creating session…" ? "Creating session…" : "Reconnecting…")
+			: status.connected
+				? null
+				: "Not connected — prime-agent isn't answering",
+	);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
 	// Unconditional: skipping this on a status that carries no override left the
 	// previous session's tick painted on the bar of the session now on screen.
@@ -968,7 +1014,11 @@ function dispatchHostMessage(message: HostToWebview): void {
 			historyView.render(message.sessions, currentStatus?.sessionId);
 			break;
 		case "showHistory":
-			showView("history");
+			openHistory();
+			break;
+		case "newThread":
+			composer.flushDraft();
+			startNewThread();
 			break;
 		case "observedSession":
 			adoptAuthoritativeSession(message.sessionId);
@@ -1065,6 +1115,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			const rejected = message.clientRequestId ? pendingPrompts.get(message.clientRequestId) : undefined;
 			const removed = transcript.rejectOptimistic(message.clientRequestId);
 			if (message.clientRequestId) pendingPrompts.delete(message.clientRequestId);
+			transcript.clearSendingIfIdle();
 			// A selection-only prompt draws no local echo, so `removed` is false for
 			// it — gating the restore on `removed` alone silently ate the operator's
 			// attachments when the host refused the send.

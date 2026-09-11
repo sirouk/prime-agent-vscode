@@ -163,37 +163,48 @@ check("edit copy emits the output once, not twice", clipboard.split("edited src/
 	// Appends to the live transcript on purpose — resetting with a snapshot here
 	// would wipe the turns the checks further down still need.
 	const partial = { role: "assistant", content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: {} }] };
+	hostMessage({ type: "event", event: { type: "agent_start" } });
 	hostMessage({ type: "event", event: { type: "message_start", message: partial } });
 	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
-
-	// Hold the node: the block is reused across frames, so the reference stays valid
-	// and can never drift onto one of the ipython cards rendered earlier in this file.
-	const card = [...document.querySelectorAll(".messages .tool")].pop();
-	check("tool card appears on the first (argument-less) frame", !!card && card.dataset.toolName === "ipython", card?.dataset.toolName ?? "<none>");
-	check("summary starts empty because the arguments have not arrived",
-		(card?.querySelector(".tool-summary")?.textContent ?? "") === "");
+	check("unfinished tool calls stay behind the working row by default",
+		!scroller.querySelector('[data-part="tool-stream-1"]') && !!scroller.querySelector(".working-row"),
+		scroller.querySelector(".working-row")?.textContent ?? "none");
 
 	const full = {
 		role: "assistant",
 		content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: { code: "%%bash\ncd /repo\nnpm run build -- --prod" } }],
 	};
 	hostMessage({ type: "event", event: { type: "message_update", message: full } });
+	check("complete arguments still wait for execution when liveTranscript is off",
+		!scroller.querySelector('[data-part="tool-stream-1"]'));
 
-	// prime-agent's own scorer condenses `npm run build` to `npm build`.
+	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "stream-1", toolName: "ipython", args: full.content[0].arguments } });
+	const card = [...document.querySelectorAll(".messages .tool")].pop();
 	const summaryText = () => card?.querySelector(".tool-summary")?.textContent ?? "";
 	const inputText = () => card?.querySelector(".tool-section:not(.tool-result) pre")?.textContent ?? "";
-	check("collapsed summary fills in once the arguments arrive", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+	check("tool_execution_start reveals the card", !!card && card.dataset.part === "tool-stream-1", card?.dataset.part ?? "<none>");
+	check("collapsed summary fills in once the tool starts", summaryText().includes("npm build"), JSON.stringify(summaryText()));
 	check("expanded call fills in too", inputText().includes("npm run build -- --prod"), JSON.stringify(inputText()));
-	check("late arguments upgrade the card to a shell card", card?.dataset.toolKind === "shell", card?.dataset.toolKind ?? "<none>");
-
-	// A trailing partial frame must never wipe a card that is already complete.
+	check("execution upgrades the card to a shell card", card?.dataset.toolKind === "shell", card?.dataset.toolKind ?? "<none>");
 	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
 	check("a later empty frame cannot blank the summary", summaryText().includes("npm build"), JSON.stringify(summaryText()));
 	check("a later empty frame cannot blank the call", inputText().includes("npm run build -- --prod"), JSON.stringify(inputText()));
-
-	// tool_execution_start repeats the same args last; it must not regress anything.
-	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "stream-1", toolName: "ipython", args: full.content[0].arguments } });
 	check("tool_execution_start leaves the completed card intact", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+	hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+}
+
+{
+	hostMessage({ type: "status", status: { ...baseStatus, liveTranscript: true } });
+	const partial = { role: "assistant", content: [{ type: "toolCall", id: "stream-live-1", name: "ipython", arguments: {} }] };
+	hostMessage({ type: "event", event: { type: "message_start", message: partial } });
+	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
+	const liveCard = [...document.querySelectorAll(".messages .tool")].pop();
+	check("liveTranscript paints the tool card on the first argument-less frame",
+		!!liveCard && liveCard.dataset.toolName === "ipython" && liveCard.dataset.part === "tool-stream-live-1",
+		liveCard?.dataset.part ?? "<none>");
+	check("summary starts empty because the arguments have not arrived",
+		(liveCard?.querySelector(".tool-summary")?.textContent ?? "") === "");
+	hostMessage({ type: "status", status: { ...baseStatus, liveTranscript: false } });
 }
 
 // --- #23: the user turn shows a price, honestly labeled as the reply's input cost ---
@@ -326,6 +337,40 @@ textarea.value = "test prompt";
 textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
 const promptMsg = posted.find((m) => m.type === "prompt");
 check("enter sends prompt", !!promptMsg && promptMsg.payload.text === "test prompt");
+
+// --- IME composition: the mirror must show the composing range, and Enter must
+// not send while a candidate is still being chosen (the native underline is
+// invisible because the textarea is color:transparent).
+posted.length = 0;
+textarea.value = "輸入";
+textarea.selectionStart = 0;
+textarea.selectionEnd = 2;
+textarea.dispatchEvent(new window.CompositionEvent("compositionstart", { data: "輸入" }));
+textarea.dispatchEvent(new window.CompositionEvent("compositionupdate", { data: "輸入" }));
+textarea.dispatchEvent(new window.InputEvent("input", { data: "輸入", isComposing: true, bubbles: true }));
+check("composing range is underlined on the mirror",
+	[...document.querySelectorAll(".composer-mirror .ime")].some((n) => n.textContent === "輸入"),
+	document.querySelector(".composer-mirror")?.innerHTML ?? "<none>");
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, isComposing: true }));
+check("Enter during composition does not send", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, isComposing: true, keyCode: 229 }));
+check("IME keyCode 229 Enter does not send", !posted.some((m) => m.type === "prompt"));
+textarea.dispatchEvent(new window.CompositionEvent("compositionend", { data: "輸入" }));
+textarea.dispatchEvent(new window.InputEvent("input", { data: "輸入", bubbles: true }));
+check("underline clears after compositionend",
+	document.querySelectorAll(".composer-mirror .ime").length === 0,
+	document.querySelector(".composer-mirror")?.innerHTML ?? "<none>");
+const confirmEnter = new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+textarea.dispatchEvent(confirmEnter);
+check("Enter that confirms composition does not send", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+await new Promise((resolve) => setTimeout(resolve, 0));
+posted.length = 0;
+textarea.value = "輸入";
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("Enter after composition sends the committed text",
+	posted.some((m) => m.type === "prompt" && m.payload.text === "輸入"),
+	JSON.stringify(posted.filter((m) => m.type === "prompt").map((m) => m.payload?.text)));
+
 
 // --- history view (grouped) ---
 posted.length = 0;
@@ -1240,7 +1285,11 @@ const slashItems = () => {
 	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
 	return [...document.querySelectorAll(".ac-item")].map((item) => item.textContent.trim());
 };
-check("slash menu lists the agent's commands", slashItems().length === 2, JSON.stringify(slashItems()));
+const listed = slashItems();
+check("slash menu lists UI commands before the agent's catalog",
+	listed[0]?.startsWith("/model") && listed.some((item) => item.startsWith("/effort")) && listed.some((item) => item.startsWith("/stash")),
+	JSON.stringify(listed));
+check("slash menu still lists the agent's commands", listed.some((item) => item.startsWith("/compact")) && listed.some((item) => item.includes("security-pipeline")), JSON.stringify(listed));
 posted.length = 0;
 hostMessage({ type: "status", status: { ...baseStatus, sessionId: "session-boundary-slash", sessionName: "slash" } });
 check("a session boundary re-requests the slash catalog it just discarded",
@@ -1250,9 +1299,84 @@ hostMessage({ type: "commands", commands: [
 	{ name: "compact", description: "Compact the context" },
 	{ name: "security-pipeline", description: "Run the security review" },
 ] });
-check("the slash menu works again in the resumed thread", slashItems().length === 2, JSON.stringify(slashItems()));
+const resumed = slashItems();
+check("the slash menu works again in the resumed thread",
+	resumed.some((item) => item.startsWith("/compact")) && resumed.some((item) => item.startsWith("/model")),
+	JSON.stringify(resumed));
 textarea.value = "";
 textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+// --- /model /effort intercept the composer instead of prompting; /stash parks the draft ---
+hostMessage({
+	type: "models",
+	models: [
+		{ provider: "chutes", id: "kimi", contextWindow: 262144, reasoning: true, input: ["text", "image"] },
+		{ provider: "chutes", id: "glm", contextWindow: 131072, reasoning: false, input: ["text"] },
+		{ provider: "openai", id: "gpt-5", contextWindow: 400000, reasoning: true, input: ["text", "image"] },
+	],
+});
+hostMessage({ type: "status", status: { ...baseStatus, availableThinkingLevels: ["off", "minimal", "low", "medium", "high", "max"] } });
+
+textarea.value = "keep this draft";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.value = "/stash";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/stash parks the draft and clears the composer", textarea.value === "", JSON.stringify(textarea.value));
+check("/stash does not send a prompt", !posted.some((m) => m.type === "prompt"));
+check("/stash hint is shown", (document.querySelector(".composer-hint")?.textContent ?? "").includes("Stashed"));
+textarea.value = "/stash";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/stash restores the parked draft", textarea.value === "keep this draft", JSON.stringify(textarea.value));
+check("restoring stash does not prompt", !posted.some((m) => m.type === "prompt"));
+
+textarea.value = "draft before model";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.value = "/model";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+const modelSlashRow = [...document.querySelectorAll(".ac-item")].find((row) => row.textContent.startsWith("/model"));
+check("/ lists /model as a local command", !!modelSlashRow, JSON.stringify([...document.querySelectorAll(".ac-item")].map((row) => row.textContent)));
+modelSlashRow.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+const modelDrop = document.querySelector(".dropdown");
+check("accepting /model opens the model menu", !!modelDrop && !!modelDrop.querySelector(".dropdown-search"));
+check("model search box has keyboard focus", document.activeElement === modelDrop.querySelector(".dropdown-search"));
+check("/model does not prompt", !posted.some((m) => m.type === "prompt"));
+check("/model stashes the prior draft out of the composer", textarea.value === "", JSON.stringify(textarea.value));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("ArrowDown+Enter picks a model from /model", posted.some((m) => m.type === "setModel"), JSON.stringify(posted.map((m) => m.type)));
+check("picking a model restores the stashed draft", textarea.value === "draft before model", JSON.stringify(textarea.value));
+check("model menu closed after keyboard select", !document.querySelector(".dropdown"));
+
+textarea.value = "/model glm";
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/model glm sets the model without a picker", posted.some((m) => m.type === "setModel" && m.modelId === "glm") && !document.querySelector(".dropdown"), JSON.stringify(posted));
+check("/model glm restores the prior draft", textarea.value === "draft before model", JSON.stringify(textarea.value));
+
+textarea.value = "/effort";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const effortDrop = document.querySelector(".dropdown");
+check("/effort opens the thinking menu", !!effortDrop && (effortDrop.querySelector(".dropdown-header")?.textContent ?? "").startsWith("Thinking"));
+check("thinking search box has keyboard focus", document.activeElement === effortDrop.querySelector(".dropdown-search"));
+check("/effort does not prompt", !posted.some((m) => m.type === "prompt"));
+effortDrop.querySelector(".dropdown-search").value = "high";
+effortDrop.querySelector(".dropdown-search").dispatchEvent(new window.Event("input", { bubbles: true }));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("typing a level and Enter sets thinking", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"), JSON.stringify(posted));
+check("/effort restores the stashed draft after pick", textarea.value === "draft before model", JSON.stringify(textarea.value));
+
+textarea.value = "/effort medium";
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/effort medium sets the level without a picker", posted.some((m) => m.type === "setThinkingLevel" && m.level === "medium") && !document.querySelector(".dropdown"), JSON.stringify(posted));
 
 // --- paste image on a text-only model shows a composer hint ---
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
@@ -1365,8 +1489,10 @@ check("separate sends carry separate client request ids",
 		firstOptimisticPrompt?.payload?.clientRequestId !== secondOptimisticPrompt?.payload?.clientRequestId,
 	JSON.stringify(posted.filter((m) => m.type === "prompt").map((m) => m.payload.clientRequestId)));
 check("two optimistic rows render before either verdict", scroller.querySelectorAll(".row-user").length === 2, String(scroller.querySelectorAll(".row-user").length));
+check("send paints a working spinner before the first token", !!scroller.querySelector(".working-row .working-spinner") && (scroller.querySelector(".working-label")?.textContent ?? "").length > 0 && !/Sending/.test(scroller.querySelector(".working-label")?.textContent ?? ""), scroller.querySelector(".working-label")?.textContent ?? "none");
 hostMessage({ type: "promptRejected", error: "transport disconnected", clientRequestId: firstOptimisticPrompt?.payload?.clientRequestId });
 check("rejection removes the exact optimistic row", !scroller.textContent.includes("first optimistic prompt") && scroller.textContent.includes("second optimistic prompt"), scroller.textContent);
+check("rejection of one queued send keeps the working spinner", !!scroller.querySelector(".working-row") && !/Sending/.test(scroller.querySelector(".working-label")?.textContent ?? ""));
 check("rejection restores the rejected draft when no newer draft exists", textarea.value === "first optimistic prompt", textarea.value);
 textarea.value = "";
 hostMessage({ type: "event", event: { type: "message_start", message: { role: "user", content: "second optimistic prompt" } } });
@@ -1504,6 +1630,21 @@ posted.length = 0;
 document.querySelector(".topbar .brand").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("header mark opens the prime-agent write-up",
 	posted.some((m) => m.type === "openExternal" && m.url === "https://www.primeintellect.ai/blog/prime-agent#article-top"), JSON.stringify(posted));
+// Session actions now live in the VS Code view title bar, not a webview kebab.
+hostMessage({ type: "newThread" });
+check("host newThread returns to chat", document.querySelector(".history-view")?.style.display === "none");
+check("newThread paints the empty session immediately", !!document.querySelector(".welcome"), document.querySelector(".messages")?.textContent?.slice(0, 80) ?? "none");
+check("newThread blocks send until the host confirms the session", textarea.disabled && textarea.placeholder === "Creating session…", `${textarea.disabled} ${textarea.placeholder}`);
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("Enter during create does not post a prompt", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+hostMessage({
+	type: "snapshot",
+	messages: [],
+	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
+	status: { ...baseStatus, sessionId: "session-created", sessionName: "", restoring: false },
+});
+check("the created session unlocks the composer", !textarea.disabled && textarea.placeholder === "Message Prime Agent…", `${textarea.disabled} ${textarea.placeholder}`);
 
 // --- #5/C10: steer vs queue while a run is live, and a Stop that really aborts ---
 const behaviorPill = document.querySelector(".composer-rail .rail-pill.behavior");
@@ -1653,13 +1794,27 @@ check("...while the reply itself still renders", /answer/.test(scroller.textCont
 // open/closed state on every frame.
 hostMessage({ type: "snapshot", status: { ...baseStatus, sessionId: "session-thinking-2" }, state: null, messages: [] });
 hostMessage({ type: "event", event: { type: "agent_start" } });
+check("agent_start paints a working row immediately", !!scroller.querySelector(".working-row .working-spinner"), scroller.querySelector(".working-row")?.textContent ?? "none");
 hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "" }] } } });
 check("no box while the thinking slot is still empty", !scroller.querySelector("details.thinking"));
+check("empty message_start keeps the working spinner", !!scroller.querySelector(".working-row") && !scroller.querySelector(".row-assistant"), scroller.querySelector(".working-row")?.textContent ?? "none");
 hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one" }] } } });
+check("thinking stays behind the working row until it settles", !scroller.querySelector("details.thinking") && !!scroller.querySelector(".working-row"));
+hostMessage({ type: "event", event: { type: "message_end", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one, step two" }] } } });
 const born = scroller.querySelector("details.thinking");
-check("the box appears with the first delta", !!born && /step one/.test(born.textContent));
+check("the box appears once thinking settles", !!born && /step two/.test(born.textContent));
+check("settled thinking is collapsed by default", born instanceof window.HTMLDetailsElement && born.open === false);
+hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+
+hostMessage({ type: "snapshot", status: { ...baseStatus, sessionId: "session-thinking-live", liveTranscript: true }, state: null, messages: [] });
+hostMessage({ type: "event", event: { type: "agent_start" } });
+hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "" }] } } });
+hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one" }] } } });
+const liveBorn = scroller.querySelector("details.thinking");
+check("liveTranscript paints thinking on the first delta", !!liveBorn && /step one/.test(liveBorn.textContent));
+check("the first visible token replaces the working spinner", !scroller.querySelector(".working-row"));
 hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one, step two" }] } } });
-check("later deltas grow the same node, not a new one", scroller.querySelector("details.thinking") === born);
+check("later deltas grow the same node, not a new one", scroller.querySelector("details.thinking") === liveBorn);
 check("...and its text keeps up", /step two/.test(scroller.querySelector("details.thinking").textContent));
 hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
 
@@ -1875,6 +2030,7 @@ hostMessage({
 document.querySelector(".pr-subhead")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("an observed row claims no exit status", !document.querySelector(".pr-status"));
 check("an observed row offers no stop", !document.querySelector(".pr-kill"));
+
 
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

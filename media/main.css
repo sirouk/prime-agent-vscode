@@ -479,6 +479,20 @@ textarea::-webkit-scrollbar {
 	50% { opacity: 0.45; transform: scale(0.92); }
 }
 
+.working-spinner {
+	width: 10px;
+	height: 10px;
+	border: 1.5px solid var(--pa-accent);
+	border-right-color: transparent;
+	border-radius: 50%;
+	flex-shrink: 0;
+	animation: pa-spin 0.7s linear infinite;
+}
+
+@keyframes pa-spin {
+	to { transform: rotate(360deg); }
+}
+
 /* ---------- markdown ---------- */
 
 .md p {

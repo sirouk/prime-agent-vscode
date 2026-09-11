@@ -22,6 +22,7 @@ const vscodeStub = {
 	},
 	workspace: {
 		getConfiguration: () => ({ get: (_key, fallback) => fallback }),
+		onDidChangeConfiguration: () => ({ dispose: () => {} }),
 		workspaceFolders: [{ uri: { fsPath: process.env.HOST_E2E_CWD ?? process.cwd(), scheme: "file" }, name: "e2e", index: 0 }],
 		createFileSystemWatcher: () => ({
 			onDidCreate: () => ({ dispose: () => {} }),

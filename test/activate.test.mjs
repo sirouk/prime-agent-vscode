@@ -34,6 +34,7 @@ const vscodeStub = {
 	},
 	workspace: {
 		getConfiguration: () => ({ get: (_key, fallback) => fallback }),
+		onDidChangeConfiguration: () => ({ dispose: () => {} }),
 		workspaceFolders: [{ uri: { fsPath: process.cwd(), scheme: "file" }, name: "stub", index: 0 }],
 		createFileSystemWatcher: () => ({
 			onDidCreate: () => ({ dispose: () => {} }),

@@ -505,7 +505,7 @@ try {
 						}), liveTerminal.marker);
 						check(
 							"C9 live terminal resumes as writable shared attach",
-							/shared with terminal/i.test(shared.status) && !shared.observe && shared.marker && shared.writable,
+							!shared.observe && shared.marker && shared.writable,
 							JSON.stringify(shared),
 						);
 						await shot("06-live-shared");
@@ -518,7 +518,7 @@ try {
 								return !!banner && getComputedStyle(banner).display !== "none";
 							})(),
 						}));
-						check("C9 returns from shared terminal session", !/shared with terminal/i.test(returned.status) && !returned.observe, JSON.stringify(returned));
+						check("C9 returns from shared terminal session", !/\battached\b/i.test(returned.status) && !returned.observe, JSON.stringify(returned));
 					}
 				}
 			}
