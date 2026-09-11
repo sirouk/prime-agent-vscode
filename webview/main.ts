@@ -207,6 +207,7 @@ const composerDeps = {
 		const clientRequestId = `${promptClientScope}-${++nextPromptClientRequestId}`;
 		pendingPrompts.set(clientRequestId, { text, images: [...images], selections: [...selections] });
 		transcript.showOptimisticUserMessage(clientRequestId, text, images);
+		transcript.markSending();
 		post({
 			type: "prompt",
 			// Stamp the thread this was typed in. The host refuses the send if that
@@ -756,6 +757,8 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 	composer.setStreaming(transcript.isStreaming() || status.streaming);
 	// The strip says "offline"; the composer has to mean it, or the operator's
 	// prompt disappears into a 120s timeout with a green dot above it.
+	transcript.setLiveTranscript(status.liveTranscript === true);
+	transcript.setStreamToolOutput(status.streamToolOutput === true);
 	composer.setEnabled(status.connected && !status.restoring);
 	composer.setContext(status.contextPercent, status.contextTokens, status.contextWindow);
 	// Unconditional: skipping this on a status that carries no override left the
@@ -1065,6 +1068,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			const rejected = message.clientRequestId ? pendingPrompts.get(message.clientRequestId) : undefined;
 			const removed = transcript.rejectOptimistic(message.clientRequestId);
 			if (message.clientRequestId) pendingPrompts.delete(message.clientRequestId);
+			transcript.clearSendingIfIdle();
 			// A selection-only prompt draws no local echo, so `removed` is false for
 			// it — gating the restore on `removed` alone silently ate the operator's
 			// attachments when the host refused the send.

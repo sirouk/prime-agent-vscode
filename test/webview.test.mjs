@@ -163,37 +163,48 @@ check("edit copy emits the output once, not twice", clipboard.split("edited src/
 	// Appends to the live transcript on purpose — resetting with a snapshot here
 	// would wipe the turns the checks further down still need.
 	const partial = { role: "assistant", content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: {} }] };
+	hostMessage({ type: "event", event: { type: "agent_start" } });
 	hostMessage({ type: "event", event: { type: "message_start", message: partial } });
 	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
-
-	// Hold the node: the block is reused across frames, so the reference stays valid
-	// and can never drift onto one of the ipython cards rendered earlier in this file.
-	const card = [...document.querySelectorAll(".messages .tool")].pop();
-	check("tool card appears on the first (argument-less) frame", !!card && card.dataset.toolName === "ipython", card?.dataset.toolName ?? "<none>");
-	check("summary starts empty because the arguments have not arrived",
-		(card?.querySelector(".tool-summary")?.textContent ?? "") === "");
+	check("unfinished tool calls stay behind the working row by default",
+		!scroller.querySelector('[data-part="tool-stream-1"]') && !!scroller.querySelector(".working-row"),
+		scroller.querySelector(".working-row")?.textContent ?? "none");
 
 	const full = {
 		role: "assistant",
 		content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: { code: "%%bash\ncd /repo\nnpm run build -- --prod" } }],
 	};
 	hostMessage({ type: "event", event: { type: "message_update", message: full } });
+	check("complete arguments still wait for execution when liveTranscript is off",
+		!scroller.querySelector('[data-part="tool-stream-1"]'));
 
-	// prime-agent's own scorer condenses `npm run build` to `npm build`.
+	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "stream-1", toolName: "ipython", args: full.content[0].arguments } });
+	const card = [...document.querySelectorAll(".messages .tool")].pop();
 	const summaryText = () => card?.querySelector(".tool-summary")?.textContent ?? "";
 	const inputText = () => card?.querySelector(".tool-section:not(.tool-result) pre")?.textContent ?? "";
-	check("collapsed summary fills in once the arguments arrive", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+	check("tool_execution_start reveals the card", !!card && card.dataset.part === "tool-stream-1", card?.dataset.part ?? "<none>");
+	check("collapsed summary fills in once the tool starts", summaryText().includes("npm build"), JSON.stringify(summaryText()));
 	check("expanded call fills in too", inputText().includes("npm run build -- --prod"), JSON.stringify(inputText()));
-	check("late arguments upgrade the card to a shell card", card?.dataset.toolKind === "shell", card?.dataset.toolKind ?? "<none>");
-
-	// A trailing partial frame must never wipe a card that is already complete.
+	check("execution upgrades the card to a shell card", card?.dataset.toolKind === "shell", card?.dataset.toolKind ?? "<none>");
 	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
 	check("a later empty frame cannot blank the summary", summaryText().includes("npm build"), JSON.stringify(summaryText()));
 	check("a later empty frame cannot blank the call", inputText().includes("npm run build -- --prod"), JSON.stringify(inputText()));
-
-	// tool_execution_start repeats the same args last; it must not regress anything.
-	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "stream-1", toolName: "ipython", args: full.content[0].arguments } });
 	check("tool_execution_start leaves the completed card intact", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+	hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+}
+
+{
+	hostMessage({ type: "status", status: { ...baseStatus, liveTranscript: true } });
+	const partial = { role: "assistant", content: [{ type: "toolCall", id: "stream-live-1", name: "ipython", arguments: {} }] };
+	hostMessage({ type: "event", event: { type: "message_start", message: partial } });
+	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
+	const liveCard = [...document.querySelectorAll(".messages .tool")].pop();
+	check("liveTranscript paints the tool card on the first argument-less frame",
+		!!liveCard && liveCard.dataset.toolName === "ipython" && liveCard.dataset.part === "tool-stream-live-1",
+		liveCard?.dataset.part ?? "<none>");
+	check("summary starts empty because the arguments have not arrived",
+		(liveCard?.querySelector(".tool-summary")?.textContent ?? "") === "");
+	hostMessage({ type: "status", status: { ...baseStatus, liveTranscript: false } });
 }
 
 // --- #23: the user turn shows a price, honestly labeled as the reply's input cost ---
@@ -1365,8 +1376,10 @@ check("separate sends carry separate client request ids",
 		firstOptimisticPrompt?.payload?.clientRequestId !== secondOptimisticPrompt?.payload?.clientRequestId,
 	JSON.stringify(posted.filter((m) => m.type === "prompt").map((m) => m.payload.clientRequestId)));
 check("two optimistic rows render before either verdict", scroller.querySelectorAll(".row-user").length === 2, String(scroller.querySelectorAll(".row-user").length));
+check("send paints a working spinner before the first token", !!scroller.querySelector(".working-row .working-spinner") && (scroller.querySelector(".working-label")?.textContent ?? "").length > 0 && !/Sending/.test(scroller.querySelector(".working-label")?.textContent ?? ""), scroller.querySelector(".working-label")?.textContent ?? "none");
 hostMessage({ type: "promptRejected", error: "transport disconnected", clientRequestId: firstOptimisticPrompt?.payload?.clientRequestId });
 check("rejection removes the exact optimistic row", !scroller.textContent.includes("first optimistic prompt") && scroller.textContent.includes("second optimistic prompt"), scroller.textContent);
+check("rejection of one queued send keeps the working spinner", !!scroller.querySelector(".working-row") && !/Sending/.test(scroller.querySelector(".working-label")?.textContent ?? ""));
 check("rejection restores the rejected draft when no newer draft exists", textarea.value === "first optimistic prompt", textarea.value);
 textarea.value = "";
 hostMessage({ type: "event", event: { type: "message_start", message: { role: "user", content: "second optimistic prompt" } } });
@@ -1653,13 +1666,27 @@ check("...while the reply itself still renders", /answer/.test(scroller.textCont
 // open/closed state on every frame.
 hostMessage({ type: "snapshot", status: { ...baseStatus, sessionId: "session-thinking-2" }, state: null, messages: [] });
 hostMessage({ type: "event", event: { type: "agent_start" } });
+check("agent_start paints a working row immediately", !!scroller.querySelector(".working-row .working-spinner"), scroller.querySelector(".working-row")?.textContent ?? "none");
 hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "" }] } } });
 check("no box while the thinking slot is still empty", !scroller.querySelector("details.thinking"));
+check("empty message_start keeps the working spinner", !!scroller.querySelector(".working-row") && !scroller.querySelector(".row-assistant"), scroller.querySelector(".working-row")?.textContent ?? "none");
 hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one" }] } } });
+check("thinking stays behind the working row until it settles", !scroller.querySelector("details.thinking") && !!scroller.querySelector(".working-row"));
+hostMessage({ type: "event", event: { type: "message_end", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one, step two" }] } } });
 const born = scroller.querySelector("details.thinking");
-check("the box appears with the first delta", !!born && /step one/.test(born.textContent));
+check("the box appears once thinking settles", !!born && /step two/.test(born.textContent));
+check("settled thinking is collapsed by default", born instanceof window.HTMLDetailsElement && born.open === false);
+hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+
+hostMessage({ type: "snapshot", status: { ...baseStatus, sessionId: "session-thinking-live", liveTranscript: true }, state: null, messages: [] });
+hostMessage({ type: "event", event: { type: "agent_start" } });
+hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "" }] } } });
+hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one" }] } } });
+const liveBorn = scroller.querySelector("details.thinking");
+check("liveTranscript paints thinking on the first delta", !!liveBorn && /step one/.test(liveBorn.textContent));
+check("the first visible token replaces the working spinner", !scroller.querySelector(".working-row"));
 hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one, step two" }] } } });
-check("later deltas grow the same node, not a new one", scroller.querySelector("details.thinking") === born);
+check("later deltas grow the same node, not a new one", scroller.querySelector("details.thinking") === liveBorn);
 check("...and its text keeps up", /step two/.test(scroller.querySelector("details.thinking").textContent));
 hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
 
