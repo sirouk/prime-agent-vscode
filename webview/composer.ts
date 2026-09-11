@@ -1,6 +1,10 @@
 /**
  * Composer: textarea card with attachment chips, @ / slash autocomplete,
  * steering behavior picker, context meter, and Send/Stop controls.
+ *
+ * Slash items from the agent catalog are inserted and sent as prompts.
+ * `/model`, `/effort`, `/thinking`, and `/stash` are local UI commands:
+ * they never go to the model.
  */
 
 import { Dropdown, type DropdownItem } from "./dropdown.js";
@@ -20,6 +24,41 @@ const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = MAX_DECODED_IMAGE_BYTES;
 const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
+
+type UiSlashAction = "model" | "effort" | "stash";
+
+const UI_SLASH_COMMANDS: Array<{ name: string; description: string; action: UiSlashAction }> = [
+	{ name: "model", description: "Select model", action: "model" },
+	{ name: "effort", description: "Select thinking level", action: "effort" },
+	{ name: "thinking", description: "Select thinking level", action: "effort" },
+	{ name: "stash", description: "Stash or restore the current prompt", action: "stash" },
+];
+
+const UI_SLASH_BY_NAME = new Map(UI_SLASH_COMMANDS.map((command) => [command.name, command.action]));
+
+interface ComposerStash {
+	text: string;
+	images: ImageAttachment[];
+	selections: SelectionAttachment[];
+	accepted: string[];
+}
+
+function emptyStash(): ComposerStash {
+	return { text: "", images: [], selections: [], accepted: [] };
+}
+
+function stashHasContent(stash: ComposerStash): boolean {
+	return stash.text.trim().length > 0 || stash.images.length > 0 || stash.selections.length > 0;
+}
+
+function cloneStash(stash: ComposerStash): ComposerStash {
+	return {
+		text: stash.text,
+		images: [...stash.images],
+		selections: [...stash.selections],
+		accepted: [...stash.accepted],
+	};
+}
 
 /** Decoded byte count without allocating an image-sized buffer in the webview. */
 function base64Bytes(value: string): number {
@@ -73,6 +112,8 @@ export class Composer {
 	/** Starts false: until a status says the agent answers, we cannot take a prompt. */
 	private enabled = false;
 	private observing = false;
+	/** Host-supplied reason the composer is blocked, if any. */
+	private blockedReason: string | null = null;
 	private behavior: "steer" | "followUp" = "steer";
 	private models: RpcModel[] = [];
 	private favorites: ModelRef[] = [];
@@ -84,9 +125,13 @@ export class Composer {
 	private modelMenu: Dropdown | null = null;
 	private thinkingMenu: Dropdown | null = null;
 
-	private acItems: Array<{ label: string; sub?: string; insert: string; dir?: boolean }> = [];
+	private acItems: Array<{ label: string; sub?: string; insert: string; dir?: boolean; action?: UiSlashAction }> = [];
 	private acSelected = 0;
 	private acKind: "slash" | "mention" | null = null;
+	private promptStash: ComposerStash | null = null;
+	private lastNonSlashDraft: ComposerStash = emptyStash();
+	private restoreStashAfterPicker = false;
+	private suppressPickerHide = false;
 	private acRequestId = 0;
 	private mentionDebounce: number | undefined;
 	private draftDebounce: number | undefined;
@@ -97,6 +142,12 @@ export class Composer {
 	 * mentions, and #19 asked for a mention to *look* selected.
 	 */
 	private accepted = new Set<string>();
+	/** IME composition range in `textarea.value`, painted on the mirror. */
+	private composing = false;
+	private compositionStart = 0;
+	private compositionEnd = 0;
+	/** Confirming an IME candidate with Enter must not also send the prompt. */
+	private swallowEnterAfterComposition = false;
 
 	constructor(private readonly deps: ComposerDeps) {
 		this.root = el("div", "composer-dock");
@@ -173,12 +224,33 @@ export class Composer {
 		card.appendChild(this.autocompleteEl);
 
 		this.textarea.addEventListener("keydown", (event) => this.onKeyDown(event));
+		this.textarea.addEventListener("compositionstart", () => {
+			this.composing = true;
+			const caret = this.textarea.selectionStart ?? 0;
+			this.compositionStart = caret;
+			this.compositionEnd = caret;
+		});
+		this.textarea.addEventListener("compositionupdate", (event) => {
+			this.refreshCompositionRange(event.data);
+			this.autoGrow();
+		});
+		this.textarea.addEventListener("compositionend", () => {
+			this.composing = false;
+			this.compositionStart = 0;
+			this.compositionEnd = 0;
+			// Chromium fires keydown Enter after compositionend for a confirm.
+			this.swallowEnterAfterComposition = true;
+			window.setTimeout(() => { this.swallowEnterAfterComposition = false; }, 0);
+			this.autoGrow();
+		});
 		this.textarea.addEventListener("input", () => {
 			// Real typing ends history browsing: from here the text is the
 			// operator's, so Up must go back to moving the caret.
 			this.historyIndex = null;
+			this.rememberNonSlashDraft();
+			if (this.composing) this.refreshCompositionRange();
 			this.autoGrow();
-			this.updateAutocomplete();
+			if (!this.composing) this.updateAutocomplete();
 			window.clearTimeout(this.draftDebounce);
 			this.draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
 		});
@@ -188,7 +260,7 @@ export class Composer {
 		this.textarea.addEventListener("click", () => this.updateAutocomplete());
 		this.textarea.addEventListener("keyup", (event) => {
 			// ArrowUp/Down belong to the open panel — they move the selection, not the caret.
-			if (CARET_KEYS.has(event.key)) this.updateAutocomplete();
+			if (CARET_KEYS.has(event.key) && !this.composing) this.updateAutocomplete();
 		});
 		this.textarea.addEventListener("scroll", () => {
 			if (this.mirror) this.mirror.scrollTop = this.textarea.scrollTop;
@@ -211,7 +283,7 @@ export class Composer {
 	// ---------------------------------------------------------------
 
 	setCommands(commands: RpcSlashCommand[]): void {
-		this.commands = commands;
+		this.commands = commands.filter((command) => !UI_SLASH_BY_NAME.has(command.name));
 	}
 
 	setModels(models: RpcModel[]): void {
@@ -267,8 +339,9 @@ export class Composer {
 	 * Offline means offline: an armed composer over an agent that does not answer
 	 * buys the operator an optimistic bubble and a 120s timeout, nothing else.
 	 */
-	setEnabled(enabled: boolean): void {
+	setEnabled(enabled: boolean, blockedReason: string | null = null): void {
 		this.enabled = enabled;
+		this.blockedReason = enabled ? null : blockedReason;
 		this.applyInputState();
 	}
 
@@ -286,7 +359,7 @@ export class Composer {
 			? "Watching a live session — read-only"
 			: this.enabled
 				? "Message Prime Agent…"
-				: "Not connected — prime-agent isn't answering";
+				: (this.blockedReason ?? "Not connected — prime-agent isn't answering");
 		this.updateSendState();
 	}
 
@@ -744,6 +817,9 @@ export class Composer {
 		this.promptHistory = [];
 		this.historyIndex = null;
 		this.commands = [];
+		this.promptStash = null;
+		this.lastNonSlashDraft = emptyStash();
+		this.restoreStashAfterPicker = false;
 		this.acRequestId += 1;
 		this.acSelected = 0;
 		this.closeAutocomplete();
@@ -789,6 +865,8 @@ export class Composer {
 	// ---------------------------------------------------------------
 
 	send(): void {
+		if (this.composing) return;
+		if (this.tryRunUiSlashCommand(this.textarea.value)) return;
 		// Keyboard paths (Enter) bypass the disabled button, so the gate lives here too.
 		if (!this.canSend()) return;
 		const text = this.textarea.value.trim();
@@ -865,26 +943,49 @@ export class Composer {
 		return this.favorites.some((f) => f.provider === model.provider && f.modelId === model.id);
 	}
 
-	private toggleThinkingMenu(): void {
+	private thinkingLevels(): string[] {
+		// Host-derived from the model's thinkingLevelMap. When we have no list,
+		// fall back to the levels every reasoning model accepts — xhigh and max
+		// exist only where the model declares them, so we never invent those.
+		return this.availableThinkingLevels?.length ? this.availableThinkingLevels : ["off", "minimal", "low", "medium", "high"];
+	}
+
+	private pickerHideHandler(): () => void {
+		return () => {
+			if (this.suppressPickerHide) return;
+			if (!this.restoreStashAfterPicker) return;
+			this.restoreStashAfterPicker = false;
+			this.restoreComposerStash(this.lastNonSlashDraft);
+		};
+	}
+
+	private toggleThinkingMenu(initialQuery?: string): void {
 		if (this.thinkingMenu?.isOpen()) {
 			this.thinkingMenu.hide();
 			return;
 		}
 		if (!this.reasoning) return;
 		const model = this.currentModelInfo();
-		// Host-derived from the model's thinkingLevelMap. When we have no list,
-		// fall back to the levels every reasoning model accepts — xhigh and max
-		// exist only where the model declares them, so we never invent those.
-		const levels = this.availableThinkingLevels?.length ? this.availableThinkingLevels : ["off", "minimal", "low", "medium", "high"];
+		const levels = this.thinkingLevels();
 		const items: DropdownItem[] = levels.map((level, index) => ({
 			label: level,
 			sub: index === levels.length - 1 && levels.length > 1 ? "deepest reasoning this model supports" : undefined,
 			current: level === this.currentThinking,
-			onSelect: () => this.deps.onSetThinking(level),
+			onSelect: () => {
+				const restore = this.restoreStashAfterPicker;
+				this.restoreStashAfterPicker = false;
+				this.deps.onSetThinking(level);
+				if (restore) this.restoreComposerStash(this.lastNonSlashDraft);
+			},
 		}));
+		this.suppressPickerHide = true;
 		this.modelMenu?.hide();
+		this.suppressPickerHide = false;
 		this.thinkingMenu = new Dropdown(this.brainBtn, {
 			header: model ? `Thinking — ${this.modelLabelFor(model)}` : "Thinking level",
+			placeholder: "Filter levels…",
+			initialQuery,
+			onHide: this.pickerHideHandler(),
 		});
 		this.thinkingMenu.show(items);
 	}
@@ -903,17 +1004,20 @@ export class Composer {
 					: [...this.favorites, { provider: model.provider, modelId: model.id }];
 				this.deps.onToggleFavorite(model.provider, model.id);
 				// Rebuild the menu so the star + sections reorder immediately.
+				const query = this.modelMenu?.query() || undefined;
+				this.suppressPickerHide = true;
 				this.modelMenu?.hide();
 				this.modelMenu = null;
-				this.toggleModelMenu();
+				this.suppressPickerHide = false;
+				this.toggleModelMenu(query);
 			});
 			star.addEventListener("mousedown", (event) => event.preventDefault());
 			row.appendChild(star);
 		};
 	}
 
-	private toggleModelMenu(): void {
-		if (this.modelMenu?.isOpen()) {
+	private toggleModelMenu(initialQuery?: string): void {
+		if (this.modelMenu?.isOpen() && !initialQuery) {
 			this.modelMenu.hide();
 			return;
 		}
@@ -932,14 +1036,28 @@ export class Composer {
 			section,
 			current: model.provider === this.currentModel.provider && model.id === this.currentModel.modelId,
 			accessory: this.starAccessory(model),
-			onSelect: () => this.deps.onSetModel(model.provider, model.id),
+			onSelect: () => {
+				const restore = this.restoreStashAfterPicker;
+				this.restoreStashAfterPicker = false;
+				this.deps.onSetModel(model.provider, model.id);
+				if (restore) this.restoreComposerStash(this.lastNonSlashDraft);
+			},
 		});
 		const items: DropdownItem[] = [
 			...favorites.map((m) => makeItem(m, "Favorites")),
 			...rest.map((m) => makeItem(m, favorites.length > 0 ? "All models" : "Models")),
 		];
+		this.suppressPickerHide = true;
 		this.attachMenu?.hide();
-		this.modelMenu = new Dropdown(this.modelBtn, { placeholder: "Search models…", maxHeight: 340 });
+		this.thinkingMenu?.hide();
+		this.modelMenu?.hide();
+		this.suppressPickerHide = false;
+		this.modelMenu = new Dropdown(this.modelBtn, {
+			placeholder: "Search models…",
+			maxHeight: 340,
+			initialQuery,
+			onHide: this.pickerHideHandler(),
+		});
 		this.modelMenu.show(items);
 	}
 
@@ -1020,6 +1138,13 @@ export class Composer {
 	}
 
 	private onKeyDown(event: KeyboardEvent): void {
+		// IME candidate keys (arrows, Enter, numbers) must reach the IME.
+		// keyCode 229 is the legacy "processing" sentinel some IMEs still send.
+		if (event.isComposing || event.keyCode === 229) return;
+		if (this.swallowEnterAfterComposition && event.key === "Enter") {
+			event.preventDefault();
+			return;
+		}
 		if (this.acKind) {
 			if (event.key === "ArrowDown") {
 				event.preventDefault();
@@ -1123,6 +1248,38 @@ export class Composer {
 		if (this.textarea.title !== title) this.textarea.title = title;
 	}
 
+	/**
+	 * Where the IME is currently composing. Prefer the live selection while
+	 * composition is active; `event.data` is the fallback when the selection
+	 * has not yet moved over the candidate.
+	 */
+	private refreshCompositionRange(data?: string): void {
+		const value = this.textarea.value;
+		const selStart = this.textarea.selectionStart ?? 0;
+		const selEnd = this.textarea.selectionEnd ?? selStart;
+		if (selEnd > selStart) {
+			this.compositionStart = selStart;
+			this.compositionEnd = selEnd;
+			return;
+		}
+		if (data && data.length > 0) {
+			const fromCaret = Math.max(0, selStart - data.length);
+			if (value.slice(fromCaret, selStart) === data) {
+				this.compositionStart = fromCaret;
+				this.compositionEnd = selStart;
+				return;
+			}
+			const at = value.lastIndexOf(data, selStart);
+			if (at >= 0) {
+				this.compositionStart = at;
+				this.compositionEnd = at + data.length;
+				return;
+			}
+		}
+		this.compositionEnd = selStart;
+		if (this.compositionStart > this.compositionEnd) this.compositionStart = this.compositionEnd;
+	}
+
 	private syncMirror(): void {
 		if (!this.mirror) return;
 		const text = this.textarea.value;
@@ -1135,17 +1292,40 @@ export class Composer {
 			.replace(/>/g, "&gt;")
 			.replace(/"/g, "&quot;")
 			.replace(/'/g, "&#39;");
-		let html = "";
-		let last = 0;
-		for (const range of this.mentionRanges(text)) {
-			if (range.start > last) html += esc(text.slice(last, range.start));
-			// data-path, not title: the mirror is pointer-events:none beneath an
-			// opaque textarea, so a title here could never fire. updateMentionHover
-			// hit-tests these rects and lends the tooltip to the textarea instead.
-			html += `<span class="mm" data-path="${esc(range.path)}">@${esc(range.path)}</span>`;
-			last = range.end;
+		const mentions = this.mentionRanges(text);
+		const imeStart = Math.max(0, Math.min(this.compositionStart, text.length));
+		const imeEnd = Math.max(0, Math.min(this.compositionEnd, text.length));
+		const ime = this.composing && imeEnd > imeStart ? { start: imeStart, end: imeEnd } : null;
+		const points = new Set<number>([0, text.length]);
+		for (const range of mentions) {
+			points.add(range.start);
+			points.add(range.end);
 		}
-		if (last < text.length) html += esc(text.slice(last));
+		if (ime) {
+			points.add(ime.start);
+			points.add(ime.end);
+		}
+		const sorted = [...points].filter((n) => n >= 0 && n <= text.length).sort((a, b) => a - b);
+		let html = "";
+		const mentionAt = (index: number) => mentions.find((range) => range.start <= index && index < range.end);
+		const inIme = (index: number) => !!ime && ime.start <= index && index < ime.end;
+		for (let i = 0; i < sorted.length - 1; i++) {
+			const from = sorted[i];
+			const to = sorted[i + 1];
+			if (to <= from) continue;
+			const slice = esc(text.slice(from, to));
+			const mention = mentionAt(from);
+			const composing = inIme(from);
+			if (mention && composing) {
+				html += `<span class="mm" data-path="${esc(mention.path)}"><span class="ime">${slice}</span></span>`;
+			} else if (mention) {
+				html += `<span class="mm" data-path="${esc(mention.path)}">${slice}</span>`;
+			} else if (composing) {
+				html += `<span class="ime">${slice}</span>`;
+			} else {
+				html += slice;
+			}
+		}
 		// A trailing newline collapses without this spacer — keep rows visible.
 		if (text.endsWith("\n") || text.length === 0) html += " ";
 		this.mirror.innerHTML = html;
@@ -1295,10 +1475,18 @@ export class Composer {
 		const slashQuery = this.currentSlashQuery();
 		if (slashQuery !== null && slashQuery.length <= 30 && !slashQuery.includes("\n")) {
 			const q = slashQuery.toLowerCase();
-			const items = this.commands
-				.filter((c) => c.name.toLowerCase().includes(q))
-				.slice(0, 12)
-				.map((c) => ({ label: `/${c.name}`, sub: c.description, insert: `/${c.name} ` }));
+			const local = UI_SLASH_COMMANDS
+				.filter((command) => command.name.includes(q) || command.description.toLowerCase().includes(q))
+				.map((command) => ({
+					label: `/${command.name}`,
+					sub: command.description,
+					insert: `/${command.name} `,
+					action: command.action,
+				}));
+			const remote = this.commands
+				.filter((command) => command.name.toLowerCase().includes(q) || (command.description ?? "").toLowerCase().includes(q))
+				.map((command) => ({ label: `/${command.name}`, sub: command.description, insert: `/${command.name} ` }));
+			const items = [...local, ...remote].slice(0, 12);
 			if (items.length > 0) {
 				this.acKind = "slash";
 				this.acItems = items;
@@ -1359,9 +1547,17 @@ export class Composer {
 		if (!item) return;
 		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
 		if (this.acKind === "slash") {
+			this.closeAutocomplete();
+			if (item.action) {
+				this.runUiSlashAction(item.action, "");
+				return;
+			}
 			this.historyIndex = null;
 			this.textarea.value = item.insert;
 			this.textarea.selectionStart = this.textarea.selectionEnd = item.insert.length;
+			this.autoGrow();
+			this.textarea.focus();
+			return;
 		} else {
 			// Re-derive the range instead of trusting the offset the panel opened
 			// with: the caret may have moved since (click, arrows), and splicing at
@@ -1394,5 +1590,170 @@ export class Composer {
 		this.acItems = [];
 		this.autocompleteEl.textContent = "";
 		this.autocompleteEl.classList.remove("visible");
+	}
+
+	private snapshotComposer(): ComposerStash {
+		return {
+			text: this.textarea.value,
+			images: [...this.images],
+			selections: [...this.selections],
+			accepted: [...this.accepted],
+		};
+	}
+
+	private applyComposerSnapshot(stash: ComposerStash): void {
+		this.historyIndex = null;
+		this.textarea.value = stash.text;
+		this.images = [...stash.images];
+		this.selections = [...stash.selections];
+		this.accepted = new Set(stash.accepted);
+		this.renderChips();
+		this.autoGrow();
+		this.textarea.focus();
+	}
+
+	private restoreComposerStash(stash: ComposerStash): void {
+		this.applyComposerSnapshot(cloneStash(stash));
+		window.clearTimeout(this.draftDebounce);
+		this.deps.onDraftChanged(this.textarea.value);
+	}
+
+	private rememberNonSlashDraft(): void {
+		if (this.textarea.value.startsWith("/")) return;
+		this.lastNonSlashDraft = this.snapshotComposer();
+	}
+
+	private clearComposerForSlash(): void {
+		this.historyIndex = null;
+		this.textarea.value = "";
+		this.images = [];
+		this.selections = [];
+		this.accepted.clear();
+		this.renderChips();
+		this.autoGrow();
+		this.closeAutocomplete();
+		window.clearTimeout(this.draftDebounce);
+		this.deps.onDraftChanged("");
+	}
+
+	private parseLeadingSlash(text: string): { name: string; args: string } | null {
+		if (!text.startsWith("/") || /[\n\r]/.test(text)) return null;
+		const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(text.trimEnd());
+		if (!match) return null;
+		return { name: match[1], args: (match[2] ?? "").trim() };
+	}
+
+	private tryRunUiSlashCommand(text: string): boolean {
+		const parsed = this.parseLeadingSlash(text);
+		if (!parsed) return false;
+		const action = UI_SLASH_BY_NAME.get(parsed.name);
+		if (!action) return false;
+		this.runUiSlashAction(action, parsed.args);
+		return true;
+	}
+
+	private runUiSlashAction(action: UiSlashAction, args: string): void {
+		if (action === "stash") {
+			this.handleStashCommand();
+			return;
+		}
+		const snapshot = this.snapshotComposer();
+		snapshot.text = this.stripLeadingSlashCommand(snapshot.text);
+		if (stashHasContent(snapshot)) this.lastNonSlashDraft = snapshot;
+		this.clearComposerForSlash();
+		if (action === "model") {
+			this.handleModelCommand(args);
+			return;
+		}
+		this.handleEffortCommand(args);
+	}
+
+	private stripLeadingSlashCommand(text: string): string {
+		if (!text.startsWith("/")) return text;
+		const remainder = text.replace(/^\/\S+(?:[ \t]+[^\n]*)?/, "");
+		return remainder.replace(/^\n/, "");
+	}
+
+	private handleStashCommand(): void {
+		const current = this.snapshotComposer();
+		const stripped = cloneStash(current);
+		if (this.parseLeadingSlash(current.text)) stripped.text = this.stripLeadingSlashCommand(current.text);
+		const draft = stashHasContent(stripped) ? stripped : this.lastNonSlashDraft;
+		if (stashHasContent(draft)) {
+			if (this.promptStash && stashHasContent(this.promptStash)) {
+				this.showHint("Prompt stash already has a draft. Restore it first with /stash.");
+				return;
+			}
+			this.promptStash = cloneStash(draft);
+			this.clearComposerForSlash();
+			this.lastNonSlashDraft = emptyStash();
+			this.showHint("Stashed prompt");
+			return;
+		}
+		if (this.promptStash && stashHasContent(this.promptStash)) {
+			const restored = cloneStash(this.promptStash);
+			this.promptStash = null;
+			this.lastNonSlashDraft = cloneStash(restored);
+			this.restoreComposerStash(restored);
+			this.showHint("Restored stashed prompt");
+			return;
+		}
+		this.clearComposerForSlash();
+		this.showHint("No prompt to stash");
+	}
+
+	private handleModelCommand(args: string): void {
+		const query = args.trim();
+		if (query) {
+			const match = this.findExactModelMatch(query);
+			if (match) {
+				this.restoreStashAfterPicker = false;
+				this.deps.onSetModel(match.provider, match.id);
+				this.restoreComposerStash(this.lastNonSlashDraft);
+				return;
+			}
+		}
+		if (this.models.length === 0) {
+			this.showHint("No models loaded yet.");
+			this.restoreComposerStash(this.lastNonSlashDraft);
+			return;
+		}
+		this.restoreStashAfterPicker = true;
+		this.toggleModelMenu(query || undefined);
+		const search = document.querySelector(".dropdown-search");
+		if (search instanceof HTMLElement) search.focus();
+	}
+
+	private findExactModelMatch(query: string): RpcModel | undefined {
+		const q = query.toLowerCase();
+		const matches = this.models.filter((model) => {
+			const label = this.modelLabelFor(model).toLowerCase();
+			return model.id.toLowerCase() === q || label === q || `${model.provider}/${model.id}`.toLowerCase() === q;
+		});
+		return matches.length === 1 ? matches[0] : undefined;
+	}
+
+	private handleEffortCommand(args: string): void {
+		if (!this.reasoning) {
+			this.showHint("Current model does not support thinking");
+			this.restoreComposerStash(this.lastNonSlashDraft);
+			return;
+		}
+		const levels = this.thinkingLevels();
+		const requested = args.trim().toLowerCase();
+		if (requested) {
+			if (!levels.includes(requested)) {
+				this.showHint(`Unknown thinking level '${requested}'. Available: ${levels.join(", ")}`);
+				this.restoreStashAfterPicker = true;
+				this.toggleThinkingMenu(requested);
+				return;
+			}
+			this.restoreStashAfterPicker = false;
+			this.deps.onSetThinking(requested);
+			this.restoreComposerStash(this.lastNonSlashDraft);
+			return;
+		}
+		this.restoreStashAfterPicker = true;
+		this.toggleThinkingMenu();
 	}
 }

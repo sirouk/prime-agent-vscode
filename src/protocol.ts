@@ -212,10 +212,11 @@ export interface SessionProcess {
 	killable?: boolean;
 	/**
 	 * Where the row came from, and therefore how much it can honestly claim.
-	 * "agent" is a job the extension owns inside the agent; "observed" is one this
-	 * host reconstructed from the worker's process journal and `ps`.
+	 * "agent" is a job the `background-jobs` extension owns inside the agent;
+	 * "task" is a Prime Agent `background_task` skill receipt on disk; "observed"
+	 * is one this host reconstructed from the worker's process journal and `ps`.
 	 */
-	source?: "agent" | "observed";
+	source?: "agent" | "task" | "observed";
 }
 
 /** Answer to `previewProcess`: what the command wrote, or why we have nothing. */
@@ -341,6 +342,9 @@ export type WebviewToHost =
 	| { type: "browseChild"; browseRef: string }
 	| { type: "previewProcess"; ref: string }
 	| { type: "killProcess"; ref: string }
+	| { type: "dismissProcess"; ref: string }
+	| { type: "dismissFinishedProcesses" }
+	| { type: "openProcessLog"; ref: string }
 	| { type: "backToParent" }
 	| { type: "forkFromUser"; ordinal: number }
 	| { type: "copyConversation" }
@@ -364,6 +368,8 @@ export interface StatusSnapshot {
 	thinkingLevel: string;
 	availableThinkingLevels?: string[] | null;
 	sessionName?: string;
+	/** Named title, else first prompt line. Empty when the thread has neither. */
+	sessionLabel?: string;
 	sessionFile?: string;
 	sessionId?: string;
 	statsText: string;
@@ -379,6 +385,14 @@ export interface StatusSnapshot {
 	modelId?: string;
 	/** Session id currently being observed read-only, or null when attached normally */
 	observingId?: string | null;
+	/**
+	 * When true, thinking and tool-call arguments paint as they stream.
+	 * Default is false: unfinished parts stay behind the working row until they
+	 * settle (thinking ends, a tool starts running, or reply text appears).
+	 */
+	liveTranscript?: boolean;
+	/** When true, tool output paints on each partial. Default is false. */
+	streamToolOutput?: boolean;
 }
 
 export interface ModelRef {
@@ -415,6 +429,19 @@ export interface RecentSession {
 	 * row rank in the webview's own filter, which cannot see the transcript.
 	 */
 	matchSnippet?: string;
+	/**
+	 * Rank time for the history list. Frozen while a turn is in flight; only
+	 * advances when a response finishes and the agent is waiting for the user.
+	 * Mid-turn RPC chatter must not reshuffle the list.
+	 */
+	sortMs?: number;
+	/** True when the operator archived this row from the extension (not daemon auto-archive). */
+	archived?: boolean;
+	/**
+	 * A turn finished and the operator has not opened this session since.
+	 * History shows this as the green "done" lamp.
+	 */
+	unreadComplete?: boolean;
 }
 
 export type HostToWebview =
@@ -439,6 +466,7 @@ export type HostToWebview =
 	| { type: "processes"; processes: SessionProcess[] }
 	| { type: "processOutput"; preview: ProcessOutputPreview }
 	| { type: "showHistory" }
+	| { type: "newThread" }
 	| { type: "promptAccepted"; kind: "prompt" | "steer" | "followUp" }
 	| { type: "promptRejected"; error: string; clientRequestId?: string }
 	| {

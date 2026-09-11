@@ -19,6 +19,9 @@ import type { ProcessOutputPreview, SessionProcess } from "../src/protocol.js";
 export interface ProcessesPanelDeps {
 	onPreview: (ref: string) => void;
 	onKill: (ref: string) => void;
+	onDismiss: (ref: string) => void;
+	onDismissFinished: () => void;
+	onOpenLog: (ref: string) => void;
 }
 
 interface PreviewState {
@@ -62,6 +65,8 @@ export class ProcessesPanel {
 	private ticker: ReturnType<typeof setInterval> | null = null;
 	/** Whether the agent was streaming at the last update, to spot the transition. */
 	private wasStreaming = false;
+	/** Running `background_task` rows, so a newly started one can reopen the panel. */
+	private liveTaskRefs = new Set<string>();
 
 	constructor(private readonly deps: ProcessesPanelDeps) {
 		this.root = el("div", "pr-panel");
@@ -81,7 +86,16 @@ export class ProcessesPanel {
 		const running = processes.some((entry) => entry.state === "running");
 		const survivedTurn = running && !streaming && (this.wasStreaming || !previousRunning);
 		this.wasStreaming = streaming;
+		const taskRefs = processes
+			.filter((entry) => entry.state === "running" && entry.source === "task")
+			.map((entry) => entry.ref);
+		const newRunningTask = taskRefs.some((ref) => !this.liveTaskRefs.has(ref));
+		this.liveTaskRefs = new Set(taskRefs);
 		if (survivedTurn && !this.expanded && !this.autoExpandSuppressed) this.expanded = true;
+		if (newRunningTask) {
+			this.expanded = true;
+			this.autoExpandSuppressed = false;
+		}
 		for (const ref of [...this.openRefs]) {
 			if (!processes.some((entry) => entry.ref === ref)) {
 				this.openRefs.delete(ref);
@@ -146,6 +160,7 @@ export class ProcessesPanel {
 			root.appendChild(list);
 		}
 		if (finished.length > 0) {
+			const bar = el("div", "pr-finished-bar");
 			const subhead = el("button", "pr-subhead") as HTMLButtonElement;
 			// A failure counted in the collapsed header is the difference between
 			// noticing a job died and having to go looking. Only agent-owned jobs can
@@ -162,7 +177,15 @@ export class ProcessesPanel {
 				this.historicalExpanded = !this.historicalExpanded;
 				this.render();
 			});
-			root.appendChild(subhead);
+			const clear = el("button", "pr-clear-finished") as HTMLButtonElement;
+			clear.textContent = "Clear finished";
+			clear.title = "Remove finished rows from this panel. The jobs themselves are unchanged.";
+			clear.addEventListener("click", (event) => {
+				event.stopPropagation();
+				this.deps.onDismissFinished();
+			});
+			bar.append(subhead, clear);
+			root.appendChild(bar);
 			if (this.historicalExpanded) {
 				const list = el("div", "pr-list finished");
 				for (const entry of finished) list.appendChild(this.renderRow(entry));
@@ -204,15 +227,16 @@ export class ProcessesPanel {
 		// Stop is offered only where it is real. An extension-owned job is a process
 		// group the agent created and will signal on request; an observed process
 		// belongs to a kernel this host has no supported way to interrupt.
+		if (this.canOpenLog(entry)) {
+			row.appendChild(this.iconAction("file", "pr-open", "Open log in editor", () => this.deps.onOpenLog(entry.ref)));
+		}
 		if (entry.killable) {
-			const stop = el("button", "pr-kill") as HTMLButtonElement;
-			stop.title = "Stop this job";
-			stop.appendChild(icon("stop", 9));
-			stop.addEventListener("click", (event) => {
-				event.stopPropagation();
-				this.deps.onKill(entry.ref);
-			});
-			row.appendChild(stop);
+			row.appendChild(this.iconAction("stop", "pr-kill", "Stop this job", () => this.deps.onKill(entry.ref)));
+		}
+		if (entry.state !== "running") {
+			row.appendChild(
+				this.iconAction("close", "pr-dismiss", "Remove this row from the panel", () => this.deps.onDismiss(entry.ref)),
+			);
 		}
 		row.append(el("span", "pr-caret", open ? "▾" : "▸"));
 		row.addEventListener("click", (event) => {
@@ -228,6 +252,42 @@ export class ProcessesPanel {
 		wrap.appendChild(row);
 		if (open) wrap.appendChild(this.renderPreview(entry));
 		return wrap;
+	}
+
+	private canOpenLog(entry: SessionProcess): boolean {
+		return entry.source === "task" || entry.source === "agent" || !!entry.hasOutput;
+	}
+
+	private iconAction(name: "file" | "stop" | "close", className: string, title: string, run: () => void): HTMLButtonElement {
+		const button = el("button", className) as HTMLButtonElement;
+		button.title = title;
+		button.setAttribute("aria-label", title);
+		button.appendChild(icon(name, 9));
+		button.addEventListener("click", (event) => {
+			event.stopPropagation();
+			run();
+		});
+		return button;
+	}
+
+	private previewHead(entry: SessionProcess, source?: string, truncated?: boolean): HTMLElement {
+		const head = el("div", "pr-preview-head");
+		head.appendChild(el("span", "pr-source", source ?? "log"));
+		if (truncated) head.appendChild(el("span", "pr-trunc", "tail"));
+		if (this.canOpenLog(entry)) {
+			head.appendChild(this.iconAction("file", "pr-open", "Open log in editor", () => this.deps.onOpenLog(entry.ref)));
+		}
+		const refresh = el("button", "pr-refresh") as HTMLButtonElement;
+		refresh.title = "Read the file again";
+		refresh.appendChild(icon("refresh", 10));
+		refresh.addEventListener("click", (event) => {
+			event.stopPropagation();
+			this.previews.set(entry.ref, { loading: true });
+			this.deps.onPreview(entry.ref);
+			this.render();
+		});
+		head.appendChild(refresh);
+		return head;
 	}
 
 	private toggle(entry: SessionProcess): void {
@@ -251,23 +311,11 @@ export class ProcessesPanel {
 		}
 		const preview = state.preview;
 		if (!preview || preview.lines.length === 0) {
+			if (this.canOpenLog(entry)) box.appendChild(this.previewHead(entry, preview?.source));
 			box.appendChild(el("div", "pr-note", preview?.note ?? "No output to show."));
 			return box;
 		}
-		const head = el("div", "pr-preview-head");
-		head.appendChild(el("span", "pr-source", preview.source ?? "output"));
-		if (preview.truncated) head.appendChild(el("span", "pr-trunc", "tail"));
-		const refresh = el("button", "pr-refresh") as HTMLButtonElement;
-		refresh.title = "Read the file again";
-		refresh.appendChild(icon("refresh", 10));
-		refresh.addEventListener("click", (event) => {
-			event.stopPropagation();
-			this.previews.set(entry.ref, { loading: true });
-			this.deps.onPreview(entry.ref);
-			this.render();
-		});
-		head.appendChild(refresh);
-		box.appendChild(head);
+		box.appendChild(this.previewHead(entry, preview.source ?? "output", preview.truncated));
 		const pre = el("pre", "pr-output");
 		pre.textContent = preview.lines.join("\n");
 		box.appendChild(pre);
@@ -280,7 +328,9 @@ export class ProcessesPanel {
 				"pr-foot",
 				entry.source === "agent"
 					? "The job's own stdout and stderr, captured by the agent that started it."
-					: "Last lines of a file this command writes. Anything it printed instead stays in the agent's kernel buffer until the agent reads it.",
+					: entry.source === "task"
+						? "The background task's own stdout and stderr, captured by the skill that started it."
+						: "Last lines of a file this command writes. Anything it printed instead stays in the agent's kernel buffer until the agent reads it.",
 			),
 		);
 		return box;

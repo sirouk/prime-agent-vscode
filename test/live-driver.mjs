@@ -46,7 +46,7 @@ async function waitForChatFrame(timeoutMs = 90_000) {
 	while (Date.now() - start < timeoutMs) {
 		for (const f of page.frames()) {
 			try {
-				if (await f.evaluate(() => !!document.querySelector(".chat-root .brand-name"))) return f;
+				if (await f.evaluate(() => !!document.querySelector(".chat-root"))) return f;
 			} catch {}
 		}
 		await page.waitForTimeout(300);
@@ -294,7 +294,7 @@ const server = http.createServer(async (req, res) => {
 			const frames = [];
 			for (const f of page.frames()) {
 				try {
-					const has = await f.evaluate(() => !!document.querySelector(".chat-root .brand-name"));
+					const has = await f.evaluate(() => !!document.querySelector(".chat-root"));
 					if (has) {
 						frames.push({
 							url: f.url().slice(0, 100),

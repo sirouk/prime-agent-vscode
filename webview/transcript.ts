@@ -5,6 +5,7 @@
 import { parseIpythonBashCell, previewBashCommand, previewIpythonCode } from "./code-preview.js";
 import { butterfly, el, icon } from "./dom.js";
 import { copyToClipboard, renderMarkdown } from "./markdown.js";
+import { pickSpinnerVerb } from "./spinner-verbs.js";
 
 /**
  * How a tool call should be presented.
@@ -155,7 +156,12 @@ export class Transcript {
 	private workingRow: HTMLElement | null = null;
 	private workingStartedAt = 0;
 	private workingTimer: number | undefined;
+	private workingVerbBase = "Working";
+	private nextVerbAt = 0;
+	private liveTranscript = false;
+	private streamToolOutput = false;
 	private streaming = false;
+	private lastPartialAssistant: AssistantMessage | null = null;
 	private hasContent = false;
 	/** Latest user footer still waiting for the reply that prices its turn. */
 	private pendingUserFooter: HTMLElement | null = null;
@@ -429,11 +435,13 @@ export class Transcript {
 		const quick = el("div", "welcome-actions");
 		const newBtn = document.createElement("button");
 		newBtn.className = "welcome-action";
+		newBtn.title = "New session";
 		newBtn.appendChild(icon("plus", 14));
 		newBtn.appendChild(el("span", "", "New chat"));
 		newBtn.addEventListener("click", () => this.deps.onNewSession());
 		const histBtn = document.createElement("button");
 		histBtn.className = "welcome-action";
+		histBtn.title = "Sessions in this workspace";
 		histBtn.appendChild(icon("history", 14));
 		histBtn.appendChild(el("span", "", "Resume session"));
 		histBtn.addEventListener("click", () => this.deps.onShowHistory());
@@ -479,6 +487,7 @@ export class Transcript {
 		// brand-new session as "running" with a Stop button no agent_end can clear,
 		// and stopWorking() also kills the 1s timer whose row we just deleted.
 		this.streaming = false;
+		this.lastPartialAssistant = null;
 		this.stopWorking();
 		this.optimisticRows.clear();
 		this.userOrdinals = new WeakMap<object, number>();
@@ -666,11 +675,15 @@ export class Transcript {
 	// ---------------------------------------------------------------
 
 	/** Create the live bubble for a turn whose message_start we never received. */
-	private adoptStreamingBubble(message: AssistantMessage): void {
+	private adoptStreamingBubble(message: AssistantMessage, isPartial = true): void {
 		if (this.streamingBubble) return;
 		this.dismissWelcome();
+		if (!this.assistantHasVisibleContent(message, isPartial)) {
+			this.startWorking();
+			return;
+		}
 		this.stopWorking();
-		this.streamingBubble = this.buildAssistantRow(message, true);
+		this.streamingBubble = this.buildAssistantRow(message, isPartial);
 		this.place(this.streamingBubble);
 		this.hasContent = true;
 	}
@@ -680,21 +693,31 @@ export class Transcript {
 			case "agent_start":
 				this.dismissWelcome();
 				this.streaming = true;
-				this.stopWorking();
 				this.startWorking();
 				break;
-			case "agent_end":
+			case "agent_end": {
 				this.streaming = false;
+				const lastAssistant =
+					([...((event.messages ?? []) as AgentMessage[])].reverse().find((message) => message.role === "assistant") as AssistantMessage | undefined) ??
+					this.lastPartialAssistant ??
+					undefined;
+				if (lastAssistant) {
+					this.adoptStreamingBubble(lastAssistant, false);
+					if (this.streamingBubble) {
+						this.fillAssistantRow(this.streamingBubble, lastAssistant, false);
+						this.streamingBubble = null;
+					}
+				}
+				this.lastPartialAssistant = null;
 				this.stopWorking();
 				this.streamingBubble = null;
 				break;
+			}
 			case "message_start": {
 				const message = event.message;
 				if (message.role === "assistant") {
-					this.stopWorking();
-					this.streamingBubble = this.buildAssistantRow(message as AssistantMessage, true);
-					this.place(this.streamingBubble);
-					this.hasContent = true;
+					this.lastPartialAssistant = message as AssistantMessage;
+					this.adoptStreamingBubble(message as AssistantMessage, true);
 				} else {
 					this.dismissWelcome();
 					this.renderMessage(message, false);
@@ -705,42 +728,47 @@ export class Transcript {
 			case "message_update": {
 				const message = event.message as AssistantMessage;
 				if (message.role !== "assistant") break;
+				this.lastPartialAssistant = message;
 				// An update with no bubble means we joined the turn after its
 				// message_start (attach mid-flight, or a catch-up after a resync).
 				// Dropping it froze the transcript for the rest of the turn.
-				this.adoptStreamingBubble(message);
+				this.adoptStreamingBubble(message, true);
 				if (this.streamingBubble) this.fillAssistantRow(this.streamingBubble, message, true);
+				if (this.assistantHasVisibleContent(message, true)) this.stopWorking();
+				else this.resumeWorkingIfNeeded();
 				break;
 			}
 			case "message_end": {
 				const message = event.message;
 				if (message.role === "assistant") {
-					this.adoptStreamingBubble(message as AssistantMessage);
+					this.lastPartialAssistant = null;
+					this.adoptStreamingBubble(message as AssistantMessage, false);
 					if (this.streamingBubble) {
 						this.fillAssistantRow(this.streamingBubble, message as AssistantMessage, false);
 						this.streamingBubble = null;
 					}
 				}
-				if (this.streaming) this.startWorking();
+				this.resumeWorkingIfNeeded();
 				break;
 			}
 			case "tool_execution_start": {
 				this.stopWorking();
 				const block = this.ensureToolBlock(event.toolCallId, event.toolName, event.args ?? {});
+				block.root.dataset.part = `tool-${event.toolCallId}`;
 				if (!block.root.isConnected) {
 					this.place(block.root);
 				}
 				this.setToolState(event.toolCallId, "running");
-				if (this.streaming) this.startWorking();
 				break;
 			}
 			case "tool_execution_update":
-				this.updateToolPartial(event.toolCallId, event.partialResult);
+				if (this.streamToolOutput) this.updateToolPartial(event.toolCallId, event.partialResult);
 				break;
 			case "tool_execution_end": {
 				const text = extractPartialText(event.result);
 				if (text) this.attachToolResultText(event.toolCallId, text, event.isError ?? false);
 				else this.setToolState(event.toolCallId, event.isError ? "error" : "done");
+				this.resumeWorkingIfNeeded();
 				break;
 			}
 			case "compaction_start":
@@ -758,7 +786,7 @@ export class Transcript {
 				}
 				break;
 			case "turn_end":
-				if (this.streaming) this.startWorking();
+				this.resumeWorkingIfNeeded();
 				break;
 			default:
 				break;
@@ -769,6 +797,14 @@ export class Transcript {
 
 	isStreaming(): boolean {
 		return this.streaming;
+	}
+
+	setLiveTranscript(value: boolean): void {
+		this.liveTranscript = value;
+	}
+
+	setStreamToolOutput(value: boolean): void {
+		this.streamToolOutput = value;
 	}
 
 	private showRetryRow(attempt: number, maxAttempts: number, errorMessage?: string): void {
@@ -807,21 +843,61 @@ export class Transcript {
 	// ---------------------------------------------------------------
 
 	private startWorking(): void {
-		if (this.workingRow) return;
+		if (!this.workingRow) {
+			this.workingVerbBase = pickSpinnerVerb();
+			this.nextVerbAt = Date.now() + 2_500;
+		}
+		if (this.workingRow) {
+			this.paintWorkingLabel();
+			return;
+		}
 		this.workingStartedAt = Date.now();
 		const row = el("div", "working-row");
+		row.setAttribute("aria-live", "polite");
+		row.setAttribute("aria-busy", "true");
 		const mark = butterfly(15, "working-mark");
 		row.appendChild(mark);
-		row.appendChild(el("span", "working-label", "Working"));
+		const spinner = el("span", "working-spinner");
+		spinner.setAttribute("aria-hidden", "true");
+		row.appendChild(spinner);
+		row.appendChild(el("span", "working-label", this.workingVerbBase));
 		this.place(row);
 		this.workingRow = row;
-		const label = row.querySelector(".working-label");
 		window.clearInterval(this.workingTimer);
-		this.workingTimer = window.setInterval(() => {
-			if (!this.workingRow) return;
-			const seconds = Math.max(1, Math.round((Date.now() - this.workingStartedAt) / 1000));
-			if (label) label.textContent = `Working · ${seconds}s`;
-		}, 1000);
+		this.workingTimer = window.setInterval(() => this.tickWorking(), 400);
+		this.paintWorkingLabel();
+	}
+
+	private tickWorking(): void {
+		if (!this.workingRow) return;
+		if (Date.now() >= this.nextVerbAt) {
+			this.workingVerbBase = pickSpinnerVerb(this.workingVerbBase);
+			this.nextVerbAt = Date.now() + 2_500;
+		}
+		this.paintWorkingLabel();
+	}
+
+	private paintWorkingLabel(): void {
+		const label = this.workingRow?.querySelector(".working-label");
+		if (!label) return;
+		const elapsed = Date.now() - this.workingStartedAt;
+		if (elapsed < 1000) {
+			label.textContent = this.workingVerbBase;
+			return;
+		}
+		const seconds = Math.max(1, Math.round(elapsed / 1000));
+		label.textContent = `${this.workingVerbBase} · ${seconds}s`;
+	}
+
+	private hasRunningTool(): boolean {
+		for (const block of this.toolBlocks.values()) {
+			if (block.state === "running") return true;
+		}
+		return false;
+	}
+
+	private resumeWorkingIfNeeded(): void {
+		if (this.streaming && !this.hasRunningTool()) this.startWorking();
 	}
 
 	private stopWorking(): void {
@@ -850,9 +926,22 @@ export class Transcript {
 		this.place(row);
 		this.hasContent = true;
 		this.optimisticRows.set(clientRequestId, { clientRequestId, text, imageSignature: this.imageSignature(images), row });
+		this.markSending();
 		// The operator just hit send — that is an explicit intent to follow along.
 		this.forceScrollToBottom();
 		this.updateJumpButton();
+	}
+
+	/** Immediate local feedback between Enter and the first visible reply token. */
+	markSending(): void {
+		if (this.streamingBubble) return;
+		this.startWorking();
+	}
+
+	/** Drop the pre-token spinner once no local send is still waiting. */
+	clearSendingIfIdle(): void {
+		if (this.streaming || this.streamingBubble || this.optimisticRows.size > 0) return;
+		this.stopWorking();
 	}
 
 	/** Remove the exact local echo for a rejected prompt without disturbing later sends. */
@@ -866,6 +955,7 @@ export class Transcript {
 		this.optimisticRows.delete(pending.clientRequestId);
 		if (this.pendingUserFooter && pending.row.contains(this.pendingUserFooter)) this.pendingUserFooter = null;
 		pending.row.remove();
+		if (this.optimisticRows.size === 0 && !this.streaming && !this.streamingBubble) this.stopWorking();
 		if (!this.scroller.querySelector(".row, .tool, .system-note, .working-row, .retry-row, .spawned-card")) {
 			this.hasContent = false;
 			this.showWelcome();
@@ -1173,6 +1263,33 @@ export class Transcript {
 	 * frame, resetting their internal scroll (and any text selection) several
 	 * times a second while the reply arrived.
 	 */
+	private assistantHasVisibleContent(message: AssistantMessage, isPartial = true): boolean {
+		for (const part of message.content ?? []) {
+			if (part.type === "text" && part.text.trim()) return true;
+			if (part.type === "thinking" && part.thinking?.trim() && this.shouldShowThinking(message, isPartial)) return true;
+			if (part.type === "toolCall" && this.shouldShowToolCall(part.id, isPartial)) return true;
+		}
+		return false;
+	}
+
+	private shouldShowToolCall(id: string, isPartial: boolean): boolean {
+		return this.liveTranscript || !isPartial || this.toolBlocks.has(id);
+	}
+
+	private shouldShowThinking(message: AssistantMessage, isPartial: boolean): boolean {
+		if (this.liveTranscript || !isPartial) return true;
+		let afterThinking = false;
+		for (const part of message.content ?? []) {
+			if (!afterThinking) {
+				if (part.type === "thinking") afterThinking = true;
+				continue;
+			}
+			if (part.type === "text" && part.text.trim()) return true;
+			if (part.type === "toolCall" && this.shouldShowToolCall(part.id, isPartial)) return true;
+		}
+		return false;
+	}
+
 	private fillAssistantRow(row: HTMLElement, message: AssistantMessage, isPartial: boolean): void {
 		let body = row.querySelector(":scope > .row-body") as HTMLElement | null;
 		if (!body) {
@@ -1212,16 +1329,18 @@ export class Transcript {
 				// the first delta is the same node that keeps growing, and it keeps
 				// its open/closed state instead of being rebuilt.
 				if (!part.thinking?.trim()) continue;
+				if (!this.shouldShowThinking(message, isPartial)) continue;
 				const key = `think-${thinkIndex++}`;
 				let node = keyed(key);
 				if (!node) {
-					node = this.buildThinking(part.thinking, isPartial);
+					node = this.buildThinking(part.thinking, isPartial && this.liveTranscript);
 					node.dataset.part = key;
 				} else {
 					this.updateThinking(node, part.thinking);
 				}
 				desired.push(node);
 			} else if (part.type === "toolCall") {
+				if (!this.shouldShowToolCall(part.id, isPartial)) continue;
 				const block = this.ensureToolBlock(part.id, part.name, part.arguments ?? {});
 				block.root.dataset.part = `tool-${part.id}`;
 				desired.push(block.root);

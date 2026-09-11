@@ -95,20 +95,26 @@
       },
       {
         "command": "primeAgent.installAgentExtension",
-        "title": "Install Background Jobs Agent Extension…",
+        "title": "Install Background Jobs Agent Extension\u2026",
         "icon": "$(cloud-download)",
         "category": "Prime Agent"
       },
       {
         "command": "primeAgent.exportChat",
-        "title": "Export Chat…",
+        "title": "Export Chat\u2026",
         "icon": "$(export)",
         "category": "Prime Agent"
       },
       {
         "command": "primeAgent.history",
-        "title": "Resume Recent Session…",
+        "title": "Resume Recent Session\u2026",
         "icon": "$(history)",
+        "category": "Prime Agent"
+      },
+      {
+        "command": "primeAgent.renameSession",
+        "title": "Rename Session",
+        "icon": "$(edit)",
         "category": "Prime Agent"
       },
       {
@@ -148,12 +154,29 @@
           "command": "primeAgent.focusChat",
           "when": "editorTextFocus",
           "group": "navigation@99"
+        },
+        {
+          "command": "primeAgent.history",
+          "when": "activeWebviewPanelId == 'primeAgent.chatPanel'",
+          "group": "navigation@2"
         }
       ],
       "commandPalette": [
         {
           "command": "primeAgent.addSelectionToChat",
           "when": "editorHasSelection"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "primeAgent.history",
+          "when": "view == primeAgent.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "primeAgent.renameSession",
+          "when": "view == primeAgent.chat",
+          "group": "navigation@3"
         }
       ]
     },
@@ -214,6 +237,16 @@
           ],
           "default": "steer",
           "description": "How messages sent while the agent is working are delivered: steer interrupts after the current turn, followUp waits until the run ends. Toggleable per-run in the chat rail."
+        },
+        "primeAgent.liveTranscript": {
+          "type": "boolean",
+          "default": false,
+          "description": "Paint thinking and tool-call arguments as they stream. Off (default) keeps unfinished parts behind the working row until thinking settles, a tool starts running, or reply text appears."
+        },
+        "primeAgent.streamToolOutput": {
+          "type": "boolean",
+          "default": false,
+          "description": "Paint tool output as it arrives. Off (default) waits until the tool finishes. Independent of liveTranscript."
         }
       }
     }

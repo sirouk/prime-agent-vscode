@@ -4,6 +4,13 @@
 
 import { el, icon } from "./dom.js";
 import type { RecentSession } from "../src/protocol.js";
+import { deriveSessionLabel as deriveSessionLabelFromPrompt } from "../src/session-label.js";
+
+export interface HistoryFoldState {
+	workspace: boolean;
+	other: boolean;
+	archive: boolean;
+}
 
 export interface HistoryDeps {
 	onResume: (path: string, sessionId: string) => void;
@@ -14,35 +21,15 @@ export interface HistoryDeps {
 	/** Ask the host to search the conversations themselves, not just these rows. */
 	onSearch: (query: string) => void;
 	onBack: () => void;
+	readFolds?: () => Partial<HistoryFoldState> | undefined;
+	writeFolds?: (folds: HistoryFoldState) => void;
 }
 
 /** Host round-trip debounce: long enough to not search every keystroke, short enough to feel live. */
 const SEARCH_DEBOUNCE_MS = 220;
 
-/** Longest derived label before it is cut on a word boundary. */
-const MAX_DERIVED_LABEL_CHARS = 80;
-
-/**
- * A readable row label for a session that was never named.
- *
- * The fallback is the first prompt, and a first prompt is very often a pasted
- * block: a sentence, a blank line, then a markdown heading. Rendered raw it
- * arrives as one run-on smear — "Written to `…/HANDOFF.md` first.Now for your
- * ultimate mission:# HANDOFF" — which is both unreadable and unhelpful. Take
- * the first line that carries words, drop the markdown ornament in front of it,
- * and cut on a word boundary so the row stays one glanceable line.
- */
 export function deriveSessionLabel(session: { name?: string; firstPrompt?: string }): string {
-	if (session.name) return session.name;
-	const line = (session.firstPrompt ?? "")
-		.split(/\r?\n/)
-		.map((entry) => entry.replace(/^[\s>#*\-]+/, "").replace(/\s+/g, " ").trim())
-		.find((entry) => entry.length > 0);
-	if (!line) return "(untitled session)";
-	if (line.length <= MAX_DERIVED_LABEL_CHARS) return line;
-	const cut = line.slice(0, MAX_DERIVED_LABEL_CHARS);
-	const lastSpace = cut.lastIndexOf(" ");
-	return `${(lastSpace > MAX_DERIVED_LABEL_CHARS / 2 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+	return deriveSessionLabelFromPrompt(session) || "(untitled session)";
 }
 
 export class HistoryView {
@@ -75,6 +62,12 @@ export class HistoryView {
 		this.headerEl = header;
 		this.listEl = el("div", "history-list");
 		this.root.append(header, this.searchEl, this.listEl);
+		const saved = this.deps.readFolds?.();
+		this.folds = {
+			workspace: saved?.workspace ?? false,
+			other: saved?.other ?? false,
+			archive: saved?.archive ?? true,
+		};
 	}
 
 	private searchEl: HTMLInputElement;
@@ -83,6 +76,8 @@ export class HistoryView {
 	private query = "";
 	private fetching = false;
 	private searchTimer: number | undefined;
+	private folds: HistoryFoldState;
+	private applyingFolds = false;
 
 	/** Keep the last render on screen while a fresh list arrives; mark subtly. */
 	showLoading(): void {
@@ -147,22 +142,69 @@ export class HistoryView {
 			return;
 		}
 		const activityOf = (s: RecentSession): number =>
-			s.modifiedMs ?? (Number.isFinite(Date.parse(s.timestamp)) ? Date.parse(s.timestamp) : 0);
+			s.sortMs ?? s.modifiedMs ?? (Number.isFinite(Date.parse(s.timestamp)) ? Date.parse(s.timestamp) : 0);
 		// Best hit first WITHIN each bucket, recency only as the tie-break — the
 		// ranks used to be computed and then thrown away by an unconditional
 		// re-sort on activity, so a name match lost to anything touched later.
 		const byRankThenActivity = (a: { s: RecentSession; rank: number }, b: { s: RecentSession; rank: number }) =>
 			b.rank - a.rank || activityOf(b.s) - activityOf(a.s);
-		const inWorkspace = withRanks.filter(({ s }) => s.inWorkspace).sort(byRankThenActivity);
-		const others = withRanks.filter(({ s }) => !s.inWorkspace).sort(byRankThenActivity);
+		const archived = withRanks.filter(({ s }) => s.archived).sort(byRankThenActivity);
+		const active = withRanks.filter(({ s }) => !s.archived);
+		const inWorkspace = active.filter(({ s }) => s.inWorkspace).sort(byRankThenActivity);
+		const others = active.filter(({ s }) => !s.inWorkspace).sort(byRankThenActivity);
+		const searching = needle !== "";
 		if (inWorkspace.length > 0) {
-			this.listEl.appendChild(el("div", "history-group", "This workspace"));
-			for (const { s } of inWorkspace) this.listEl.appendChild(this.buildItem(s, false));
+			this.listEl.appendChild(
+				this.buildGroup("This workspace", inWorkspace.length, "workspace", searching, inWorkspace, false),
+			);
 		}
 		if (others.length > 0) {
-			this.listEl.appendChild(el("div", "history-group", inWorkspace.length > 0 ? "Other folders" : "Sessions"));
-			for (const { s } of others) this.listEl.appendChild(this.buildItem(s, true));
+			this.listEl.appendChild(
+				this.buildGroup(
+					inWorkspace.length > 0 ? "Other folders" : "Sessions",
+					others.length,
+					"other",
+					searching,
+					others,
+					true,
+				),
+			);
 		}
+		if (archived.length > 0) {
+			this.listEl.appendChild(this.buildGroup("Archive", archived.length, "archive", searching, archived, false));
+		}
+	}
+
+	private persistFolds(): void {
+		this.deps.writeFolds?.(this.folds);
+	}
+
+	private buildGroup(
+		title: string,
+		count: number,
+		key: keyof HistoryFoldState,
+		searching: boolean,
+		rows: Array<{ s: RecentSession }>,
+		showFolder: boolean,
+	): HTMLElement {
+		const group = document.createElement("details");
+		group.className = "history-group";
+		// Search must not hide a hit. Archive stays folded until the operator
+		// wants it, except while a search is matching inside it.
+		this.applyingFolds = true;
+		group.open = searching || !this.folds[key];
+		this.applyingFolds = false;
+		const summary = document.createElement("summary");
+		summary.className = "history-group-summary";
+		summary.textContent = `${title} (${count})`;
+		group.appendChild(summary);
+		group.addEventListener("toggle", () => {
+			if (this.applyingFolds) return;
+			this.folds[key] = !group.open;
+			this.persistFolds();
+		});
+		for (const { s } of rows) group.appendChild(this.buildItem(s, showFolder || !s.inWorkspace));
+		return group;
 	}
 
 	private currentId?: string;
@@ -194,15 +236,21 @@ export class HistoryView {
 		// finished on the next visit to history. Older hosts send only `running`,
 		// so fall back to it rather than inventing a liveness we were not told.
 		const status = session.status ?? (session.running ? "running" : "inactive");
-		const mark = el("span", `running-mark ${status}`) as HTMLElement;
+		const lamp =
+			status === "running" || session.running
+				? "working"
+				: session.unreadComplete
+					? "complete"
+					: "seen";
+		const mark = el("span", `running-mark ${lamp}`) as HTMLElement;
 		mark.title =
-			session.statusLabel != null
-				? `${status === "running" ? "Running" : status === "idle" ? "Idle" : "Inactive"} — flagged by the daemon as ${session.statusLabel}`
-				: status === "running"
-					? "Running right now"
-					: status === "idle"
-						? "Idle — loaded and waiting for work"
-						: "Inactive — not loaded; resuming it starts a worker";
+			lamp === "working"
+				? session.statusLabel != null
+					? `Working — flagged by the daemon as ${session.statusLabel}`
+					: "Working"
+				: lamp === "complete"
+					? "Finished — waiting for you"
+					: "Opened";
 		mark.appendChild(el("span", "running-dot"));
 		resume.appendChild(mark);
 		const actions = el("div", "history-actions");
@@ -218,11 +266,9 @@ export class HistoryView {
 				});
 				actions.appendChild(stop);
 			}
-			// Archive is the CLI's non-destructive retire (kill + session_state
-			// archived): the transcript is kept, the row just leaves the list.
 			const archive = document.createElement("button");
 			archive.className = "history-action";
-			archive.title = "Archive session (keeps the transcript, removes it from this list)";
+			archive.title = "Archive session (hides it in the Archive section)";
 			archive.appendChild(icon("archive", 11));
 			archive.addEventListener("click", (event) => {
 				event.stopPropagation();
@@ -255,7 +301,8 @@ export class HistoryView {
 			// Order is the one the operator asked for — stop, rename, delete — with
 			// archive slotted next to delete as the non-destructive neighbour of the
 			// two retire actions. Delete stays last: the furthest from a stray click.
-			actions.append(rename, archive, del);
+			if (session.archived) actions.append(rename, del);
+			else actions.append(rename, archive, del);
 		}
 		top.append(resume, actions);
 		item.appendChild(top);

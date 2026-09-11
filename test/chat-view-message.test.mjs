@@ -80,6 +80,16 @@ try {
 		type: "browseChild",
 		browseRef: "531d0ed5-3678-405e-9b8c-e9879bd9e552",
 	});
+	assert.equal(parseWebviewMessage({ type: "dismissProcess", ref: "../forged" }), undefined);
+	assert.deepEqual(parseWebviewMessage({ type: "dismissProcess", ref: "531d0ed5-3678-405e-9b8c-e9879bd9e552" }), {
+		type: "dismissProcess",
+		ref: "531d0ed5-3678-405e-9b8c-e9879bd9e552",
+	});
+	assert.deepEqual(parseWebviewMessage({ type: "dismissFinishedProcesses" }), { type: "dismissFinishedProcesses" });
+	assert.deepEqual(parseWebviewMessage({ type: "openProcessLog", ref: "531d0ed5-3678-405e-9b8c-e9879bd9e552" }), {
+		type: "openProcessLog",
+		ref: "531d0ed5-3678-405e-9b8c-e9879bd9e552",
+	});
 
 	// Notice actions are host-issued capabilities, validated like a browseRef.
 	assert.equal(parseWebviewMessage({ type: "noticeAction", id: "../forged" }), undefined);

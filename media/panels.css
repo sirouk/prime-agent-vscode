@@ -390,7 +390,29 @@
 	border-color: color-mix(in srgb, transparent 60%, var(--pa-error) 40%);
 }
 
-.pr-kill {
+.pr-finished-bar {
+	display: flex;
+	align-items: center;
+}
+
+.pr-finished-bar .pr-subhead {
+	flex: 1;
+}
+
+.pr-clear-finished {
+	flex: 0 0 auto;
+	padding: 4px 10px;
+	font-size: 9.5px;
+	color: var(--pa-dim);
+}
+
+.pr-clear-finished:hover {
+	color: var(--pa-accent);
+}
+
+.pr-kill,
+.pr-dismiss,
+.pr-open {
 	flex: 0 0 auto;
 	color: var(--pa-dim);
 	display: inline-flex;
@@ -400,12 +422,25 @@
 }
 
 .pr-row:hover .pr-kill,
-.pr-row:focus-within .pr-kill {
+.pr-row:focus-within .pr-kill,
+.pr-row:hover .pr-dismiss,
+.pr-row:focus-within .pr-dismiss,
+.pr-row:hover .pr-open,
+.pr-row:focus-within .pr-open {
 	opacity: 1;
 }
 
-.pr-kill:hover {
+.pr-preview-head .pr-open {
+	opacity: 1;
+}
+
+.pr-kill:hover,
+.pr-dismiss:hover {
 	color: var(--pa-error);
+}
+
+.pr-open:hover {
+	color: var(--pa-accent);
 }
 
 .pr-row:focus-visible {

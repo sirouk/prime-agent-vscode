@@ -63,7 +63,7 @@ check("splash shows the Prime Agent mark and name",
 check("splash says what it is waiting for", (document.querySelector(".boot-splash-sub")?.textContent ?? "").includes("connecting"),
 	document.querySelector(".boot-splash-sub")?.textContent ?? "<none>");
 hostMessage({ type: "uiState", title: "early agent title", statusText: "warming up" });
-check("uiState title paints before the first status snapshot", document.querySelector(".session-title")?.textContent === "early agent title");
+check("uiState statusText paints before the first status snapshot", document.querySelector(".live-label")?.textContent === "warming up");
 
 const baseStatus = {
 	connected: true, streaming: false, compacting: false, retrying: false, restoring: false,
@@ -163,37 +163,48 @@ check("edit copy emits the output once, not twice", clipboard.split("edited src/
 	// Appends to the live transcript on purpose — resetting with a snapshot here
 	// would wipe the turns the checks further down still need.
 	const partial = { role: "assistant", content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: {} }] };
+	hostMessage({ type: "event", event: { type: "agent_start" } });
 	hostMessage({ type: "event", event: { type: "message_start", message: partial } });
 	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
-
-	// Hold the node: the block is reused across frames, so the reference stays valid
-	// and can never drift onto one of the ipython cards rendered earlier in this file.
-	const card = [...document.querySelectorAll(".messages .tool")].pop();
-	check("tool card appears on the first (argument-less) frame", !!card && card.dataset.toolName === "ipython", card?.dataset.toolName ?? "<none>");
-	check("summary starts empty because the arguments have not arrived",
-		(card?.querySelector(".tool-summary")?.textContent ?? "") === "");
+	check("unfinished tool calls stay behind the working row by default",
+		!scroller.querySelector('[data-part="tool-stream-1"]') && !!scroller.querySelector(".working-row"),
+		scroller.querySelector(".working-row")?.textContent ?? "none");
 
 	const full = {
 		role: "assistant",
 		content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: { code: "%%bash\ncd /repo\nnpm run build -- --prod" } }],
 	};
 	hostMessage({ type: "event", event: { type: "message_update", message: full } });
+	check("complete arguments still wait for execution when liveTranscript is off",
+		!scroller.querySelector('[data-part="tool-stream-1"]'));
 
-	// prime-agent's own scorer condenses `npm run build` to `npm build`.
+	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "stream-1", toolName: "ipython", args: full.content[0].arguments } });
+	const card = [...document.querySelectorAll(".messages .tool")].pop();
 	const summaryText = () => card?.querySelector(".tool-summary")?.textContent ?? "";
 	const inputText = () => card?.querySelector(".tool-section:not(.tool-result) pre")?.textContent ?? "";
-	check("collapsed summary fills in once the arguments arrive", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+	check("tool_execution_start reveals the card", !!card && card.dataset.part === "tool-stream-1", card?.dataset.part ?? "<none>");
+	check("collapsed summary fills in once the tool starts", summaryText().includes("npm build"), JSON.stringify(summaryText()));
 	check("expanded call fills in too", inputText().includes("npm run build -- --prod"), JSON.stringify(inputText()));
-	check("late arguments upgrade the card to a shell card", card?.dataset.toolKind === "shell", card?.dataset.toolKind ?? "<none>");
-
-	// A trailing partial frame must never wipe a card that is already complete.
+	check("execution upgrades the card to a shell card", card?.dataset.toolKind === "shell", card?.dataset.toolKind ?? "<none>");
 	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
 	check("a later empty frame cannot blank the summary", summaryText().includes("npm build"), JSON.stringify(summaryText()));
 	check("a later empty frame cannot blank the call", inputText().includes("npm run build -- --prod"), JSON.stringify(inputText()));
-
-	// tool_execution_start repeats the same args last; it must not regress anything.
-	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "stream-1", toolName: "ipython", args: full.content[0].arguments } });
 	check("tool_execution_start leaves the completed card intact", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+	hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+}
+
+{
+	hostMessage({ type: "status", status: { ...baseStatus, liveTranscript: true } });
+	const partial = { role: "assistant", content: [{ type: "toolCall", id: "stream-live-1", name: "ipython", arguments: {} }] };
+	hostMessage({ type: "event", event: { type: "message_start", message: partial } });
+	hostMessage({ type: "event", event: { type: "message_update", message: partial } });
+	const liveCard = [...document.querySelectorAll(".messages .tool")].pop();
+	check("liveTranscript paints the tool card on the first argument-less frame",
+		!!liveCard && liveCard.dataset.toolName === "ipython" && liveCard.dataset.part === "tool-stream-live-1",
+		liveCard?.dataset.part ?? "<none>");
+	check("summary starts empty because the arguments have not arrived",
+		(liveCard?.querySelector(".tool-summary")?.textContent ?? "") === "");
+	hostMessage({ type: "status", status: { ...baseStatus, liveTranscript: false } });
 }
 
 // --- #23: the user turn shows a price, honestly labeled as the reply's input cost ---
@@ -234,7 +245,7 @@ const swept = window.getSelection().getRangeAt(0);
 check("expanding sweeps the selection over the revealed thinking text",
 	thinking.querySelector(".thinking-body").contains(swept.endContainer),
 	`end=${swept.endContainer.nodeValue ?? swept.endContainer.nodeName}`);
-check("session title shown", document.querySelector(".session-title").textContent === "demo");
+check("session id shown", document.querySelector(".session-id").textContent === "#019fd749");
 check("live badge", document.querySelector(".live-label").textContent === "live");
 check("context meter labeled", document.querySelector(".context-label").textContent.includes("262k"));
 
@@ -327,9 +338,43 @@ textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbl
 const promptMsg = posted.find((m) => m.type === "prompt");
 check("enter sends prompt", !!promptMsg && promptMsg.payload.text === "test prompt");
 
+// --- IME composition: the mirror must show the composing range, and Enter must
+// not send while a candidate is still being chosen (the native underline is
+// invisible because the textarea is color:transparent).
+posted.length = 0;
+textarea.value = "輸入";
+textarea.selectionStart = 0;
+textarea.selectionEnd = 2;
+textarea.dispatchEvent(new window.CompositionEvent("compositionstart", { data: "輸入" }));
+textarea.dispatchEvent(new window.CompositionEvent("compositionupdate", { data: "輸入" }));
+textarea.dispatchEvent(new window.InputEvent("input", { data: "輸入", isComposing: true, bubbles: true }));
+check("composing range is underlined on the mirror",
+	[...document.querySelectorAll(".composer-mirror .ime")].some((n) => n.textContent === "輸入"),
+	document.querySelector(".composer-mirror")?.innerHTML ?? "<none>");
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, isComposing: true }));
+check("Enter during composition does not send", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, isComposing: true, keyCode: 229 }));
+check("IME keyCode 229 Enter does not send", !posted.some((m) => m.type === "prompt"));
+textarea.dispatchEvent(new window.CompositionEvent("compositionend", { data: "輸入" }));
+textarea.dispatchEvent(new window.InputEvent("input", { data: "輸入", bubbles: true }));
+check("underline clears after compositionend",
+	document.querySelectorAll(".composer-mirror .ime").length === 0,
+	document.querySelector(".composer-mirror")?.innerHTML ?? "<none>");
+const confirmEnter = new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+textarea.dispatchEvent(confirmEnter);
+check("Enter that confirms composition does not send", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+await new Promise((resolve) => setTimeout(resolve, 0));
+posted.length = 0;
+textarea.value = "輸入";
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("Enter after composition sends the committed text",
+	posted.some((m) => m.type === "prompt" && m.payload.text === "輸入"),
+	JSON.stringify(posted.filter((m) => m.type === "prompt").map((m) => m.payload?.text)));
+
+
 // --- history view (grouped) ---
 posted.length = 0;
-const historyBtn = [...document.querySelectorAll(".icon-btn")].find((b) => b.title === "Sessions in this workspace");
+const historyBtn = document.querySelector('button[title="Sessions in this workspace"]');
 historyBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("requests history on toggle", posted.some((m) => m.type === "requestHistory"));
 hostMessage({
@@ -342,16 +387,19 @@ hostMessage({
 hostMessage({
 	type: "history",
 	sessions: [
-		{ path: "/tmp/old.jsonl", cwd: "/ws", timestamp: new Date(Date.now() - 86_400e3 * 3).toISOString(), modifiedMs: Date.now() - 86_400e3 * 3, name: "oldest", inWorkspace: true },
-		{ path: "/tmp/new.jsonl", cwd: "/ws", timestamp: new Date(Date.now() - 86_400e3).toISOString(), modifiedMs: Date.now() - 86_400e3, name: "renamed-just-now", inWorkspace: true },
-		{ path: "/tmp/mid.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), modifiedMs: Date.now(), name: "newest", inWorkspace: true },
+		{ path: "/tmp/old.jsonl", cwd: "/ws", timestamp: new Date(Date.now() - 86_400e3 * 3).toISOString(), modifiedMs: Date.now() - 86_400e3 * 3, sortMs: Date.now() - 86_400e3 * 3, name: "oldest", inWorkspace: true },
+		{ path: "/tmp/new.jsonl", cwd: "/ws", timestamp: new Date(Date.now() - 86_400e3).toISOString(), modifiedMs: Date.now() - 86_400e3, sortMs: Date.now() - 86_400e3, name: "renamed-just-now", inWorkspace: true },
+		{ path: "/tmp/mid.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), modifiedMs: Date.now(), sortMs: Date.now(), name: "newest", inWorkspace: true },
+		{ path: "/tmp/busy.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), modifiedMs: Date.now() + 86_400e3, sortMs: Date.now() - 86_400e3 * 10, name: "still-running-old", inWorkspace: true, status: "running" },
 	],
 });
 const itemNames = [...document.querySelectorAll(".history-item .history-item-name")].map((n) => n.textContent);
-check("history sorted recent-descending within bucket", itemNames[0] === "newest" && itemNames[1] === "renamed-just-now" && itemNames[2] === "oldest", itemNames.join("|"));
+check("history sorted by frozen sortMs, not mid-turn mtime", itemNames[0] === "newest" && itemNames[1] === "renamed-just-now" && itemNames[2] === "oldest" && itemNames[3] === "still-running-old", itemNames.join("|"));
 const relativeTimes = [...document.querySelectorAll(".history-item .history-item-time")].map((n) => n.textContent);
 check("renamed session labels by activity time", relativeTimes[1].includes("d"), JSON.stringify(relativeTimes));
-check("history groups rendered", document.querySelectorAll(".history-item").length === 3);
+check("history groups rendered", document.querySelectorAll(".history-item").length === 4);
+check("workspace group is foldable",
+	[...document.querySelectorAll(".history-group-summary")].some((n) => n.textContent.includes("This workspace")));
  // re-seed the canonical 2-item list for downstream checks
 hostMessage({
 	type: "history",
@@ -650,23 +698,39 @@ const rowNamed = (text) => [...document.querySelectorAll(".history-item")].find(
 const markOf = (text) => rowNamed(text)?.querySelector(".running-mark");
 const runRow = rowNamed("live worker");
 check("running row shows the animated mark", !!runRow.querySelector(".running-dot"));
-// All three roster states are visible, and only the live one moves.
-check("a running row is marked running", markOf("live worker")?.className.includes("running"));
+check("a running row is the red working lamp", markOf("live worker")?.className.includes("working"), markOf("live worker")?.className);
 check("an idle row still gets a dot, not nothing", !!markOf("quiet archive")?.querySelector(".running-dot"));
-check("an idle row is marked idle", markOf("quiet archive")?.className.includes("idle"), markOf("quiet archive")?.className);
-check("an inactive row is shown and marked inactive", markOf("retired thread")?.className.includes("inactive"), markOf("retired thread")?.className);
+check("an idle row without unread is grey", markOf("quiet archive")?.className.includes("seen"), markOf("quiet archive")?.className);
+check("an inactive row is shown and marked seen until a turn finishes", markOf("retired thread")?.className.includes("seen"), markOf("retired thread")?.className);
 check("each state says what it means", [markOf("live worker"), markOf("quiet archive"), markOf("retired thread")]
 	.map((m) => m?.title ?? "").every((t) => t.length > 0));
-check("a host that sends no status still reads as inactive, never as running",
-	markOf("legacy row")?.className.includes("inactive"), markOf("legacy row")?.className);
-check("history actions are siblings of its resume control", !!runRow.querySelector(".history-item-top > .history-resume + .history-actions") && !runRow.querySelector(".history-resume button"));
+check("a host that sends no status still reads as seen, never as working",
+	markOf("legacy row")?.className.includes("seen") && !markOf("legacy row")?.className.includes("working"), markOf("legacy row")?.className);
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "done-1", path: "/tmp/done.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "just finished", inWorkspace: true, status: "idle", unreadComplete: true },
+	],
+});
+check("a finished unread row is the green complete lamp", markOf("just finished")?.className.includes("complete"), markOf("just finished")?.className);
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "run-1", path: "/tmp/run.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "live worker", inWorkspace: true, running: true, status: "running" },
+		{ id: "idle-1", path: "/tmp/idle.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "quiet archive", inWorkspace: true, status: "idle" },
+		{ id: "gone-1", path: "/tmp/gone.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "retired thread", inWorkspace: true, status: "inactive" },
+		{ id: "old-host", path: "/tmp/old.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "legacy row", inWorkspace: true },
+	],
+});
+const liveRow = rowNamed("live worker");
+check("history actions are siblings of its resume control", !!liveRow.querySelector(".history-item-top > .history-resume + .history-actions") && !liveRow.querySelector(".history-resume button"));
 const idleRow = rowNamed("quiet archive");
 check("an idle row offers no Stop — there is no run to stop",
 	![...idleRow.querySelectorAll(".history-action")].some((b) => b.title.startsWith("Stop")));
-const actTitles = [...runRow.querySelectorAll(".history-action")].map((b) => b.title);
+const actTitles = [...liveRow.querySelectorAll(".history-action")].map((b) => b.title);
 check("actions ordered stop -> rename -> delete", actTitles[0].startsWith("Stop") && actTitles.some((t) => t.startsWith("Rename")) && actTitles.some((t) => t.startsWith("Delete")), actTitles.join("|"));
 posted.length = 0;
-[...runRow.querySelectorAll(".history-action")].find((b) => b.title.startsWith("Stop")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+[...liveRow.querySelectorAll(".history-action")].find((b) => b.title.startsWith("Stop")).dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("stop posts stopSession", posted.some((m) => m.type === "stopSession" && m.sessionId === "run-1"));
 hostMessage({
 	type: "history",
@@ -676,76 +740,8 @@ hostMessage({
 	],
 });
 
-// --- session title rename by double-click (header) ---
-hostMessage({ type: "status", status: { ...baseStatus, sessionName: "vscode-extension" } });
-const titleWrap = document.querySelector(".session-title-wrap");
-check("session title shown in header", titleWrap && titleWrap.querySelector(".session-title").textContent === "vscode-extension");
-check("the rename button is gone — the name itself is the affordance", !titleWrap.querySelector(".title-edit-btn"));
-
-const dblclick = () => titleWrap.querySelector(".session-title").dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true, cancelable: true }));
-
-// A single click must not start editing, or selecting the title text would.
-posted.length = 0;
-titleWrap.querySelector(".session-title").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("a single click does not open the editor", !document.querySelector(".session-title-input"));
-
-dblclick();
-const titleInput = document.querySelector(".session-title-input");
-check("double-click swaps the span for an input", !!titleInput && titleInput.value === "vscode-extension");
-titleInput.value = "shiny-browser-app";
-titleInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-check("enter posts renameSession", posted.some((m) => m.type === "renameSession" && m.name === "shiny-browser-app"));
-check("input restores to the span after commit", !!document.querySelector(".session-title-wrap .session-title"));
-
-// Escape discards, and says so by sending nothing.
-posted.length = 0;
-dblclick();
-const escInput = document.querySelector(".session-title-input");
-escInput.value = "typed-then-abandoned";
-escInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-check("escape sends no rename", !posted.some((m) => m.type === "renameSession"));
-check("escape restores the span", !!document.querySelector(".session-title-wrap .session-title"));
-check("escape leaves the old name on screen", document.querySelector(".session-title").textContent === "vscode-extension");
-
-// Clicking away keeps the edit: losing a rename to a stray click is the clunk.
-posted.length = 0;
-dblclick();
-const blurInput = document.querySelector(".session-title-input");
-blurInput.value = "kept-on-blur";
-blurInput.dispatchEvent(new window.FocusEvent("blur", { bubbles: false }));
-check("blur commits the rename", posted.some((m) => m.type === "renameSession" && m.name === "kept-on-blur"));
-
-// Emptying the box means "leave it alone": the daemon cannot clear a name, so
-// sending one would only bounce back as an error under the operator's cursor.
-posted.length = 0;
-dblclick();
-const emptyInput = document.querySelector(".session-title-input");
-emptyInput.value = "   ";
-emptyInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-check("an emptied name posts nothing", !posted.some((m) => m.type === "renameSession"));
-check("an emptied name leaves the old one on screen", document.querySelector(".session-title").textContent === "vscode-extension");
-
-// An unchanged value is not a rename, so a stray double-click costs nothing.
-posted.length = 0;
-dblclick();
-const noopInput = document.querySelector(".session-title-input");
-noopInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-check("an unchanged name posts nothing", !posted.some((m) => m.type === "renameSession"));
-
-// A rename in flight belongs to the session it started on.
-posted.length = 0;
-dblclick();
-const staleInput = document.querySelector(".session-title-input");
-staleInput.value = "meant-for-the-old-session";
-hostMessage({ type: "status", status: { ...baseStatus, sessionId: "0000ffff-1111-2222-3333-444455556666", sessionName: "another-session" } });
-check("a session change discards the in-flight rename", !posted.some((m) => m.type === "renameSession"));
-check("a session change restores the span", !!document.querySelector(".session-title-wrap .session-title"));
-hostMessage({ type: "status", status: { ...baseStatus, sessionName: "vscode-extension" } });
-
-hostMessage({ type: "uiState", title: "title supplied by agent" });
-check("uiState title updates the header", document.querySelector(".session-title")?.textContent === "title supplied by agent",
-	document.querySelector(".session-title")?.textContent ?? "<none>");
-
+check("session chrome actions stay in the webview for tests and welcome",
+	!!document.querySelector('button[title="New session"]') && !!document.querySelector('button[title="Sessions in this workspace"]'));
 
 // --- the strip header tallies each state, and stays right as they change -----
 {
@@ -861,7 +857,7 @@ check("uiState title updates the header", document.querySelector(".session-title
 	const header = () => document.querySelector(".subagents-strip .subagents-header");
 	// Guarded: a selector that silently stops matching would reset nothing and
 	// make every check below pass for the wrong reason.
-	const newChatBtn = document.querySelector(".topbar .icon-btn[title='New session']");
+	const newChatBtn = document.querySelector('button[title="New session"]');
 	check("the New session control is reachable for these fixtures", !!newChatBtn);
 	const freshThread = () => newChatBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 
@@ -1240,7 +1236,11 @@ const slashItems = () => {
 	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
 	return [...document.querySelectorAll(".ac-item")].map((item) => item.textContent.trim());
 };
-check("slash menu lists the agent's commands", slashItems().length === 2, JSON.stringify(slashItems()));
+const listed = slashItems();
+check("slash menu lists UI commands before the agent's catalog",
+	listed[0]?.startsWith("/model") && listed.some((item) => item.startsWith("/effort")) && listed.some((item) => item.startsWith("/stash")),
+	JSON.stringify(listed));
+check("slash menu still lists the agent's commands", listed.some((item) => item.startsWith("/compact")) && listed.some((item) => item.includes("security-pipeline")), JSON.stringify(listed));
 posted.length = 0;
 hostMessage({ type: "status", status: { ...baseStatus, sessionId: "session-boundary-slash", sessionName: "slash" } });
 check("a session boundary re-requests the slash catalog it just discarded",
@@ -1250,9 +1250,84 @@ hostMessage({ type: "commands", commands: [
 	{ name: "compact", description: "Compact the context" },
 	{ name: "security-pipeline", description: "Run the security review" },
 ] });
-check("the slash menu works again in the resumed thread", slashItems().length === 2, JSON.stringify(slashItems()));
+const resumed = slashItems();
+check("the slash menu works again in the resumed thread",
+	resumed.some((item) => item.startsWith("/compact")) && resumed.some((item) => item.startsWith("/model")),
+	JSON.stringify(resumed));
 textarea.value = "";
 textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+// --- /model /effort intercept the composer instead of prompting; /stash parks the draft ---
+hostMessage({
+	type: "models",
+	models: [
+		{ provider: "chutes", id: "kimi", contextWindow: 262144, reasoning: true, input: ["text", "image"] },
+		{ provider: "chutes", id: "glm", contextWindow: 131072, reasoning: false, input: ["text"] },
+		{ provider: "openai", id: "gpt-5", contextWindow: 400000, reasoning: true, input: ["text", "image"] },
+	],
+});
+hostMessage({ type: "status", status: { ...baseStatus, availableThinkingLevels: ["off", "minimal", "low", "medium", "high", "max"] } });
+
+textarea.value = "keep this draft";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.value = "/stash";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/stash parks the draft and clears the composer", textarea.value === "", JSON.stringify(textarea.value));
+check("/stash does not send a prompt", !posted.some((m) => m.type === "prompt"));
+check("/stash hint is shown", (document.querySelector(".composer-hint")?.textContent ?? "").includes("Stashed"));
+textarea.value = "/stash";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/stash restores the parked draft", textarea.value === "keep this draft", JSON.stringify(textarea.value));
+check("restoring stash does not prompt", !posted.some((m) => m.type === "prompt"));
+
+textarea.value = "draft before model";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.value = "/model";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+const modelSlashRow = [...document.querySelectorAll(".ac-item")].find((row) => row.textContent.startsWith("/model"));
+check("/ lists /model as a local command", !!modelSlashRow, JSON.stringify([...document.querySelectorAll(".ac-item")].map((row) => row.textContent)));
+modelSlashRow.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+const modelDrop = document.querySelector(".dropdown");
+check("accepting /model opens the model menu", !!modelDrop && !!modelDrop.querySelector(".dropdown-search"));
+check("model search box has keyboard focus", document.activeElement === modelDrop.querySelector(".dropdown-search"));
+check("/model does not prompt", !posted.some((m) => m.type === "prompt"));
+check("/model stashes the prior draft out of the composer", textarea.value === "", JSON.stringify(textarea.value));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("ArrowDown+Enter picks a model from /model", posted.some((m) => m.type === "setModel"), JSON.stringify(posted.map((m) => m.type)));
+check("picking a model restores the stashed draft", textarea.value === "draft before model", JSON.stringify(textarea.value));
+check("model menu closed after keyboard select", !document.querySelector(".dropdown"));
+
+textarea.value = "/model glm";
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/model glm sets the model without a picker", posted.some((m) => m.type === "setModel" && m.modelId === "glm") && !document.querySelector(".dropdown"), JSON.stringify(posted));
+check("/model glm restores the prior draft", textarea.value === "draft before model", JSON.stringify(textarea.value));
+
+textarea.value = "/effort";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const effortDrop = document.querySelector(".dropdown");
+check("/effort opens the thinking menu", !!effortDrop && (effortDrop.querySelector(".dropdown-header")?.textContent ?? "").startsWith("Thinking"));
+check("thinking search box has keyboard focus", document.activeElement === effortDrop.querySelector(".dropdown-search"));
+check("/effort does not prompt", !posted.some((m) => m.type === "prompt"));
+effortDrop.querySelector(".dropdown-search").value = "high";
+effortDrop.querySelector(".dropdown-search").dispatchEvent(new window.Event("input", { bubbles: true }));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("typing a level and Enter sets thinking", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"), JSON.stringify(posted));
+check("/effort restores the stashed draft after pick", textarea.value === "draft before model", JSON.stringify(textarea.value));
+
+textarea.value = "/effort medium";
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/effort medium sets the level without a picker", posted.some((m) => m.type === "setThinkingLevel" && m.level === "medium") && !document.querySelector(".dropdown"), JSON.stringify(posted));
 
 // --- paste image on a text-only model shows a composer hint ---
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
@@ -1365,15 +1440,17 @@ check("separate sends carry separate client request ids",
 		firstOptimisticPrompt?.payload?.clientRequestId !== secondOptimisticPrompt?.payload?.clientRequestId,
 	JSON.stringify(posted.filter((m) => m.type === "prompt").map((m) => m.payload.clientRequestId)));
 check("two optimistic rows render before either verdict", scroller.querySelectorAll(".row-user").length === 2, String(scroller.querySelectorAll(".row-user").length));
+check("send paints a working spinner before the first token", !!scroller.querySelector(".working-row .working-spinner") && (scroller.querySelector(".working-label")?.textContent ?? "").length > 0 && !/Sending/.test(scroller.querySelector(".working-label")?.textContent ?? ""), scroller.querySelector(".working-label")?.textContent ?? "none");
 hostMessage({ type: "promptRejected", error: "transport disconnected", clientRequestId: firstOptimisticPrompt?.payload?.clientRequestId });
 check("rejection removes the exact optimistic row", !scroller.textContent.includes("first optimistic prompt") && scroller.textContent.includes("second optimistic prompt"), scroller.textContent);
+check("rejection of one queued send keeps the working spinner", !!scroller.querySelector(".working-row") && !/Sending/.test(scroller.querySelector(".working-label")?.textContent ?? ""));
 check("rejection restores the rejected draft when no newer draft exists", textarea.value === "first optimistic prompt", textarea.value);
 textarea.value = "";
 hostMessage({ type: "event", event: { type: "message_start", message: { role: "user", content: "second optimistic prompt" } } });
 check("confirmed second prompt does not duplicate its optimistic row", scroller.querySelectorAll(".row-user").length === 1, String(scroller.querySelectorAll(".row-user").length));
 
 // --- history delete: inline confirm posts deleteSession ---
-const historyBtnAgain = [...document.querySelectorAll(".icon-btn")].find((b) => b.title === "Sessions in this workspace");
+const historyBtnAgain = document.querySelector('button[title="Sessions in this workspace"]');
 historyBtnAgain.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 // Search must be cleared BEFORE the fixture: the needle blocks lastSessions updates.
 document.querySelector(".history-search").value = "";
@@ -1433,6 +1510,22 @@ check("archive confirm is not styled destructive", !archConfirm.classList.contai
 archConfirm.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("confirm posts archiveSession", posted.some((m) => m.type === "archiveSession" && m.sessionId === "arch-1"), JSON.stringify(posted));
 check("archive does not post deleteSession", !posted.some((m) => m.type === "deleteSession"));
+hostMessage({
+	type: "history",
+	sessions: [
+		{ id: "arch-1", path: "/tmp/arch.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "finished experiment", inWorkspace: true, archived: true },
+		{ id: "live-2", path: "/tmp/live2.jsonl", cwd: "/ws", timestamp: new Date().toISOString(), name: "still open", inWorkspace: true },
+	],
+});
+const archiveGroup = [...document.querySelectorAll(".history-group")].find((g) => g.querySelector(".history-group-summary")?.textContent.includes("Archive"));
+check("archive section starts folded", archiveGroup?.open === false);
+archiveGroup.open = true;
+check("archived row moves into its own section", archiveGroup.textContent.includes("finished experiment"));
+check("active list still shows the unarchived row",
+	[...document.querySelectorAll(".history-item .history-item-name")].some((n) => n.textContent.includes("still open")));
+const archivedRow = [...archiveGroup.querySelectorAll(".history-item")].find((i) => i.textContent.includes("finished experiment"));
+check("an already-archived row has no archive action",
+	!!archivedRow && ![...archivedRow.querySelectorAll(".history-action")].some((b) => (b.title ?? "").startsWith("Archive")));
 
 // --- history search reaches the host, and transcript hits rank and explain themselves ---
 posted.length = 0;
@@ -1485,25 +1578,21 @@ check("rendered webview has no nested native interactive controls",
 	document.querySelectorAll("button button, button input, button select, button textarea").length === 0,
 	[...document.querySelectorAll("button button, button input, button select, button textarea")].map((node) => node.outerHTML).join("\n"));
 
-// --- C12: the two links the operator asked for, and the butterfly on the entry ---
+// Session actions now live in the VS Code view title bar, not a webview kebab.
+hostMessage({ type: "newThread" });
+check("host newThread returns to chat", document.querySelector(".history-view")?.style.display === "none");
+check("newThread paints the empty session immediately", !!document.querySelector(".welcome"), document.querySelector(".messages")?.textContent?.slice(0, 80) ?? "none");
+check("newThread blocks send until the host confirms the session", textarea.disabled && textarea.placeholder === "Creating session…", `${textarea.disabled} ${textarea.placeholder}`);
 posted.length = 0;
-const kebabBtn = [...document.querySelectorAll(".topbar .icon-btn")].find((b) => b.title === "Session actions");
-kebabBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-const kebabMenu = document.querySelector(".menu.visible");
-check("kebab menu opens", !!kebabMenu);
-const kebabItems = [...kebabMenu.querySelectorAll(".menu-item")];
-const visitItem = kebabItems[kebabItems.length - 1];
-check("bottom kebab entry is Visit Prime Intellect", visitItem.textContent.trim() === "Visit Prime Intellect", kebabItems.map((i) => i.textContent.trim()).join("|"));
-// #44: the butterfly, not a generic link glyph — same mark as the brand.
-check("that entry wears the butterfly", !!visitItem.querySelector('svg[viewBox="0 0 178 178"]'));
-check("every kebab entry says what it does", kebabItems.every((i) => i.textContent.trim().length > 0));
-visitItem.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("visit opens the Prime Intellect dashboard", posted.some((m) => m.type === "openExternal" && m.url === "https://app.primeintellect.ai"), JSON.stringify(posted));
-check("choosing an entry closes the menu", !document.querySelector(".menu.visible"));
-posted.length = 0;
-document.querySelector(".topbar .brand").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
-check("header mark opens the prime-agent write-up",
-	posted.some((m) => m.type === "openExternal" && m.url === "https://www.primeintellect.ai/blog/prime-agent#article-top"), JSON.stringify(posted));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("Enter during create does not post a prompt", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+hostMessage({
+	type: "snapshot",
+	messages: [],
+	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
+	status: { ...baseStatus, sessionId: "session-created", sessionName: "", restoring: false },
+});
+check("the created session unlocks the composer", !textarea.disabled && textarea.placeholder === "Message Prime Agent…", `${textarea.disabled} ${textarea.placeholder}`);
 
 // --- #5/C10: steer vs queue while a run is live, and a Stop that really aborts ---
 const behaviorPill = document.querySelector(".composer-rail .rail-pill.behavior");
@@ -1653,13 +1742,27 @@ check("...while the reply itself still renders", /answer/.test(scroller.textCont
 // open/closed state on every frame.
 hostMessage({ type: "snapshot", status: { ...baseStatus, sessionId: "session-thinking-2" }, state: null, messages: [] });
 hostMessage({ type: "event", event: { type: "agent_start" } });
+check("agent_start paints a working row immediately", !!scroller.querySelector(".working-row .working-spinner"), scroller.querySelector(".working-row")?.textContent ?? "none");
 hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "" }] } } });
 check("no box while the thinking slot is still empty", !scroller.querySelector("details.thinking"));
+check("empty message_start keeps the working spinner", !!scroller.querySelector(".working-row") && !scroller.querySelector(".row-assistant"), scroller.querySelector(".working-row")?.textContent ?? "none");
 hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one" }] } } });
+check("thinking stays behind the working row until it settles", !scroller.querySelector("details.thinking") && !!scroller.querySelector(".working-row"));
+hostMessage({ type: "event", event: { type: "message_end", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one, step two" }] } } });
 const born = scroller.querySelector("details.thinking");
-check("the box appears with the first delta", !!born && /step one/.test(born.textContent));
+check("the box appears once thinking settles", !!born && /step two/.test(born.textContent));
+check("settled thinking is collapsed by default", born instanceof window.HTMLDetailsElement && born.open === false);
+hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
+
+hostMessage({ type: "snapshot", status: { ...baseStatus, sessionId: "session-thinking-live", liveTranscript: true }, state: null, messages: [] });
+hostMessage({ type: "event", event: { type: "agent_start" } });
+hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "" }] } } });
+hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one" }] } } });
+const liveBorn = scroller.querySelector("details.thinking");
+check("liveTranscript paints thinking on the first delta", !!liveBorn && /step one/.test(liveBorn.textContent));
+check("the first visible token replaces the working spinner", !scroller.querySelector(".working-row"));
 hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "thinking", thinking: "step one, step two" }] } } });
-check("later deltas grow the same node, not a new one", scroller.querySelector("details.thinking") === born);
+check("later deltas grow the same node, not a new one", scroller.querySelector("details.thinking") === liveBorn);
 check("...and its text keeps up", /step two/.test(scroller.querySelector("details.thinking").textContent));
 hostMessage({ type: "event", event: { type: "agent_end", messages: [] } });
 
@@ -1875,6 +1978,88 @@ hostMessage({
 document.querySelector(".pr-subhead")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("an observed row claims no exit status", !document.querySelector(".pr-status"));
 check("an observed row offers no stop", !document.querySelector(".pr-kill"));
+
+hostMessage({
+	type: "processes",
+	processes: [
+		{
+			ref: "task-ref-1",
+			command: "sleep 30",
+			fullCommand: "ui-test-sleep-30s\nsleep 30",
+			state: "running",
+			startedMs: Date.now() - 5_000,
+			hasOutput: true,
+			source: "task",
+		},
+	],
+});
+check("a skill receipt shows in the processes panel", document.querySelector(".pr-row")?.textContent.includes("sleep 30"));
+check("a skill receipt offers no stop", !document.querySelector(".pr-kill"));
+check("a running skill receipt can open its log", !!document.querySelector(".pr-open"));
+check("a running skill receipt cannot be cleared", !document.querySelector(".pr-dismiss"));
+document.querySelector(".pr-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+hostMessage({
+	type: "processOutput",
+	preview: { ref: "task-ref-1", lines: ["tick"], source: "/tmp/stdout.log" },
+});
+check(
+	"a skill receipt preview names the captured log",
+	document.querySelector(".pr-foot")?.textContent.includes("background task"),
+	document.querySelector(".pr-foot")?.textContent,
+);
+document.querySelector(".pr-preview-head .pr-open")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const openAsk = posted.filter((message) => message.type === "openProcessLog").at(-1);
+check("the preview open button asks the host to open the log", openAsk?.ref === "task-ref-1", JSON.stringify(openAsk));
+
+hostMessage({
+	type: "processes",
+	processes: [
+		{
+			ref: "task-ref-1",
+			command: "sleep 30",
+			fullCommand: "sleep 30",
+			state: "exited",
+			startedMs: Date.now() - 30_000,
+			endedMs: Date.now(),
+			exitCode: 0,
+			hasOutput: true,
+			source: "task",
+		},
+	],
+});
+check("finished rows offer a bulk clear", !!document.querySelector(".pr-clear-finished"));
+document.querySelector(".pr-clear-finished").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check(
+	"clear finished asks the host to drop every finished row",
+	posted.filter((message) => message.type === "dismissFinishedProcesses").length > 0,
+);
+document.querySelector(".pr-subhead").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("a finished skill receipt can be cleared on its own", !!document.querySelector(".pr-dismiss"));
+document.querySelector(".pr-dismiss").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const dismissAsk = posted.filter((message) => message.type === "dismissProcess").at(-1);
+check("the row clear asks the host for that ref", dismissAsk?.ref === "task-ref-1", JSON.stringify(dismissAsk));
+
+document.querySelector(".pr-header").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("the panel can be collapsed by hand", !document.querySelector(".pr-row"));
+hostMessage({ type: "status", status: { ...anytimeStatus, streaming: true } });
+hostMessage({
+	type: "processes",
+	processes: [
+		{
+			ref: "task-ref-new",
+			command: "sleep 30",
+			fullCommand: "sleep 30",
+			state: "running",
+			startedMs: Date.now(),
+			hasOutput: true,
+			source: "task",
+		},
+	],
+});
+check(
+	"a newly started background task reopens the panel even while the agent is working",
+	!!document.querySelector(".pr-row"),
+);
 
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

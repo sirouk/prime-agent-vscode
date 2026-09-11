@@ -820,6 +820,72 @@ controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 	controller.compactionStillRunning = originalStillRunning;
 }
 
+// History rank freezes while a session is running, and operator archive is
+// an overlay — daemon lifecycle "archived" is not the same thing.
+{
+	const live = path.join(workdir, "hist-live.jsonl");
+	const other = path.join(workdir, "hist-other.jsonl");
+	fs.writeFileSync(live, '{"type":"session","id":"root"}\n');
+	fs.writeFileSync(other, '{"type":"session","id":"root"}\n');
+	const older = "2026-01-01T00:00:00.000Z";
+	const newer = "2026-01-02T00:00:00.000Z";
+	const catalog = [
+		{
+			sessionId: "hist-live",
+			sessionFile: live,
+			cwd: workdir,
+			sessionName: "running chat",
+			created: older,
+			modified: newer,
+			lastActivityAt: newer,
+			lifecycle: "live",
+			activeSessionId: "live-handle",
+			rosterStatus: "running",
+		},
+		{
+			sessionId: "hist-other",
+			sessionFile: other,
+			cwd: workdir,
+			sessionName: "waiting chat",
+			created: older,
+			modified: older,
+			lastActivityAt: older,
+			lifecycle: "live",
+			rosterStatus: "idle",
+		},
+	];
+	let rows = controller.rowsFromCatalog(catalog);
+	check("a first-seen running session keeps its catalog time as the frozen rank",
+		rows.find((r) => r.id === "hist-live")?.sortMs === Date.parse(newer));
+	const frozen = rows.find((r) => r.id === "hist-live")?.sortMs;
+	catalog[0] = { ...catalog[0], modified: "2026-01-03T00:00:00.000Z", lastActivityAt: "2026-01-03T00:00:00.000Z" };
+	rows = controller.rowsFromCatalog(catalog);
+	check("mid-turn catalog activity does not reshuffle a running row",
+		rows.find((r) => r.id === "hist-live")?.sortMs === frozen, String(rows.find((r) => r.id === "hist-live")?.sortMs));
+	catalog[0] = { ...catalog[0], rosterStatus: "idle", activeSessionId: "live-handle" };
+	rows = controller.rowsFromCatalog(catalog);
+	check("finishing a turn advances the rank past older idle rows",
+		rows[0]?.id === "hist-live" && (rows[0]?.sortMs ?? 0) >= (rows[1]?.sortMs ?? 0),
+		rows.map((r) => `${r.id}:${r.sortMs}`).join("|"));
+	check("a finished row the operator has not opened is unread",
+		rows.find((r) => r.id === "hist-live")?.unreadComplete === true);
+	controller.markHistoryArchived(live);
+	rows = controller.rowsFromCatalog(catalog);
+	check("operator archive flags the row instead of dropping it",
+		rows.find((r) => r.id === "hist-live")?.archived === true);
+	check("daemon lifecycle archived without the overlay stays in the active list",
+		controller.rowsFromCatalog([{
+			sessionId: "hist-other",
+			sessionFile: other,
+			cwd: workdir,
+			sessionName: "daemon archived",
+			created: older,
+			modified: older,
+			lifecycle: "archived",
+			rosterStatus: "inactive",
+		}]).some((r) => r.id === "hist-other" && r.archived !== true));
+}
+
 // The last lifecycle fixture intentionally leaves a lightweight RPC stand-in
 // installed; dispose() owns a real client's stop() method, so remove it first.
 controller.client = null;

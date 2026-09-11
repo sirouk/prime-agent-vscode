@@ -376,6 +376,13 @@ export class ProcessTracker {
 	 * The last ~`maxLines` lines this command wrote to a file it opened, or an
 	 * honest explanation of why we have nothing.
 	 */
+	/** Files this observed command writes, when we resolved any. */
+	filesForRef(ref: string): string[] {
+		const entry = this.byRef.get(ref);
+		if (!entry) return [];
+		return entry.outputPaths.filter((file) => !!isRegularFile(file));
+	}
+
 	async preview(ref: string, maxLines = 100): Promise<ProcessOutputPreview> {
 		const entry = this.byRef.get(ref);
 		if (!entry) return { ref, lines: [], note: "That process is no longer being tracked." };

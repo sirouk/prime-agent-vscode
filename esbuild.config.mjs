@@ -114,6 +114,18 @@ const backgroundJobsConfig = {
 	outfile: "dist/background-jobs.cjs",
 };
 
+// test/background-task-tracker.test.mjs drives the skill-receipt adapter.
+const backgroundTaskTrackerConfig = {
+	...shared,
+	entryPoints: ["src/background-task-tracker.ts"],
+	bundle: true,
+	format: "cjs",
+	platform: "node",
+	target: "node18",
+	outfile: "dist/background-task-tracker.cjs",
+	external: ["vscode"],
+};
+
 // test/processes.test.mjs drives the background-process tracker directly, the
 // same way the sidecar and session-action bundles are built for their gates.
 const processTrackerConfig = {
@@ -150,6 +162,7 @@ if (watch) {
 	await esbuild.build(daemonSidecarConfig);
 	await esbuild.build(sessionActionsConfig);
 	await esbuild.build(processTrackerConfig);
+	await esbuild.build(backgroundTaskTrackerConfig);
 	await esbuild.build(backgroundJobsConfig);
 	await esbuild.build(agentJobsConfig);
 }

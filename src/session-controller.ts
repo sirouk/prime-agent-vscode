@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { locateAgent, type LocatedAgent } from "./agent-locator.js";
 import { DaemonSidecar } from "./daemon-sidecar.js";
-import { defaultAgentDir, resolveOwnerClientId, type OwnerLookup } from "./daemon-owner.js";
+import { defaultAgentDir, resolveOwnerClientId, resolveWorkerDescriptor, type OwnerLookup } from "./daemon-owner.js";
 import type { AttachSnapshot, DaemonServerMessage, RosterEntry, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
 import type {
 	AgentEvent,
@@ -34,7 +34,9 @@ import type {
 import { DebugFileLog } from "./debug-log.js";
 import { buildMarkdownExport } from "./markdown-export.js";
 import { listRecentSessions, normalizeFsPath } from "./recent-sessions.js";
+import { deriveSessionLabel, firstUserPrompt } from "./session-label.js";
 import { AgentJobIndex } from "./agent-jobs.js";
+import { BackgroundTaskTracker, backgroundTasksDir } from "./background-task-tracker.js";
 import { ProcessTracker, tailFile } from "./process-tracker.js";
 import { ThreadDiffTracker } from "./thread-diffs.js";
 import { archiveSessionFile, deleteSession, isSessionActive, renameSessionOffline } from "./session-actions.js";
@@ -124,6 +126,12 @@ export class SessionController implements vscode.Disposable {
 	 * UI — status strip, composer, install recommendation — hangs off this.
 	 */
 	private reachable = false;
+	/**
+	 * The RPC subprocess starts as a client-owned worker. Once promoted to
+	 * resident, other prime-agent clients can see it and RPC disconnect no
+	 * longer reaps the agent.
+	 */
+	private rpcSessionPromoted = false;
 	/** Result of the last CLI lookup, for the install card's explanation. */
 	private locatedAgent: LocatedAgent | null = null;
 	/**
@@ -156,6 +164,11 @@ export class SessionController implements vscode.Disposable {
 	private observedSession: { activeSessionId: string; sessionId?: string; sessionPath?: string } | null = null;
 	/** A just-closed observed session stays non-interactive until our own view repaints. */
 	private observationRestoring = false;
+	/**
+	 * View epoch that owns an in-flight New Session. Prompts must not land on
+	 * the previous session while the empty new page is on screen.
+	 */
+	private creatingSessionEpoch: number | null = null;
 	/** Daemon sidecar for resident-session parity (attach/prompt/abort on live sessions). */
 	private sidecar: DaemonSidecar | null = null;
 	/** Serialize release/attach hand-offs for one daemon handle. */
@@ -202,6 +215,18 @@ export class SessionController implements vscode.Disposable {
 	/** Latest rendered history capability set, including catalog-search-only rows. */
 	private actionHistory: RecentSession[] | null = null;
 	private savedCatalog: { at: number; rows: SavedSessionInfo[] } | null = null;
+	/**
+	 * History rank times, frozen while a turn is in flight. A live RPC event
+	 * must not reshuffle the list; only `agent_end` (waiting for the user)
+	 * advances a row.
+	 */
+	private historySortMs = new Map<string, number>();
+	/** Sessions the operator archived from the extension. Daemon auto-archive is not this. */
+	private historyArchived = new Set<string>();
+	/** Finished turns the operator has not opened since. */
+	private historyUnreadComplete = new Set<string>();
+	/** Last seen running, so idle after a turn can bump rank exactly once. */
+	private historyWasRunning = new Set<string>();
 	/** Monotonic navigation ownership: late session RPCs cannot repaint a newer view. */
 	private viewEpoch = 0;
 	/** Supersedes slow history/search answers so they cannot repaint a newer query. */
@@ -216,8 +241,27 @@ export class SessionController implements vscode.Disposable {
 		private readonly context: vscode.ExtensionContext,
 		private readonly output: vscode.OutputChannel,
 	) {
+		this.restoreHistoryUiState();
 		this.startWatcher();
 		this.scheduleProcessRefresh(0);
+		this.disposables.push(
+			vscode.workspace.onDidChangeConfiguration((event) => {
+				if (
+					event.affectsConfiguration("primeAgent.liveTranscript") ||
+					event.affectsConfiguration("primeAgent.streamToolOutput")
+				) {
+					this.pushStatusLight();
+				}
+			}),
+		);
+	}
+
+	private liveTranscript(): boolean {
+		return vscode.workspace.getConfiguration("primeAgent").get<boolean>("liveTranscript", false) === true;
+	}
+
+	private streamToolOutput(): boolean {
+		return vscode.workspace.getConfiguration("primeAgent").get<boolean>("streamToolOutput", false) === true;
 	}
 
 	get workspaceRoot(): string {
@@ -477,6 +521,7 @@ export class SessionController implements vscode.Disposable {
 		// Give the process a moment to fail fast on spawn problems before declaring success.
 		await new Promise((resolve) => setTimeout(resolve, 150));
 		await this.refreshSnapshot();
+		if (this.reachable) await this.promoteOwnRpcSession();
 	}
 
 	async restart(): Promise<void> {
@@ -496,10 +541,13 @@ export class SessionController implements vscode.Disposable {
 		// An explicit stop/restart is a deliberate act; the next failure is news
 		// again even if it is the same failure.
 		this.spawnErrorNotified = false;
+		// Kill the RPC client process only. After promote, the daemon worker is
+		// resident and survives this disconnect — same as closing a TUI.
 		this.client?.stop();
 		this.client = null;
 		this.state = null;
 		this.reachable = false;
+		this.rpcSessionPromoted = false;
 		this.clearRunFlags();
 		if (this.installWatchdog) {
 			clearTimeout(this.installWatchdog);
@@ -586,6 +634,9 @@ export class SessionController implements vscode.Disposable {
 				// A command that outlives the turn becomes unexplained the instant the
 				// turn ends, so promote it now rather than up to a poll later.
 				this.scheduleProcessRefresh(0);
+				// Rank only moves when the turn is done and the agent is waiting.
+				this.markHistoryWaitingForUser();
+				this.scheduleHistoryRefresh();
 				break;
 			case "compaction_start":
 				this.compacting = true;
@@ -622,6 +673,7 @@ export class SessionController implements vscode.Disposable {
 		// A `background` tool result is a job announcing that it started; the
 		// completion arrives as a custom message and lands via rebuildFromMessages.
 		if (this.agentJobs.track(event)) this.republishProcesses();
+		if (this.isCreatingSession()) return;
 		this.broadcast({ type: "event", event });
 		// Hot path: reuse cached stats; expensive stats refresh only on transitions.
 		if (
@@ -808,6 +860,43 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** Claim a new displayed-session intent before any validation or startup await. */
+	private isCreatingSession(): boolean {
+		return this.creatingSessionEpoch === this.viewEpoch;
+	}
+
+	private beginCreatingSession(): void {
+		this.creatingSessionEpoch = this.viewEpoch;
+		this.resetChildrenBaseline();
+		this.resetViewedSessionState();
+		this.clearRunFlags();
+		this.threadDiffs.clear();
+		this.broadcast({ type: "sessionChildren", children: [] });
+		this.broadcast({
+			type: "snapshot",
+			messages: [],
+			state: null,
+			status: this.buildStatus(),
+			steerDefault: vscode.workspace.getConfiguration("primeAgent").get<"steer" | "followUp">("defaultStreamingBehavior", "steer"),
+		});
+		this.pushStatus();
+	}
+
+	private abortCreatingSession(previous: AttachRef | null, previousMessages: AgentMessage[], epoch: number): void {
+		if (this.disposed || epoch !== this.viewEpoch) return;
+		this.creatingSessionEpoch = null;
+		this.cachedMessages = previousMessages;
+		this.restoreAttachedView(previous, epoch);
+		this.broadcast({
+			type: "snapshot",
+			messages: previousMessages,
+			state: this.rentedState ?? this.state,
+			status: this.buildStatus(),
+			steerDefault: vscode.workspace.getConfiguration("primeAgent").get<"steer" | "followUp">("defaultStreamingBehavior", "steer"),
+		});
+		this.restoreDraft();
+		this.pushStatus();
+	}
+
 	private beginNavigation(): number {
 		const epoch = ++this.viewEpoch;
 		// A socket-drop reconnect belongs to the view that dropped. Once the user
@@ -820,6 +909,10 @@ export class SessionController implements vscode.Disposable {
 
 	/** Block operations that would otherwise silently address the hidden RPC session. */
 	private guardObservedReadOnly(action: string): boolean {
+		if (this.isCreatingSession()) {
+			this.broadcast({ type: "notice", level: "warning", text: `Please wait for the new session to finish creating before ${action}.` });
+			return true;
+		}
 		if (this.attached && this.attachedEpoch !== this.viewEpoch) {
 			this.broadcast({ type: "notice", level: "warning", text: `Please wait for the session switch to finish before ${action}.` });
 			return true;
@@ -863,6 +956,7 @@ export class SessionController implements vscode.Disposable {
 			this.attached === null &&
 			this.observingId === null &&
 			!this.observationRestoring &&
+			!this.isCreatingSession() &&
 			!this.isReattaching()
 		);
 	}
@@ -875,6 +969,7 @@ export class SessionController implements vscode.Disposable {
 			this.attached === null &&
 			this.observingId === null &&
 			!this.isReattaching() &&
+			!this.isCreatingSession() &&
 			(allowRestoring || !this.observationRestoring) &&
 			epoch === this.viewEpoch
 		);
@@ -951,6 +1046,10 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async prompt(payload: PromptPayload, reply: (message: HostToWebview) => void = (message) => this.broadcast(message)): Promise<void> {
+		if (this.isCreatingSession()) {
+			this.rejectPrompt(payload, "The new session is still being created — nothing was sent.", reply);
+			return;
+		}
 		if (this.guardObservedReadOnly("sending a prompt")) {
 			this.rejectPrompt(payload, "The observed session is read-only in this window.", reply);
 			return;
@@ -1110,40 +1209,50 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async newSession(): Promise<void> {
+		if (this.creatingSessionEpoch === this.viewEpoch) return;
 		if (this.guardObservedReadOnly("starting a new session")) return;
+		this.broadcast({ type: "newThread" });
 		const previousAttachment = this.attached;
+		const previousMessages = this.cachedMessages;
 		const epoch = this.beginNavigation();
 		const observedAtStart = this.observingId;
+		this.beginCreatingSession();
 		await this.ensureStarted();
 		if (!this.client || this.disposed || epoch !== this.viewEpoch) {
-			this.restoreAttachedView(previousAttachment, epoch);
+			this.abortCreatingSession(previousAttachment, previousMessages, epoch);
 			return;
 		}
-		const client = this.client;
-		let response;
+		// RPC `new_session` replaces the runtime inside the current worker and
+		// aborts a running turn. Create a new resident worker instead so the
+		// previous session keeps running and stays visible to other clients.
 		try {
-			response = await client.request({ type: "new_session" });
-		} catch (err) {
-			if (this.client === client && !this.disposed && epoch === this.viewEpoch) {
-				this.broadcast({ type: "notice", level: "error", text: `New session failed: ${err instanceof Error ? err.message : String(err)}` });
-				this.restoreAttachedView(previousAttachment, epoch);
+			await this.promoteOwnRpcSession();
+			const sidecar = await this.ensureSidecar({ reattach: false });
+			if (this.disposed || epoch !== this.viewEpoch) {
+				this.abortCreatingSession(previousAttachment, previousMessages, epoch);
+				return;
 			}
-			return;
-		}
-		if (this.client !== client || this.disposed || epoch !== this.viewEpoch) return;
-		if (response.success) {
-			if (!(await this.detachFromDaemon()) || epoch !== this.viewEpoch) return;
+			const created = await sidecar.createResident({ cwd: this.workspaceRoot });
+			if (this.disposed || epoch !== this.viewEpoch) {
+				this.abortCreatingSession(previousAttachment, previousMessages, epoch);
+				return;
+			}
+			if (!(await this.detachFromDaemon(previousAttachment)) || epoch !== this.viewEpoch) return;
 			if (!(await this.clearObservation(observedAtStart, epoch))) return;
-			// History and New Session start a new top-level view. A breadcrumb into
-			// a prior session would make Back cross an explicit session boundary.
 			this.returnTargets = [];
-			this.resetChildrenBaseline();
-			this.resetViewedSessionState();
-			this.beginRpcRestore();
-			if (await this.restoreOwnRpcView(epoch)) this.scheduleChildrenRefresh();
-		} else {
-			this.broadcast({ type: "notice", level: "error", text: `New session failed: ${response.error ?? "unknown error"}` });
-			this.restoreAttachedView(previousAttachment, epoch);
+			const attached = await this.attachViaDaemon(created.activeSessionId!, created.sessionFile ?? "", epoch);
+			if (!attached && epoch === this.viewEpoch) {
+				this.creatingSessionEpoch = null;
+				this.broadcast({ type: "notice", level: "error", text: "New session failed: could not attach to the new worker." });
+				this.observationRestoring = true;
+				this.pushStatus();
+				void this.restoreAfterObservationClosed(epoch);
+			}
+		} catch (err) {
+			if (!this.disposed && epoch === this.viewEpoch) {
+				this.broadcast({ type: "notice", level: "error", text: `New session failed: ${err instanceof Error ? err.message : String(err)}` });
+				this.abortCreatingSession(previousAttachment, previousMessages, epoch);
+			}
 		}
 	}
 
@@ -1380,6 +1489,11 @@ export class SessionController implements vscode.Disposable {
 	 * the entryId via get_fork_messages order alignment with user rows.
 	 */
 	/** Rename the active session: daemon set_session_name on attached mode, RPC otherwise. */
+	currentSessionName(): string | undefined {
+		const named = this.rentedState?.sessionName ?? this.state?.sessionName;
+		return this.sessionChromeLabel(named) || undefined;
+	}
+
 	async renameSession(name: string): Promise<void> {
 		if (this.guardObservedReadOnly("renaming a session")) return;
 		const trimmed = name.trim();
@@ -1653,6 +1767,7 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	private historyRefreshTimer: NodeJS.Timeout | null = null;
+	private static readonly HISTORY_UI_STATE_KEY = "brief.historyUi";
 
 	/** Debounced history refresh after rename-affecting signals (CLI or other clients). */
 	private scheduleHistoryRefresh(): void {
@@ -1661,6 +1776,109 @@ export class SessionController implements vscode.Disposable {
 			this.historyRefreshTimer = null;
 			void this.listHistory();
 		}, 800);
+	}
+
+	private historyPathKey(sessionPath: string): string {
+		return normalizeFsPath(sessionPath);
+	}
+
+	private restoreHistoryUiState(): void {
+		const saved = this.context.workspaceState?.get<{
+			sortMs?: Record<string, number>;
+			archived?: string[];
+			unread?: string[];
+		}>(SessionController.HISTORY_UI_STATE_KEY);
+		if (!saved) return;
+		if (saved.sortMs) {
+			for (const [path, ms] of Object.entries(saved.sortMs)) {
+				if (typeof ms === "number" && Number.isFinite(ms)) this.historySortMs.set(path, ms);
+			}
+		}
+		if (Array.isArray(saved.archived)) {
+			for (const path of saved.archived) {
+				if (typeof path === "string" && path) this.historyArchived.add(path);
+			}
+		}
+		if (Array.isArray(saved.unread)) {
+			for (const path of saved.unread) {
+				if (typeof path === "string" && path) this.historyUnreadComplete.add(path);
+			}
+		}
+	}
+
+	private persistHistoryUiState(): void {
+		void this.context.workspaceState?.update(SessionController.HISTORY_UI_STATE_KEY, {
+			sortMs: Object.fromEntries(this.historySortMs),
+			archived: [...this.historyArchived],
+			unread: [...this.historyUnreadComplete],
+		});
+	}
+
+	private overlayCachedHistory(): void {
+		if (this.lastHistory) this.lastHistory = this.lastHistory.map((row) => this.decorateHistoryRow(row));
+		if (this.actionHistory) this.actionHistory = this.actionHistory.map((row) => this.decorateHistoryRow(row));
+	}
+
+	/** Current chat session file, when the host knows it. */
+	private viewedSessionPath(): string | undefined {
+		if (this.attached?.sessionPath) return this.historyPathKey(this.attached.sessionPath);
+		if (this.state?.sessionFile) return this.historyPathKey(this.state.sessionFile);
+		return undefined;
+	}
+
+	/**
+	 * A turn finished and the agent is waiting. This is the only moment the
+	 * history row is allowed to move — not mid-turn RPC chatter.
+	 */
+	private markHistoryWaitingForUser(sessionPath = this.viewedSessionPath()): void {
+		if (!sessionPath) return;
+		const key = this.historyPathKey(sessionPath);
+		this.historySortMs.set(key, Date.now());
+		this.historyWasRunning.delete(key);
+		if (this.viewedSessionPath() !== key) this.historyUnreadComplete.add(key);
+		else this.historyUnreadComplete.delete(key);
+		this.persistHistoryUiState();
+		this.overlayCachedHistory();
+	}
+
+	private markHistorySessionOpened(sessionPath: string): void {
+		const key = this.historyPathKey(sessionPath);
+		if (!this.historyUnreadComplete.has(key)) return;
+		this.historyUnreadComplete.delete(key);
+		this.persistHistoryUiState();
+		this.overlayCachedHistory();
+	}
+
+	private markHistoryArchived(sessionPath: string): void {
+		this.historyArchived.add(this.historyPathKey(sessionPath));
+		this.persistHistoryUiState();
+		this.overlayCachedHistory();
+	}
+
+	/**
+	 * Rank is frozen while a session is running. Catalog mtime/lastActivity
+	 * moves on every RPC event; using it as the list order is what made the
+	 * history jump around mid-turn.
+	 */
+	private decorateHistoryRow(row: RecentSession): RecentSession {
+		const key = this.historyPathKey(row.path);
+		const catalogMs = row.modifiedMs ?? (Number.isFinite(Date.parse(row.timestamp)) ? Date.parse(row.timestamp) : 0);
+		const prev = this.historySortMs.get(key);
+		const running = row.status === "running" || row.running === true;
+		if (running) {
+			this.historyWasRunning.add(key);
+			if (prev === undefined) this.historySortMs.set(key, catalogMs);
+		} else if (this.historyWasRunning.delete(key)) {
+			this.historySortMs.set(key, Date.now());
+			if (this.viewedSessionPath() !== key) this.historyUnreadComplete.add(key);
+			else this.historyUnreadComplete.delete(key);
+		} else if (prev === undefined) {
+			this.historySortMs.set(key, catalogMs);
+		}
+		const sortMs = this.historySortMs.get(key) ?? catalogMs;
+		const archived = this.historyArchived.has(key);
+		const unreadComplete = !running && this.historyUnreadComplete.has(key);
+		return { ...row, sortMs, archived, unreadComplete };
 	}
 
 	private autoCompactSent = false;
@@ -2060,21 +2278,24 @@ export class SessionController implements vscode.Disposable {
 			const modified = s.modified ?? s.lastActivityAt;
 			const parsed = modified ? Date.parse(modified) : Number.NaN;
 			const inWorkspace = normalizeFsPath(s.cwd) === root;
-			(inWorkspace ? inWorkspaceRows : otherRows).push({
-				id: s.sessionId ?? path.basename(s.sessionFile, ".jsonl"),
-				path: s.sessionFile,
-				cwd: s.cwd,
-				timestamp: s.created ?? modified ?? new Date().toISOString(),
-				modifiedMs: Number.isFinite(parsed) ? parsed : undefined,
-				name: s.sessionName,
-				firstPrompt: s.firstMessage,
-				inWorkspace,
-				running: SessionController.isRunningSummary(s),
-				status: SessionController.rosterStatus(s),
-				...(s.statusLabel ? { statusLabel: s.statusLabel } : {}),
-			});
+			(inWorkspace ? inWorkspaceRows : otherRows).push(
+				this.decorateHistoryRow({
+					id: s.sessionId ?? path.basename(s.sessionFile, ".jsonl"),
+					path: s.sessionFile,
+					cwd: s.cwd,
+					timestamp: s.created ?? modified ?? new Date().toISOString(),
+					modifiedMs: Number.isFinite(parsed) ? parsed : undefined,
+					name: s.sessionName,
+					firstPrompt: s.firstMessage,
+					inWorkspace,
+					running: SessionController.isRunningSummary(s),
+					status: SessionController.rosterStatus(s),
+					...(s.statusLabel ? { statusLabel: s.statusLabel } : {}),
+				}),
+			);
 		}
 		const activityOf = (s: RecentSession): number => {
+			if (s.sortMs !== undefined) return s.sortMs;
 			if (s.modifiedMs !== undefined) return s.modifiedMs;
 			const parsed = Date.parse(s.timestamp);
 			return Number.isFinite(parsed) ? parsed : 0;
@@ -2082,6 +2303,7 @@ export class SessionController implements vscode.Disposable {
 		const byActivityDesc = (a: RecentSession, b: RecentSession): number => activityOf(b) - activityOf(a);
 		inWorkspaceRows.sort(byActivityDesc);
 		otherRows.sort(byActivityDesc);
+		this.persistHistoryUiState();
 		return [...inWorkspaceRows.slice(0, HISTORY_WORKSPACE_LIMIT), ...otherRows.slice(0, HISTORY_OTHER_LIMIT)];
 	}
 
@@ -2093,10 +2315,17 @@ export class SessionController implements vscode.Disposable {
 		} catch {
 			// Daemon unreachable: the scan is less exact about names but it is the
 			// difference between a stale title and no history at all.
-			return listRecentSessions(this.workspaceRoot, {
+			const rows = await listRecentSessions(this.workspaceRoot, {
 				workspaceLimit: HISTORY_WORKSPACE_LIMIT,
 				otherLimit: HISTORY_OTHER_LIMIT,
 			});
+			const decorated = rows.map((row) => this.decorateHistoryRow(row));
+			const activityOf = (s: RecentSession): number => s.sortMs ?? s.modifiedMs ?? 0;
+			const byActivityDesc = (a: RecentSession, b: RecentSession): number => activityOf(b) - activityOf(a);
+			return [
+				...decorated.filter((s) => s.inWorkspace).sort(byActivityDesc),
+				...decorated.filter((s) => !s.inWorkspace).sort(byActivityDesc),
+			];
 		}
 	}
 
@@ -2183,22 +2412,24 @@ export class SessionController implements vscode.Disposable {
 			}
 			// A session the roster capped away still deserves to be findable.
 			const modified = info.modified ? Date.parse(info.modified) : Number.NaN;
-			hits.push({
-				id: info.id,
-				path: info.path,
-				cwd: info.cwd,
-				timestamp: info.created ?? info.modified ?? new Date().toISOString(),
-				modifiedMs: Number.isFinite(modified) ? modified : undefined,
-				name: info.name,
-				firstPrompt: info.firstMessage,
-				inWorkspace: normalizeFsPath(info.cwd) === root,
-				// `running` stays unset: the saved catalog has no runtime state, and
-				// "we did not ask" must not render as "not running". The status dot
-				// says "inactive" for the same reason the on-disk scan does — this
-				// row exists only because the roster did not carry it.
-				status: "inactive",
-				matchSnippet: snippet,
-			});
+			hits.push(
+				this.decorateHistoryRow({
+					id: info.id,
+					path: info.path,
+					cwd: info.cwd,
+					timestamp: info.created ?? info.modified ?? new Date().toISOString(),
+					modifiedMs: Number.isFinite(modified) ? modified : undefined,
+					name: info.name,
+					firstPrompt: info.firstMessage,
+					inWorkspace: normalizeFsPath(info.cwd) === root,
+					// `running` stays unset: the saved catalog has no runtime state, and
+					// "we did not ask" must not render as "not running". The status dot
+					// says "inactive" for the same reason the on-disk scan does — this
+					// row exists only because the roster did not carry it.
+					status: "inactive",
+					matchSnippet: snippet,
+				}),
+			);
 		}
 		// Copy rather than tag `base` in place — it is the cache replayed on the
 		// next visit, and a snippet for a query the operator has already cleared
@@ -2212,12 +2443,16 @@ export class SessionController implements vscode.Disposable {
 		this.broadcast({ type: "history", sessions: results });
 	}
 
-	/** Drop a row from the replay cache so a deleted/archived session never flashes back. */
+	/** Drop a row from the replay cache so a deleted session never flashes back. */
 	private forgetHistoryRow(sessionPath: string): void {
 		if (!this.lastHistory) return;
 		const target = normalizeFsPath(sessionPath);
 		this.lastHistory = this.lastHistory.filter((s) => normalizeFsPath(s.path) !== target);
 		if (this.actionHistory) this.actionHistory = this.actionHistory.filter((s) => normalizeFsPath(s.path) !== target);
+		this.historySortMs.delete(target);
+		this.historyArchived.delete(target);
+		this.historyUnreadComplete.delete(target);
+		this.persistHistoryUiState();
 	}
 
 	private async savedSessionCatalog(): Promise<SavedSessionInfo[]> {
@@ -2295,9 +2530,9 @@ export class SessionController implements vscode.Disposable {
 		}
 		const result = await archiveSessionFile(sessionPath, fileId);
 		if (result.ok) {
-			this.broadcast({ type: "notice", level: "info", text: "Session archived — the transcript is kept, and it stays resumable from the CLI." });
+			this.broadcast({ type: "notice", level: "info", text: "Session archived — hidden from the active list; expand Archive to find it again." });
 			this.savedCatalog = null;
-			this.forgetHistoryRow(sessionPath);
+			this.markHistoryArchived(sessionPath);
 			await this.listHistory();
 		} else {
 			this.broadcast({ type: "notice", level: "error", text: `Could not archive session: ${result.error ?? "unknown error"}` });
@@ -2422,6 +2657,7 @@ export class SessionController implements vscode.Disposable {
 		// Re-attaching an already attached session and then releasing the previous
 		// attachment would release the attachment we just refreshed. Treat this as
 		// the no-op the history row represents instead.
+		this.markHistorySessionOpened(sessionPath);
 		if (this.attached && normalizeFsPath(this.attached.sessionPath) === normalizeFsPath(sessionPath)) {
 			this.broadcast({ type: "notice", level: "info", text: "You are already viewing that session." });
 			this.restoreAttachedView(previousAttachment, epoch);
@@ -2967,11 +3203,6 @@ export class SessionController implements vscode.Disposable {
 			}
 			if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return this.rollbackAttachment(sidecar, attachment);
 			void this.refreshAttachedState();
-			this.broadcast({
-				type: "notice",
-				level: "info",
-				text: "Attached to the live session — you can work here and in the terminal simultaneously.",
-			});
 			this.scheduleChildrenRefresh();
 			this.resetViewedSessionState();
 			this.threadDiffs.clear();
@@ -2980,6 +3211,7 @@ export class SessionController implements vscode.Disposable {
 			await this.fetchAttachedStats();
 			if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return this.rollbackAttachment(sidecar, attachment);
 			this.observationRestoring = false;
+			this.creatingSessionEpoch = null;
 			this.applyAttachedSnapshot(snapshot);
 			return true;
 		} catch (error) {
@@ -3116,6 +3348,43 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/**
+	 * RPC mode creates a client-owned worker. Promote it to resident so:
+	 * other prime-agent processes can see the conversation, and closing the
+	 * RPC stdin does not reap the agent. Idempotent.
+	 */
+	private async promoteOwnRpcSession(): Promise<void> {
+		if (this.rpcSessionPromoted || this.disposed) return;
+		const sessionFile = this.state?.sessionFile;
+		if (!sessionFile) return;
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 5; attempt++) {
+			const descriptor = resolveWorkerDescriptor({ sessionFile });
+			const activeSessionId = descriptor?.rootActiveSessionId;
+			if (!activeSessionId) {
+				await new Promise((resolve) => setTimeout(resolve, 200));
+				continue;
+			}
+			if (!descriptor?.ownerClientId) {
+				this.rpcSessionPromoted = true;
+				return;
+			}
+			try {
+				const sidecar = await this.ensureSidecar({ reattach: false });
+				await sidecar.promoteOwnedSession(activeSessionId);
+				this.rpcSessionPromoted = true;
+				this.output.appendLine(`[prime-agent] promoted RPC session ${activeSessionId} to resident`);
+				return;
+			} catch (err) {
+				lastError = err;
+				await new Promise((resolve) => setTimeout(resolve, 200));
+			}
+		}
+		if (lastError) {
+			this.output.appendLine(`[prime-agent] promote_owned_session failed: ${String(lastError)}`);
+		}
+	}
+
+	/**
 	 * Give up the owner identity when the RPC process that owns the worker is
 	 * gone.
 	 *
@@ -3195,10 +3464,11 @@ export class SessionController implements vscode.Disposable {
 	 * work with no representation anywhere else on screen — not in the transcript
 	 * (its tool call already closed), not in the subagent strip, not in `status`.
 	 *
-	 * The read is entirely local: a worker descriptor, its orphan journal and a
-	 * `ps` listing (see process-tracker.ts). It never asks the daemon for
-	 * anything, so it keeps working after `agent_end` when the event-driven
-	 * roster refresh has gone quiet — which is the exact window it is for.
+	 * Three local reads feed it: extension-owned jobs, `background_task` receipts
+	 * under the session's artifacts dir, and a worker descriptor / orphan journal /
+	 * `ps` listing (see process-tracker.ts). None of them ask the daemon, so the
+	 * panel keeps working after `agent_end` when the event-driven roster refresh
+	 * has gone quiet — which is the exact window it is for.
 	 */
 	private readonly processes = new ProcessTracker((line) => this.debugLog.append(line));
 	/**
@@ -3207,11 +3477,19 @@ export class SessionController implements vscode.Disposable {
 	 * the agent will act on, none of which can be recovered from outside.
 	 */
 	private readonly agentJobs = new AgentJobIndex();
+	/**
+	 * Prime Agent `background_task` skill receipts on disk. No RPC event carries
+	 * them, so this is a directory poll of the session on screen — parent jobs on
+	 * the parent, child jobs only after browsing into that child.
+	 */
+	private readonly backgroundTasks = new BackgroundTaskTracker();
 	private processTimer: ReturnType<typeof setTimeout> | null = null;
 	private processRefreshInFlight = false;
 	/** Last payload sent, so an unchanged panel does not repaint every poll. */
 	private lastProcessPayload: string | null = null;
 	private lastProcesses: SessionProcess[] | null = null;
+	/** Refs the operator removed from the panel. Disk receipts stay; only the row goes. */
+	private readonly dismissedProcessRefs = new Set<string>();
 	/** Poll fast only while there is something to watch. */
 	private static readonly PROCESS_POLL_ACTIVE_MS = 2_500;
 	private static readonly PROCESS_POLL_IDLE_MS = 6_000;
@@ -3225,7 +3503,7 @@ export class SessionController implements vscode.Disposable {
 		}
 		const wait =
 			delayMs ??
-			(this.processes.runningCount > 0
+			(this.processes.runningCount > 0 || this.backgroundTasks.runningCount > 0
 				? SessionController.PROCESS_POLL_ACTIVE_MS
 				: SessionController.PROCESS_POLL_IDLE_MS);
 		this.processTimer = setTimeout(() => {
@@ -3251,15 +3529,17 @@ export class SessionController implements vscode.Disposable {
 		// Its worker's processes are not ours to present as this view's work.
 		const lookup = this.observingId ? null : this.processLookup();
 		if (!lookup) {
+			this.backgroundTasks.reset();
 			this.publishProcesses([]);
 			return;
 		}
 		this.processRefreshInFlight = true;
 		try {
+			this.backgroundTasks.refresh(backgroundTasksDir(lookup.sessionFile));
 			this.publishProcesses(
 				await this.processes.refresh(lookup, {
 					streaming: this.effectiveStreaming(),
-					skipPids: this.agentJobs.knownPids(),
+					skipPids: new Set([...this.agentJobs.knownPids(), ...this.backgroundTasks.knownPids()]),
 				}),
 			);
 		} catch (err) {
@@ -3272,16 +3552,23 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/**
-	 * Publish the panel: extension-owned jobs first, then whatever the tracker
-	 * observed that no job already accounts for. Two sources, one list, and the
-	 * better-evidenced rows lead it.
+	 * Publish the panel: extension-owned jobs first, then skill receipts, then
+	 * whatever the tracker observed that neither already accounts for. Three
+	 * sources, one list, and the better-evidenced rows lead it.
 	 */
 	private publishProcesses(observed: SessionProcess[]): void {
 		const owned = this.agentJobs.snapshot();
+		const tasks = this.backgroundTasks.snapshot();
 		// Running jobs only, for the same reason knownPids() is: a finished job must
 		// not suppress an unrelated process that inherited its pid.
-		const ownedPids = this.agentJobs.knownPids();
-		const processes = [...owned, ...observed.filter((row) => row.pid === undefined || !ownedPids.has(row.pid))];
+		const skipPids = new Set([...this.agentJobs.knownPids(), ...this.backgroundTasks.knownPids()]);
+		const processes = [
+			...owned,
+			...tasks,
+			...observed.filter(
+				(row) => row.source === "observed" && (row.pid === undefined || !skipPids.has(row.pid)),
+			),
+		].filter((row) => !this.dismissedProcessRefs.has(row.ref));
 		const payload = JSON.stringify(processes);
 		if (payload === this.lastProcessPayload) return;
 		this.lastProcessPayload = payload;
@@ -3291,7 +3578,7 @@ export class SessionController implements vscode.Disposable {
 
 	/** Republish from what we already hold, for a change that needs no polling. */
 	private republishProcesses(): void {
-		this.publishProcesses((this.lastProcesses ?? []).filter((row) => row.source !== "agent"));
+		this.publishProcesses((this.lastProcesses ?? []).filter((row) => row.source === "observed"));
 	}
 
 	/**
@@ -3316,6 +3603,11 @@ export class SessionController implements vscode.Disposable {
 					? { ref, lines: tail.lines, source: logPath, truncated: tail.truncated }
 					: { ref, lines: [], note: `The job's log is not readable yet (${logPath}).` },
 			});
+			return;
+		}
+		const taskPreview = this.backgroundTasks.preview(ref);
+		if (taskPreview) {
+			this.broadcast({ type: "processOutput", preview: taskPreview });
 			return;
 		}
 		this.broadcast({ type: "processOutput", preview: await this.processes.preview(ref) });
@@ -3385,6 +3677,56 @@ export class SessionController implements vscode.Disposable {
 	 * refused outright for anything but a job the extension owns, since this host
 	 * has no supported way to interrupt a process it merely observed.
 	 */
+	/**
+	 * Hide one finished row. Running work cannot be cleared: it would vanish while
+	 * still executing, and the next poll would bring it back anyway.
+	 */
+	dismissProcess(ref: string): void {
+		if (this.disposed) return;
+		const row = this.lastProcesses?.find((entry) => entry.ref === ref);
+		if (!row || row.state === "running") return;
+		this.dismissedProcessRefs.add(ref);
+		this.republishProcesses();
+	}
+
+	/** Hide every finished row currently on the panel. */
+	dismissFinishedProcesses(): void {
+		if (this.disposed) return;
+		for (const row of this.lastProcesses ?? []) {
+			if (row.state !== "running") this.dismissedProcessRefs.add(row.ref);
+		}
+		this.republishProcesses();
+	}
+
+	/**
+	 * Open this job's captured log in the editor. `ref` is a host-minted
+	 * capability, so the webview cannot name an arbitrary path.
+	 */
+	async openProcessLog(ref: string): Promise<void> {
+		if (this.disposed) return;
+		const files = this.logFilesForRef(ref);
+		if (files.length === 0) {
+			this.broadcast({ type: "notice", level: "warning", text: "That job has no log file to open." });
+			return;
+		}
+		try {
+			for (const file of files) {
+				const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+				await vscode.window.showTextDocument(doc, { preview: false });
+			}
+		} catch {
+			this.broadcast({ type: "notice", level: "error", text: "Could not open that log in the editor." });
+		}
+	}
+
+	private logFilesForRef(ref: string): string[] {
+		const taskFiles = this.backgroundTasks.logFilesForRef(ref);
+		if (taskFiles) return taskFiles;
+		const jobLog = this.agentJobs.logPathForRef(ref);
+		if (jobLog) return [jobLog];
+		return this.processes.filesForRef(ref);
+	}
+
 	async killProcess(ref: string): Promise<void> {
 		if (this.disposed) return;
 		const job = this.agentJobs.recordForRef(ref);
@@ -3419,6 +3761,8 @@ export class SessionController implements vscode.Disposable {
 		// would attribute another session's commands to the one on screen.
 		this.processes.reset();
 		this.agentJobs.clear();
+		this.backgroundTasks.reset();
+		this.dismissedProcessRefs.clear();
 		this.lastProcesses = null;
 		this.lastProcessPayload = null;
 		this.broadcast({ type: "processes", processes: [] });
@@ -3890,6 +4234,10 @@ export class SessionController implements vscode.Disposable {
 	 * stale and applying it moves the caret to the end.
 	 */
 	async refreshSnapshot(options: { epoch?: number; allowRestoring?: boolean; keepDraft?: boolean } = {}): Promise<boolean> {
+		if (this.isCreatingSession()) {
+			this.pushStatus();
+			return false;
+		}
 		// Hiding and re-showing the view reloads the webview, which asks for a
 		// fresh snapshot. Our own background RPC client is still running, so
 		// without this branch the attached transcript is repainted with the
@@ -4092,7 +4440,36 @@ export class SessionController implements vscode.Disposable {
 		return this.streaming || (this.state?.isStreaming ?? false);
 	}
 
+	private sessionChromeLabel(sessionName?: string): string {
+		return deriveSessionLabel({ name: sessionName, firstPrompt: firstUserPrompt(this.cachedMessages) });
+	}
+
 	private buildStatus(statsText = this.lastStatsText): StatusSnapshot {
+		if (this.isCreatingSession()) {
+			const st = (this.rentedState ?? this.state) as RpcSessionState | null;
+			const model = st?.model ?? null;
+			const label = model ? `${model.provider}/${model.id}` : "prime-agent";
+			return {
+				connected: this.reachable || Boolean(this.attached) || Boolean(this.sidecar?.connected),
+				streaming: false,
+				compacting: false,
+				retrying: false,
+				restoring: true,
+				modelLabel: label,
+				thinkingLevel: st?.thinkingLevel ?? "off",
+				availableThinkingLevels: supportedThinkingLevels(model),
+				sessionLabel: "",
+				statsText: "",
+				statusText: "creating session…",
+				modelProvider: model?.provider,
+				modelId: model?.id,
+				observingId: null,
+				compactThresholdPercent: null,
+				compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
+			};
+		}
 		if (this.observingId) {
 			const observed = this.observedSession;
 			return {
@@ -4106,11 +4483,14 @@ export class SessionController implements vscode.Disposable {
 				availableThinkingLevels: null,
 				sessionFile: observed?.sessionPath,
 				sessionId: observed?.sessionId ?? this.observingId,
+				sessionLabel: this.sessionChromeLabel(),
 				statsText,
 				statusText: "watching another live session (read-only)",
 				observingId: this.observingId,
 				compactThresholdPercent: this.compactThreshold(),
 				compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
 			};
 		}
 		if (this.isReattaching()) {
@@ -4127,6 +4507,7 @@ export class SessionController implements vscode.Disposable {
 				thinkingLevel: state?.thinkingLevel ?? "off",
 				availableThinkingLevels: supportedThinkingLevels(model),
 				sessionName: state?.sessionName,
+				sessionLabel: this.sessionChromeLabel(state?.sessionName),
 				sessionFile: attempt.sessionPath,
 				sessionId: attempt.sessionId ?? path.basename(attempt.sessionPath, ".jsonl"),
 				statsText,
@@ -4136,6 +4517,8 @@ export class SessionController implements vscode.Disposable {
 				observingId: this.observingId,
 				compactThresholdPercent: this.compactThreshold(),
 				compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
 				...this.lastUsage,
 			};
 		}
@@ -4158,6 +4541,7 @@ export class SessionController implements vscode.Disposable {
 				thinkingLevel: st?.thinkingLevel ?? "off",
 				availableThinkingLevels: supportedThinkingLevels(model),
 				sessionName: st?.sessionName,
+				sessionLabel: this.sessionChromeLabel(st?.sessionName),
 				sessionFile: this.attached.sessionPath,
 				// History rows key on the jsonl stem. Falling back to the 12-char
 				// attach handle here would leave the row for the session on screen
@@ -4170,15 +4554,17 @@ export class SessionController implements vscode.Disposable {
 				statusText: switching
 					? "switching sessions…"
 					: compacting
-					? "compacting (shared with terminal)"
+					? "compacting"
 					: streaming
-						? "running (shared with terminal)"
-						: "attached (shared with terminal)",
+						? "running"
+						: "attached",
 				modelProvider: model?.provider,
 				modelId: model?.id,
 				observingId: this.observingId,
 				compactThresholdPercent: this.compactThreshold(),
 				compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
 				...this.lastUsage,
 			};
 		}
@@ -4197,6 +4583,7 @@ export class SessionController implements vscode.Disposable {
 			thinkingLevel: this.state?.thinkingLevel ?? "off",
 			availableThinkingLevels: supportedThinkingLevels(model),
 			sessionName: this.state?.sessionName,
+			sessionLabel: this.sessionChromeLabel(this.state?.sessionName),
 			sessionFile: this.state?.sessionFile,
 			// Same derivation as sessionKey(): the identity the webview sends back
 			// with a draft has to be the identity the draft is stored under.
@@ -4208,6 +4595,8 @@ export class SessionController implements vscode.Disposable {
 			observingId: this.observingId,
 			compactThresholdPercent: this.compactThreshold(),
 			compactDefaultPercent: this.defaultCompactPercent(),
+				liveTranscript: this.liveTranscript(),
+				streamToolOutput: this.streamToolOutput(),
 			...this.lastUsage,
 		};
 	}

@@ -267,3 +267,4 @@ export function normalizeFsPath(p: string): string {
 	if (process.platform === "darwin") resolved = resolved.toLowerCase();
 	return resolved.replace(/[/\\]+$/, "");
 }
+

@@ -75,6 +75,23 @@ export function activate(context: vscode.ExtensionContext): void {
 			reveal();
 			controller!.showHistoryView();
 		}),
+		vscode.commands.registerCommand("primeAgent.renameSession", () =>
+			runCommand("Rename session", async () => {
+				const current = controller!.currentSessionName();
+				const name = await vscode.window.showInputBox({
+					title: "Rename session",
+					value: current ?? "",
+					prompt: "Name this session",
+					placeHolder: "Session name",
+					ignoreFocusOut: true,
+				});
+				if (name === undefined) return;
+				await controller!.renameSession(name);
+			}),
+		),
+		vscode.commands.registerCommand("primeAgent.openPrimeIntellect", () => {
+			void vscode.env.openExternal(vscode.Uri.parse("https://app.primeintellect.ai"));
+		}),
 		vscode.commands.registerCommand("primeAgent.addSelectionToChat", () => {
 			const selection = controller!.getActiveSelection();
 			if (!selection) {

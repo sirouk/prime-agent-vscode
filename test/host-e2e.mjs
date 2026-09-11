@@ -208,8 +208,8 @@ try {
 			`${revisit?.status?.sessionFile ?? "<none>"} vs ${sessionFile}`,
 		);
 		check(
-			"the header keeps saying the session is shared with the terminal",
-			/shared with terminal/.test(revisit?.status?.statusText ?? ""),
+			"the header keeps the attached session status",
+			/^(attached|running|compacting)$/.test(revisit?.status?.statusText ?? ""),
 			revisit?.status?.statusText ?? "<none>",
 		);
 		watcher.dispose();
