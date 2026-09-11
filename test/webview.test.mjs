@@ -338,6 +338,40 @@ textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbl
 const promptMsg = posted.find((m) => m.type === "prompt");
 check("enter sends prompt", !!promptMsg && promptMsg.payload.text === "test prompt");
 
+// --- IME composition: the mirror must show the composing range, and Enter must
+// not send while a candidate is still being chosen (the native underline is
+// invisible because the textarea is color:transparent).
+posted.length = 0;
+textarea.value = "輸入";
+textarea.selectionStart = 0;
+textarea.selectionEnd = 2;
+textarea.dispatchEvent(new window.CompositionEvent("compositionstart", { data: "輸入" }));
+textarea.dispatchEvent(new window.CompositionEvent("compositionupdate", { data: "輸入" }));
+textarea.dispatchEvent(new window.InputEvent("input", { data: "輸入", isComposing: true, bubbles: true }));
+check("composing range is underlined on the mirror",
+	[...document.querySelectorAll(".composer-mirror .ime")].some((n) => n.textContent === "輸入"),
+	document.querySelector(".composer-mirror")?.innerHTML ?? "<none>");
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, isComposing: true }));
+check("Enter during composition does not send", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, isComposing: true, keyCode: 229 }));
+check("IME keyCode 229 Enter does not send", !posted.some((m) => m.type === "prompt"));
+textarea.dispatchEvent(new window.CompositionEvent("compositionend", { data: "輸入" }));
+textarea.dispatchEvent(new window.InputEvent("input", { data: "輸入", bubbles: true }));
+check("underline clears after compositionend",
+	document.querySelectorAll(".composer-mirror .ime").length === 0,
+	document.querySelector(".composer-mirror")?.innerHTML ?? "<none>");
+const confirmEnter = new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+textarea.dispatchEvent(confirmEnter);
+check("Enter that confirms composition does not send", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+await new Promise((resolve) => setTimeout(resolve, 0));
+posted.length = 0;
+textarea.value = "輸入";
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("Enter after composition sends the committed text",
+	posted.some((m) => m.type === "prompt" && m.payload.text === "輸入"),
+	JSON.stringify(posted.filter((m) => m.type === "prompt").map((m) => m.payload?.text)));
+
+
 // --- history view (grouped) ---
 posted.length = 0;
 const historyBtn = [...document.querySelectorAll(".icon-btn")].find((b) => b.title === "Sessions in this workspace");
@@ -1251,7 +1285,11 @@ const slashItems = () => {
 	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
 	return [...document.querySelectorAll(".ac-item")].map((item) => item.textContent.trim());
 };
-check("slash menu lists the agent's commands", slashItems().length === 2, JSON.stringify(slashItems()));
+const listed = slashItems();
+check("slash menu lists UI commands before the agent's catalog",
+	listed[0]?.startsWith("/model") && listed.some((item) => item.startsWith("/effort")) && listed.some((item) => item.startsWith("/stash")),
+	JSON.stringify(listed));
+check("slash menu still lists the agent's commands", listed.some((item) => item.startsWith("/compact")) && listed.some((item) => item.includes("security-pipeline")), JSON.stringify(listed));
 posted.length = 0;
 hostMessage({ type: "status", status: { ...baseStatus, sessionId: "session-boundary-slash", sessionName: "slash" } });
 check("a session boundary re-requests the slash catalog it just discarded",
@@ -1261,9 +1299,84 @@ hostMessage({ type: "commands", commands: [
 	{ name: "compact", description: "Compact the context" },
 	{ name: "security-pipeline", description: "Run the security review" },
 ] });
-check("the slash menu works again in the resumed thread", slashItems().length === 2, JSON.stringify(slashItems()));
+const resumed = slashItems();
+check("the slash menu works again in the resumed thread",
+	resumed.some((item) => item.startsWith("/compact")) && resumed.some((item) => item.startsWith("/model")),
+	JSON.stringify(resumed));
 textarea.value = "";
 textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+// --- /model /effort intercept the composer instead of prompting; /stash parks the draft ---
+hostMessage({
+	type: "models",
+	models: [
+		{ provider: "chutes", id: "kimi", contextWindow: 262144, reasoning: true, input: ["text", "image"] },
+		{ provider: "chutes", id: "glm", contextWindow: 131072, reasoning: false, input: ["text"] },
+		{ provider: "openai", id: "gpt-5", contextWindow: 400000, reasoning: true, input: ["text", "image"] },
+	],
+});
+hostMessage({ type: "status", status: { ...baseStatus, availableThinkingLevels: ["off", "minimal", "low", "medium", "high", "max"] } });
+
+textarea.value = "keep this draft";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.value = "/stash";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/stash parks the draft and clears the composer", textarea.value === "", JSON.stringify(textarea.value));
+check("/stash does not send a prompt", !posted.some((m) => m.type === "prompt"));
+check("/stash hint is shown", (document.querySelector(".composer-hint")?.textContent ?? "").includes("Stashed"));
+textarea.value = "/stash";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/stash restores the parked draft", textarea.value === "keep this draft", JSON.stringify(textarea.value));
+check("restoring stash does not prompt", !posted.some((m) => m.type === "prompt"));
+
+textarea.value = "draft before model";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+textarea.value = "/model";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+const modelSlashRow = [...document.querySelectorAll(".ac-item")].find((row) => row.textContent.startsWith("/model"));
+check("/ lists /model as a local command", !!modelSlashRow, JSON.stringify([...document.querySelectorAll(".ac-item")].map((row) => row.textContent)));
+modelSlashRow.dispatchEvent(new window.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+const modelDrop = document.querySelector(".dropdown");
+check("accepting /model opens the model menu", !!modelDrop && !!modelDrop.querySelector(".dropdown-search"));
+check("model search box has keyboard focus", document.activeElement === modelDrop.querySelector(".dropdown-search"));
+check("/model does not prompt", !posted.some((m) => m.type === "prompt"));
+check("/model stashes the prior draft out of the composer", textarea.value === "", JSON.stringify(textarea.value));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("ArrowDown+Enter picks a model from /model", posted.some((m) => m.type === "setModel"), JSON.stringify(posted.map((m) => m.type)));
+check("picking a model restores the stashed draft", textarea.value === "draft before model", JSON.stringify(textarea.value));
+check("model menu closed after keyboard select", !document.querySelector(".dropdown"));
+
+textarea.value = "/model glm";
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/model glm sets the model without a picker", posted.some((m) => m.type === "setModel" && m.modelId === "glm") && !document.querySelector(".dropdown"), JSON.stringify(posted));
+check("/model glm restores the prior draft", textarea.value === "draft before model", JSON.stringify(textarea.value));
+
+textarea.value = "/effort";
+textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+const effortDrop = document.querySelector(".dropdown");
+check("/effort opens the thinking menu", !!effortDrop && (effortDrop.querySelector(".dropdown-header")?.textContent ?? "").startsWith("Thinking"));
+check("thinking search box has keyboard focus", document.activeElement === effortDrop.querySelector(".dropdown-search"));
+check("/effort does not prompt", !posted.some((m) => m.type === "prompt"));
+effortDrop.querySelector(".dropdown-search").value = "high";
+effortDrop.querySelector(".dropdown-search").dispatchEvent(new window.Event("input", { bubbles: true }));
+document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("typing a level and Enter sets thinking", posted.some((m) => m.type === "setThinkingLevel" && m.level === "high"), JSON.stringify(posted));
+check("/effort restores the stashed draft after pick", textarea.value === "draft before model", JSON.stringify(textarea.value));
+
+textarea.value = "/effort medium";
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("/effort medium sets the level without a picker", posted.some((m) => m.type === "setThinkingLevel" && m.level === "medium") && !document.querySelector(".dropdown"), JSON.stringify(posted));
 
 // --- paste image on a text-only model shows a composer hint ---
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
@@ -1517,6 +1630,21 @@ posted.length = 0;
 document.querySelector(".topbar .brand").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("header mark opens the prime-agent write-up",
 	posted.some((m) => m.type === "openExternal" && m.url === "https://www.primeintellect.ai/blog/prime-agent#article-top"), JSON.stringify(posted));
+// Session actions now live in the VS Code view title bar, not a webview kebab.
+hostMessage({ type: "newThread" });
+check("host newThread returns to chat", document.querySelector(".history-view")?.style.display === "none");
+check("newThread paints the empty session immediately", !!document.querySelector(".welcome"), document.querySelector(".messages")?.textContent?.slice(0, 80) ?? "none");
+check("newThread blocks send until the host confirms the session", textarea.disabled && textarea.placeholder === "Creating session…", `${textarea.disabled} ${textarea.placeholder}`);
+posted.length = 0;
+textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+check("Enter during create does not post a prompt", !posted.some((m) => m.type === "prompt"), JSON.stringify(posted.map((m) => m.type)));
+hostMessage({
+	type: "snapshot",
+	messages: [],
+	state: { model: { provider: "chutes", id: "kimi" }, thinkingLevel: "max" },
+	status: { ...baseStatus, sessionId: "session-created", sessionName: "", restoring: false },
+});
+check("the created session unlocks the composer", !textarea.disabled && textarea.placeholder === "Message Prime Agent…", `${textarea.disabled} ${textarea.placeholder}`);
 
 // --- #5/C10: steer vs queue while a run is live, and a Stop that really aborts ---
 const behaviorPill = document.querySelector(".composer-rail .rail-pill.behavior");
@@ -1902,6 +2030,7 @@ hostMessage({
 document.querySelector(".pr-subhead")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("an observed row claims no exit status", !document.querySelector(".pr-status"));
 check("an observed row offers no stop", !document.querySelector(".pr-kill"));
+
 
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

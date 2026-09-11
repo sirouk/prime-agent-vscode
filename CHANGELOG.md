@@ -13,7 +13,9 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
-- **Turns hide unfinished thinking and tool-call arguments behind a working row.** Default `primeAgent.liveTranscript` is off: thinking and tool JSON stay off-screen until they settle (thinking ends, a tool starts running, or reply text appears). Tool output is similarly gated by `primeAgent.streamToolOutput`. The working row cycles spinner verbs plus elapsed time. Turn either setting on to restore live streaming.
+- **Turns hide unfinished thinking and tool-call arguments behind a working row.** Default `primeAgent.liveTranscript` is off: thinking and tool JSON stay off-screen until they settle (thinking ends, a tool starts running, or reply text appears). Tool output is similarly gated by `primeAgent.streamToolOutput`. The working row cycles Claude Code spinner verbs plus elapsed time. Turn either setting on to restore live streaming.
+
+- **New Session now opens the empty page immediately.** The click used to leave the previous transcript on screen until create/attach finished. The webview now switches to the welcome composer at once, locks send with `Creating session…`, and only unlocks after the host snapshot confirms the new worker. A prompt typed in that window is refused rather than posted into the previous session. New Session also promotes the current RPC worker to a resident daemon session and `create`s a new resident worker, so switching away no longer kills an in-flight run in the session you just left ([sirouk/prime-agent-vscode#1](https://github.com/sirouk/prime-agent-vscode/issues/1)).
 
 - **A prompt now shows the cycling spinner-verb row immediately.** The transcript used to stay blank from Enter until the first visible token. The row now appears on send, stays through empty thinking/text slots, and is replaced as soon as thought process, prose, or a tool call is on screen.
 

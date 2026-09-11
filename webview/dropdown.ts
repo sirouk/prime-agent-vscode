@@ -30,6 +30,10 @@ export interface DropdownOptions {
 	header?: string;
 	/** Max list height in px */
 	maxHeight?: number;
+	/** Prefill the search box and filter immediately. */
+	initialQuery?: string;
+	/** Fired after the menu is removed from the document. */
+	onHide?: () => void;
 }
 
 export class Dropdown {
@@ -61,6 +65,10 @@ export class Dropdown {
 		return this.open;
 	}
 
+	query(): string {
+		return this.input?.value ?? "";
+	}
+
 	toggle(items: DropdownItem[]): void {
 		if (this.open) this.hide();
 		else this.show(items);
@@ -79,6 +87,7 @@ export class Dropdown {
 			this.input = document.createElement("input");
 			this.input.className = "dropdown-search";
 			this.input.placeholder = this.options.placeholder;
+			if (this.options.initialQuery) this.input.value = this.options.initialQuery;
 			this.input.addEventListener("input", () => this.refilter());
 			this.root.appendChild(this.input);
 		} else {
@@ -112,6 +121,7 @@ export class Dropdown {
 		document.removeEventListener("mousedown", this.outsideHandler, true);
 		document.removeEventListener("keydown", this.keyHandler, true);
 		window.removeEventListener("resize", this.repositionHandler);
+		this.options.onHide?.();
 	}
 
 	/** Position the portal just above its rail control, as the old child menu did. */
@@ -187,11 +197,13 @@ export class Dropdown {
 		if (!this.open) return;
 		if (event.key === "Escape") {
 			event.preventDefault();
+			event.stopPropagation();
 			this.hide();
 			return;
 		}
 		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 			event.preventDefault();
+			event.stopPropagation();
 			const delta = event.key === "ArrowDown" ? 1 : -1;
 			const n = this.filtered.length;
 			if (n === 0) return;
@@ -207,6 +219,7 @@ export class Dropdown {
 		}
 		if (event.key === "Enter") {
 			event.preventDefault();
+			event.stopPropagation();
 			const item = this.filtered[this.selected];
 			if (item && !item.disabled) {
 				this.hide();

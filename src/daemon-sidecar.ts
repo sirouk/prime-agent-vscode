@@ -1,12 +1,13 @@
 /**
  * Minimal client for the prime-agent daemon protocol (prime-agent.daemon v7).
  *
- * The RPC-mode subprocess owns its session (client-owned worker) — it cannot
- * attach to an already-live terminal session ("Session is already active").
- * The terminal client is only ever a VIEW of a daemon-brokered session: any
- * number of terminals attach to and steer the same resident session. To get
- * the same parity from VS Code we speak the daemon protocol directly for the
- * resident-session cases: attach, view, prompt, abort, compact, detach.
+ * The RPC-mode subprocess starts as a client-owned worker. That worker is
+ * hidden from other prime-agent clients, and closing RPC stdin starts cleanup.
+ * The extension therefore promotes that session to resident, and creates additional
+ * sessions with lifecycle "resident", so:
+ *   - disconnecting RPC does not kill the agent
+ *   - New Session does not replace/abort a running worker
+ *   - `prime-agent list` / TUI can see and attach to the same conversation
  *
  * Socket: unix socket <tmp>/prime-agent-<uid>/daemon.sock (Windows: named
  * pipe), LF-delimited JSON lines. The daemon is guaranteed to exist while our
@@ -515,6 +516,36 @@ export class DaemonSidecar {
 			20_000,
 		);
 		return data?.sessions ?? [];
+	}
+
+	/**
+	 * Start a new daemon-resident worker. Unlike RPC `new_session`, this does
+	 * not replace the runtime inside an existing worker, so a running session
+	 * keeps going.
+	 */
+	async createResident(options: { cwd: string; name?: string }): Promise<SessionSummaryRef> {
+		const data = await this.request<SessionSummaryRef | undefined>(
+			{
+				type: "create",
+				lifecycle: "resident",
+				config: { cwd: options.cwd },
+				...(options.name ? { name: options.name } : {}),
+			},
+			30_000,
+		);
+		if (!data?.activeSessionId) {
+			throw new Error("daemon create returned no activeSessionId");
+		}
+		return data;
+	}
+
+	/**
+	 * Turn a client-owned RPC worker into a resident session so other
+	 * prime-agent clients can list/attach to it, and so RPC EOF does not
+	 * reap the worker.
+	 */
+	async promoteOwnedSession(activeSessionId: string): Promise<void> {
+		await this.request({ type: "promote_owned_session", activeSessionId }, 15_000);
 	}
 
 	/**

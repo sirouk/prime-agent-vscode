@@ -447,6 +447,7 @@ export type HostToWebview =
 	| { type: "processes"; processes: SessionProcess[] }
 	| { type: "processOutput"; preview: ProcessOutputPreview }
 	| { type: "showHistory" }
+	| { type: "newThread" }
 	| { type: "promptAccepted"; kind: "prompt" | "steer" | "followUp" }
 	| { type: "promptRejected"; error: string; clientRequestId?: string }
 	| {
