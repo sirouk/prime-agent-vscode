@@ -214,6 +214,16 @@
           ],
           "default": "steer",
           "description": "How messages sent while the agent is working are delivered: steer interrupts after the current turn, followUp waits until the run ends. Toggleable per-run in the chat rail."
+        },
+        "primeAgent.liveTranscript": {
+          "type": "boolean",
+          "default": false,
+          "description": "Paint thinking and tool-call arguments as they stream. Off (default) keeps unfinished parts behind the working row until thinking settles, a tool starts running, or reply text appears."
+        },
+        "primeAgent.streamToolOutput": {
+          "type": "boolean",
+          "default": false,
+          "description": "Paint tool output as it arrives. Off (default) waits until the tool finishes. Independent of liveTranscript."
         }
       }
     }

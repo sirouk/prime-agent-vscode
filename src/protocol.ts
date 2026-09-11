@@ -379,6 +379,14 @@ export interface StatusSnapshot {
 	modelId?: string;
 	/** Session id currently being observed read-only, or null when attached normally */
 	observingId?: string | null;
+	/**
+	 * When true, thinking and tool-call arguments paint as they stream.
+	 * Default is false: unfinished parts stay behind the working row until they
+	 * settle (thinking ends, a tool starts running, or reply text appears).
+	 */
+	liveTranscript?: boolean;
+	/** When true, tool output paints on each partial. Default is false. */
+	streamToolOutput?: boolean;
 }
 
 export interface ModelRef {
