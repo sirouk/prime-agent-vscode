@@ -424,6 +424,18 @@ controller.ensureStarted = originalEnsureStarted;
 		sent?.streamingBehavior === "steer",
 		JSON.stringify(idlePromptCommands),
 	);
+	// A view restored onto a running session never saw agent_start; the agent's
+	// own state still says it is mid-run, so the operator's follow-up stands.
+	idlePromptCommands.length = 0;
+	const priorState = controller.state;
+	controller.state = { ...(priorState ?? {}), isStreaming: true };
+	await controller.prompt({ text: "queue this", images: [], selections: [], streamingBehavior: "followUp" });
+	check(
+		"a prompt into a run this view never saw start keeps the chosen follow-up",
+		idlePromptCommands.find((command) => command.type === "prompt")?.streamingBehavior === "followUp",
+		JSON.stringify(idlePromptCommands),
+	);
+	controller.state = priorState;
 	controller.ensureStarted = originalEnsureStarted;
 }
 

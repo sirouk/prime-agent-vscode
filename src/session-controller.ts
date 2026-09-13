@@ -1031,24 +1031,18 @@ export class SessionController implements vscode.Disposable {
 		const text = this.composeMessageText(payload);
 		const images = payload.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType }));
 
-		let command: Record<string, unknown>;
-		let kind: "prompt" | "steer" | "followUp";
-		if (this.streaming && payload.streamingBehavior === "steer") {
-			command = { type: "prompt", message: text, images, streamingBehavior: "steer" };
-			kind = "steer";
-		} else if (this.streaming && payload.streamingBehavior === "followUp") {
-			command = { type: "prompt", message: text, images, streamingBehavior: "followUp" };
-			kind = "followUp";
-		} else {
-			// Always name a behavior, as the terminal and our attached path do. The
-			// daemon only resumes suspended session input for a prompt that carries
-			// one (`resumeIfIdle: command.streamingBehavior !== undefined`), and
-			// every abort suspends it — Stop, and /compact, which aborts first. A
-			// bare prompt after either was refused with "queued session input is
-			// suspended" until the extension was restarted.
-			command = { type: "prompt", message: text, images, streamingBehavior: "steer" };
-			kind = "prompt";
-		}
+		// Always name a behavior, as the terminal and our attached path do. The
+		// daemon only resumes suspended session input for a prompt that carries
+		// one (`resumeIfIdle: command.streamingBehavior !== undefined`), and
+		// every abort suspends it — Stop, and /compact, which aborts first. A
+		// bare prompt after either was refused with "queued session input is
+		// suspended" until the extension was restarted. Mid-run is read from the
+		// agent's state too: a view restored onto a running session never saw its
+		// agent_start, and treating it as idle would turn a follow-up into a steer.
+		const streaming = this.effectiveStreaming();
+		const behavior = streaming ? payload.streamingBehavior : "steer";
+		const command = { type: "prompt", message: text, images, streamingBehavior: behavior };
+		const kind: "prompt" | "steer" | "followUp" = streaming ? behavior : "prompt";
 
 		try {
 			const response = await client.request(command);
