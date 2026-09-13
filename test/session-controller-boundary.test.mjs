@@ -402,6 +402,31 @@ check(
 );
 controller.ensureStarted = originalEnsureStarted;
 
+// Stop and /compact both abort, and an abort suspends the session's queued
+// input. The daemon resumes it only for a prompt that names a streaming
+// behavior, so an idle prompt without one was refused ("queued session input
+// is suspended") until the extension restarted.
+{
+	const idlePromptCommands = [];
+	controller.client = {
+		running: true,
+		request: async (command) => {
+			idlePromptCommands.push(command);
+			return { success: true, data: {} };
+		},
+	};
+	controller.ensureStarted = async () => {};
+	controller.streaming = false;
+	await controller.prompt({ text: "after compaction", images: [], selections: [], streamingBehavior: "followUp" });
+	const sent = idlePromptCommands.find((command) => command.type === "prompt");
+	check(
+		"an idle RPC prompt names a streaming behavior so it resumes input an abort suspended",
+		sent?.streamingBehavior === "steer",
+		JSON.stringify(idlePromptCommands),
+	);
+	controller.ensureStarted = originalEnsureStarted;
+}
+
 // Restart must not merely await the startup it just stopped. The old coalesced
 // promise has to settle first, then a fresh ensureStarted call creates the
 // replacement process.

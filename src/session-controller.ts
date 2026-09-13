@@ -1040,7 +1040,13 @@ export class SessionController implements vscode.Disposable {
 			command = { type: "prompt", message: text, images, streamingBehavior: "followUp" };
 			kind = "followUp";
 		} else {
-			command = { type: "prompt", message: text, images };
+			// Always name a behavior, as the terminal and our attached path do. The
+			// daemon only resumes suspended session input for a prompt that carries
+			// one (`resumeIfIdle: command.streamingBehavior !== undefined`), and
+			// every abort suspends it — Stop, and /compact, which aborts first. A
+			// bare prompt after either was refused with "queued session input is
+			// suspended" until the extension was restarted.
+			command = { type: "prompt", message: text, images, streamingBehavior: "steer" };
 			kind = "prompt";
 		}
 
