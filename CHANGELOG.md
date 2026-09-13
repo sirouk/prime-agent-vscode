@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.34]
+
 - **A thread keeps working after Compact or Stop.** Both run the agent's abort, and an abort suspends the session's queued input. The daemon lifts that suspension only for a prompt that names a streaming behavior, which the terminal and this extension's attached path always send, but this extension's own sessions left it off when idle. So once a compaction had run (manual, from the menu, or the auto-compact threshold), or a run had been stopped, every later message was refused with "Cannot admit a session action while queued session input is suspended" until the extension was restarted. Idle prompts now name one too. Verified against a real agent: after a real compaction and after a Stop, the next message is accepted and answered, where both were refused before. The agent's own auto-compaction, which fires when a turn ends near the context limit, never aborts and was never affected.
 
 ## [1.0.32]
@@ -326,7 +328,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.33...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.34...HEAD
+[1.0.34]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.33...v1.0.34
 [1.0.33]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.32...v1.0.33
 [1.0.32]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.31...v1.0.32
 [1.0.31]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.30...v1.0.31
