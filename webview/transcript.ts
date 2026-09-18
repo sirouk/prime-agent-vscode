@@ -102,7 +102,27 @@ interface CustomDisplayMessage {
 	customType?: string;
 	content?: string;
 	display?: boolean;
+	details?: RefinementOutcomeDetails;
 	timestamp?: number;
+}
+
+/** prime-agent 0.9.5's `customType: "refinement_outcome"` — the CLI's "◆ Harness refined" card data. */
+interface RefinementEdit {
+	action?: string;
+	kind?: string;
+	id?: string;
+	applied?: boolean;
+	error?: string;
+	before?: { scope?: string };
+	after?: { scope?: string };
+}
+
+interface RefinementOutcomeDetails {
+	refinementId?: string;
+	summary?: string;
+	scope?: string;
+	rollbackOf?: string;
+	edits?: RefinementEdit[];
 }
 
 /** Rows built on open. Enough to fill several screens without paying for the tail. */
@@ -923,7 +943,13 @@ export class Transcript {
 		} else if (role === ("custom" as string)) {
 			const m = message as unknown as CustomDisplayMessage;
 			// `display: false` is the agent asking for this to stay out of the view.
-			if (m.display === false || !m.content?.trim()) return;
+			if (m.display === false) return;
+			if (m.customType === "refinement_outcome" && m.details) {
+				this.place(this.buildRefinementCard(m));
+				this.hasContent = true;
+				return;
+			}
+			if (!m.content?.trim()) return;
 			this.place(this.buildCustomNote(m));
 			this.hasContent = true;
 		}
@@ -962,6 +988,96 @@ export class Transcript {
 		body.textContent = message.content ?? "";
 		note.append(label, body);
 		return note;
+	}
+
+	// ------------------------------------------------------------------
+	// Harness refinement outcome — the webview's "Harness refined" card
+	// ------------------------------------------------------------------
+	// The CLI renders these entries (customType "refinement_outcome" on
+	// 0.9.5, content "Refinement complete: …") as a styled card; the
+	// generic custom-note path was showing the same message as a faint
+	// one-liner with no edits and no summary. Headline and edit lines
+	// mirror the CLI's wording where observable.
+
+	private refinementHeadline(details: RefinementOutcomeDetails): string {
+		const edits = details.edits ?? [];
+		const applied = edits.filter((e) => e.applied);
+		const rollback = details.rollbackOf !== undefined;
+		if (edits.length === 0) {
+			return rollback ? "Harness rollback unchanged · no edits applied" : "Harness unchanged · no edits applied";
+		}
+		if (applied.length === 0) {
+			return `${rollback ? "Harness rollback" : "Harness refinement"} failed · 0/${edits.length} edits applied`;
+		}
+		if (applied.length < edits.length) {
+			return `${rollback ? "Harness partially rolled back" : "Harness partially refined"} · ${applied.length}/${edits.length} edits applied`;
+		}
+		return ""; // all-applied is handled by refinementAllAppliedHeadline
+	}
+
+	private refinementAllAppliedHeadline(edits: RefinementEdit[], rollback: boolean): string {
+		if (rollback) {
+			return `Harness rollback completed · ${edits.length} edit${edits.length === 1 ? "" : "s"} applied`;
+		}
+		const first = edits[0];
+		const kind = first?.kind ?? "";
+		const sameKind = kind !== "" && edits.every((e) => e.kind === kind);
+		if (sameKind) {
+			const noun = kind === "memory" ? (edits.length === 1 ? "memory" : "memories") : `${kind}${edits.length === 1 ? "" : "s"}`;
+			const allSameAction = kind !== "" && edits.every((e) => e.action === first?.action);
+			const verb = allSameAction
+				? (first?.action === "create" ? "created" : first?.action === "update" ? "updated" : first?.action === "delete" ? "deleted" : "changed")
+				: "changed";
+			return `Harness refined · ${edits.length} ${noun} ${verb}`;
+		}
+		return `Harness refined · ${edits.length} edits applied`;
+	}
+
+	private buildRefinementCard(message: CustomDisplayMessage): HTMLElement {
+		const details = message.details ?? {};
+		const edits = details.edits ?? [];
+		const applied = edits.filter((e) => e.applied);
+		const rollback = details.rollbackOf !== undefined;
+		let headline: string;
+		if (applied.length === edits.length && edits.length > 0) {
+			headline = this.refinementAllAppliedHeadline(edits, rollback);
+		} else {
+			headline = this.refinementHeadline(details);
+		}
+
+		const tone = applied.length === 0 && edits.length > 0 ? "error" : applied.length < edits.length ? "partial" : "ok";
+
+		const card = el("div", `refine-card${tone !== "ok" ? ` ${tone}` : ""}`);
+		const head = el("div", "refine-card-head");
+		head.appendChild(el("span", "refine-card-mark", "◆"));
+		head.appendChild(el("span", "refine-card-title", headline));
+		card.appendChild(head);
+
+		if (details.summary?.trim()) {
+			const summary = el("div", "refine-card-summary");
+			summary.textContent = details.summary.trim();
+			summary.title = details.refinementId ? `refinement ${details.refinementId}` : "";
+			card.appendChild(summary);
+		}
+
+		if (edits.length > 0) {
+			const list = el("div", "refine-card-edits");
+			for (const edit of edits) {
+				const scope = edit.after?.scope ?? edit.before?.scope ?? details.scope ?? "local";
+				const kind = edit.kind ?? "edit";
+				const id = edit.id ?? "?";
+				const line = el("div", `refine-card-edit${edit.applied ? "" : " failed"}`);
+				if (edit.applied) {
+					const verb = edit.action === "create" ? "Created" : edit.action === "update" ? "Updated" : edit.action === "delete" ? "Deleted" : "Changed";
+					line.textContent = `${verb} ${scope} ${kind} ${id}`;
+				} else {
+					line.textContent = `Failed to ${edit.action ?? "apply"} ${scope} ${kind} ${id}${edit.error ? `: ${edit.error}` : ""}`;
+				}
+				list.appendChild(line);
+			}
+			card.appendChild(list);
+		}
+		return card;
 	}
 
 	private renderUserTextWithMentions(text: string): HTMLElement {

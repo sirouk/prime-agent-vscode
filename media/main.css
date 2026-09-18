@@ -2665,6 +2665,65 @@ body.vscode-light pre.term {
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+/* ------- harness refinement card ("Harness refined", parity with the CLI) ------- */
+/* Mirrors the CLI's dedicated render of customType "refinement_outcome": accent
+   headline, dim summary, per-edit ledger. Tone classes mirror the CLI's failure
+   and partial paths that used to collapse into the same faint custom-note. */
+.refine-card {
+	margin: 6px 10px;
+	padding: 6px 10px 8px;
+	border: 1px solid var(--pa-border-faint, var(--pa-border));
+	border-left: 2px solid var(--pa-accent);
+	background: color-mix(in srgb, transparent 80%, var(--pa-raised) 20%);
+	border-radius: 0 4px 4px 0;
+}
+
+.refine-card.partial {
+	border-left-color: var(--pa-warn);
+}
+
+.refine-card.error {
+	border-left-color: var(--pa-error);
+}
+
+.refine-card-head {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--pa-accent);
+}
+
+.refine-card.partial .refine-card-head { color: var(--pa-warn); }
+.refine-card.error .refine-card-head { color: var(--pa-error); }
+
+.refine-card-title { white-space: pre-wrap; word-break: break-word; }
+
+.refine-card-summary {
+	margin-top: 3px;
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--pa-dim);
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.refine-card-edits {
+	margin-top: 5px;
+	padding-top: 4px;
+	border-top: 1px solid var(--pa-border-faint, var(--pa-border));
+	font-size: 10.5px;
+	line-height: 1.5;
+	color: var(--pa-faint);
+	font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+}
+
+.refine-card-edit { white-space: pre-wrap; word-break: break-word; }
+.refine-card-edit.failed { color: var(--pa-error); }
+
 
 /* ---------- roster status mark for history rows ---------- */
 /* Three states, the same three the CLI names. Only the live one moves: a

@@ -809,6 +809,84 @@ check("uiState title updates the header", document.querySelector(".session-title
 	check("its kind is labelled", notes.some((n) => n.querySelector(".custom-note-kind")?.textContent === "agent message"));
 	check("an entry marked display:false stays hidden", !document.body.textContent.includes("should never be shown"));
 }
+// --- a harness refinement must read like the CLI's card -----------------------
+// 0.9.5's refinement records arrive as customType "refinement_outcome" with the
+// edits ledger in details; without a dedicated branch they fell through to the
+// generic custom-note and lost both the summary and the per-edit wording, so an
+// auto-refine after compaction looked identical to a thrown-away note.
+{
+	const refineMessage = {
+		role: "custom",
+		customType: "refinement_outcome",
+		display: true,
+		content: "Refinement complete: Record tao-fleet apply completion and repo commit 12b5dc9",
+		details: {
+			refinementId: "refine_0001",
+			summary: "Record tao-fleet apply completion and repo commit 12b5dc9",
+			scope: "local",
+			edits: [
+				{ action: "create", kind: "memory", id: "tao_fleet_apply", applied: true, after: { scope: "local" } },
+				{ action: "update", kind: "memory", id: "existing_note", applied: true, after: { scope: "global" } },
+			],
+		},
+	};
+	hostMessage({ type: "snapshot", state: null, status: baseStatus, messages: [
+		{ role: "user", content: "work" },
+	] });
+	hostMessage({ type: "event", event: { type: "message_start", message: refineMessage } });
+	hostMessage({ type: "event", event: { type: "message_end", message: refineMessage } });
+
+	const card = document.querySelector(".refine-card");
+	check("a refinement outcome renders as its own card", !!card);
+	check("the headline counts the applied edits like the CLI does",
+		/Harness refined · 2 memories/.test(card?.querySelector(".refine-card-title")?.textContent ?? ""),
+		card?.querySelector(".refine-card-title")?.textContent);
+	check("the summary is shown, not just the count",
+		/tao-fleet apply completion/.test(card?.querySelector(".refine-card-summary")?.textContent ?? ""));
+	const editLines = [...(card?.querySelectorAll(".refine-card-edit") ?? [])].map((n) => n.textContent);
+	check("each edit is named with its scope and id",
+		editLines.some((t) => t.includes("Created local memory tao_fleet_apply")) &&
+		editLines.some((t) => t.includes("Updated global memory existing_note")),
+		JSON.stringify(editLines));
+
+	// Rollback and partial-refine wording come from rollbackOf and failed edits.
+	hostMessage({ type: "event", event: { type: "message_start", message: {
+		role: "custom", customType: "refinement_outcome", display: true,
+		content: "Refinement complete: rollback",
+		details: {
+			refinementId: "refine_0002", summary: "", scope: "local", rollbackOf: "refine_0001",
+			edits: [{ action: "delete", kind: "memory", id: "tao_fleet_apply", applied: true, before: { scope: "local" } }],
+		},
+	} } });
+	hostMessage({ type: "event", event: { type: "message_start", message: {
+		role: "custom", customType: "refinement_outcome", display: true,
+		content: "Refinement complete: partial",
+		details: {
+			refinementId: "refine_0003", summary: "one edit failed", scope: "local",
+			edits: [
+				{ action: "create", kind: "skill", id: "helper", applied: true, after: { scope: "local" } },
+				{ action: "create", kind: "prompt", id: "tone", applied: false, error: "validation: title too long" },
+			],
+		},
+	} } });
+	const heads = [...document.querySelectorAll(".refine-card")].map((n) => n.querySelector(".refine-card-title")?.textContent);
+	check("a rollback is labelled as a rollback, not a refinement",
+		heads.some((t) => /^Harness rollback completed · 1 edit applied$/.test(t ?? "")), JSON.stringify(heads));
+	check("a partial refine shows the fraction like the CLI does",
+		heads.some((t) => /^Harness partially refined · 1\/2 edits applied$/.test(t ?? "")), JSON.stringify(heads));
+	const partialCard = [...document.querySelectorAll(".refine-card")].find((n) => n.textContent.includes("partially refined"));
+	check("a failed edit is named with its error",
+		(partialCard?.textContent ?? "").includes("Failed to create local prompt tone: validation: title too long"),
+		partialCard?.textContent);
+	check("a partial refine carries the warning tone", partialCard?.classList.contains("partial") === true);
+
+	// The model-facing twin (customType "refinement_notice", display:false) stays hidden.
+	hostMessage({ type: "event", event: { type: "message_start", message: {
+		role: "custom", customType: "refinement_notice", display: false,
+		content: "[local-refinement]\n\nsummary",
+	} } });
+	check("the internal refinement notice stays hidden", !document.body.textContent.includes("[local-refinement]"));
+}
 
 // --- the usage line must not appear under a reply still being written --------
 // renderSnapshot repaints EVERY message as non-partial, so a snapshot arriving
