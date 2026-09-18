@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.35]
+
 - **Harness refinement lands in the thread as its own card.** prime-agent 0.9.5 records every refinement — from `refine.run()`, `/refine`, or an auto-refine after compaction — as a custom message with `customType: "refinement_outcome"`, the summary, and the applied edits. The only render path here was the generic custom-note fallback, so the continuation harness could finish a turn by rewriting itself — creating global memories, updating project notes — and the thread showed nothing more than a faint one-liner named after the raw customType, like it had before the event existed in the engine at all. A refinement now renders as a bordered card with a "◆ Harness refined · N memories created" headline, the refinement's summary, and a per-edit ledger ("Created local memory …", "Failed to create local prompt …: reason"), with rollback and partial-refine outcomes labelled and toned instead of reading as a success. The model-facing `[local-refinement]` bookkeeping twin stays hidden, as it should. Verified against the webview DOM harness with the message shape taken from the 0.9.5 engine itself.
 
 ## [1.0.34]
@@ -330,7 +332,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.34...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.35...HEAD
+[1.0.35]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.34...v1.0.35
 [1.0.34]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.33...v1.0.34
 [1.0.33]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.32...v1.0.33
 [1.0.32]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.31...v1.0.32
