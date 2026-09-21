@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.37]
+
 - **Collapsed tool rows for python cells now carry a kind glyph instead of the word "ipython".** A kernel-heavy thread stacked `ipython` × N through the viewport: seven verbose letters per row to say "this is a python cell", which the green pip and the summary already said. The collapsed header now shows a compact snake glyph (python cells) or a shell-prompt glyph (`%%bash` cells) — hover still says "ipython" and the expanded body spells the word back out beside the section label. Other tools keep their text names; the glyph tracks the cell's kind even when a `%%bash` line streams in after the card was born.
 
 ## [1.0.36]
@@ -338,7 +340,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.36...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.37...HEAD
+[1.0.37]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.36...v1.0.37
 [1.0.36]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.35...v1.0.36
 [1.0.35]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.34...v1.0.35
 [1.0.34]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.33...v1.0.34
