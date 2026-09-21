@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { locateAgent, type LocatedAgent } from "./agent-locator.js";
 import { DaemonSidecar } from "./daemon-sidecar.js";
-import { defaultAgentDir, resolveOwnerClientId, type OwnerLookup } from "./daemon-owner.js";
+import { agentDirForSessionFile, defaultAgentDir, resolveOwnerClientId, type OwnerLookup } from "./daemon-owner.js";
 import type { AttachSnapshot, DaemonServerMessage, RosterEntry, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
 import type {
 	AgentEvent,
@@ -2613,7 +2613,7 @@ export class SessionController implements vscode.Disposable {
 				// resumes the file under a fresh worker and — unlike
 				// switch_session, which disposes the caller's session first —
 				// does not touch anything already running.
-				const created = await sidecar.create({ sessionPath: session.path, cwd: session.cwd });
+				const created = await sidecar.create({ sessionPath: session.path, cwd: session.cwd, agentDir: agentDirForSessionFile(session.path) });
 				activeId = created.activeSessionId ?? created.id;
 				if (this.disposed || epoch !== this.viewEpoch) return "aborted";
 				if (!activeId) return "failed";

@@ -600,11 +600,17 @@ export class DaemonSidecar {
 	 * multiplexer the CLI's `daemon attach` rides, and unlike `switch_session`
 	 * it never touches another session's resident runtime.
 	 */
-	async create(options: { sessionPath?: string; name?: string; cwd?: string } = {}): Promise<SessionSummaryRef> {
+	async create(options: { sessionPath?: string; name?: string; cwd?: string; agentDir?: string } = {}): Promise<SessionSummaryRef> {
 		const payload: Record<string, unknown> = { type: "create" };
 		if (options.sessionPath) payload.sessionPath = options.sessionPath;
 		if (options.name) payload.name = options.name;
-		if (options.cwd) payload.config = { cwd: options.cwd };
+		const config: Record<string, unknown> = {};
+		if (options.cwd) config.cwd = options.cwd;
+		// The daemon's default agentDir is the right place for ~/.prime/agent
+		// sessions but not for a custom PRIME_AGENT_DIR layout: the worker would
+		// get created against the default directory and never see the file.
+		if (options.agentDir) config.agentDir = options.agentDir;
+		if (Object.keys(config).length > 0) payload.config = config;
 		return await this.request<SessionSummaryRef>(payload, 90_000);
 	}
 
