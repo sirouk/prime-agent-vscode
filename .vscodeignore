@@ -34,6 +34,12 @@ dist/process-tracker.cjs
 dist/agent-jobs.cjs
 dist/background-jobs.cjs
 
+# Another agent's on-disk worktrees. Gitignored, and for the same dot:true glob
+# reason as graphify-out that is what got petalite-aardvark's entire check-out
+# of this repo packed into the v1.0.37 build. The work belongs to whoever wrote
+# it — banishing it from the package is correct; deleting it is not.
+.kilo/**
+
 # Knowledge-graph output. Gitignored, which is exactly why it needs a line here:
 # vsce globs with dot:true and never reads .gitignore, so being invisible to git
 # is what let 4 MB of symbol map — naming the very files this file excludes —
