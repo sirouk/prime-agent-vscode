@@ -593,6 +593,21 @@ export class DaemonSidecar {
 		return (await this.request<Record<string, unknown> | undefined>({ type: "get_session_stats", activeSessionId }, 20_000)) ?? {};
 	}
 
+	/**
+	 * Resume a saved session file as a resident worker, or reuse the worker that
+	 * already hosts it (the supervisor dedupes on sessionPath). Meanwhile the
+	 * session any other worker is running is left completely alone — this is the
+	 * multiplexer the CLI's `daemon attach` rides, and unlike `switch_session`
+	 * it never touches another session's resident runtime.
+	 */
+	async create(options: { sessionPath?: string; name?: string; cwd?: string } = {}): Promise<SessionSummaryRef> {
+		const payload: Record<string, unknown> = { type: "create" };
+		if (options.sessionPath) payload.sessionPath = options.sessionPath;
+		if (options.name) payload.name = options.name;
+		if (options.cwd) payload.config = { cwd: options.cwd };
+		return await this.request<SessionSummaryRef>(payload, 90_000);
+	}
+
 	dispose(): void {
 		const socket = this.socket;
 		this.socket = null;

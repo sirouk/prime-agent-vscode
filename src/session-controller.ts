@@ -2427,6 +2427,40 @@ export class SessionController implements vscode.Disposable {
 			this.restoreAttachedView(previousAttachment, epoch);
 			return;
 		}
+		// The own-RPC view has no attachment to compare against, so its no-op
+		// check is the file the RPC process is actually on. Without this, a
+		// history click on the very session the window is showing re-attaches
+		// to it and needlessly demotes the native view to a relayed one.
+		if (
+			!this.attached &&
+			this.state?.sessionFile &&
+			normalizeFsPath(this.state.sessionFile) === normalizeFsPath(sessionPath)
+		) {
+			this.broadcast({ type: "notice", level: "info", text: "You are already viewing that session." });
+			this.restoreAttachedView(previousAttachment, epoch);
+			return;
+		}
+		// The daemon path never closes a resident session: clicking back and
+		// forth between history rows must not be consequential. The legacy
+		// `switch_session` envelope morphs the RPC process's session in place —
+		// that IS the "switching stopped my running session" bug, because the
+		// engine disposes the old session's turn, compact, and RLM subtree
+		// before loading the target file.
+		const nav = await this.navigateHistoryViaDaemon(session, epoch, observedAtStart, previousAttachment);
+		if (nav === "done" || nav === "aborted" || nav === "recovering") return;
+		// nav === "failed": the daemon-side resume/attach channel was unavailable.
+		// Falling back to switch_session would silently destroy whatever the
+		// viewed session is doing. Only an empty own-RPC chat has nothing to
+		// lose, so the legacy morph stays strictly behind that guard.
+		if (this.attached !== null || this.streaming || (this.cachedMessages?.length ?? 0) > 0) {
+			this.broadcast({
+				type: "notice",
+				level: "error",
+				text: "Could not resume that session in the background just now — try again in a moment. Your current thread was left running, untouched.",
+			});
+			this.restoreAttachedView(previousAttachment, epoch);
+			return;
+		}
 		await this.ensureStarted();
 		if (!this.client || this.disposed || epoch !== this.viewEpoch) {
 			this.restoreAttachedView(previousAttachment, epoch);
@@ -2523,6 +2557,153 @@ export class SessionController implements vscode.Disposable {
 		}
 		this.broadcast({ type: "notice", level: "error", text: `Could not resume session: ${error}` });
 		this.restoreAttachedView(previousAttachment, epoch);
+	}
+
+	/**
+	 * History navigation that leaves every running session alone.
+	 *
+	 * The daemon is the multiplexer: if the target file already has a resident
+	 * worker (live in a terminal, another window, or still backgrounded from an
+	 * earlier click in THIS window), we attach to it; if it has none, the
+	 * supervisor `create`s a worker for it. Both keep this window's previous
+	 * thread running where it was — the only thing that changes is which
+	 * resident session this view follows. Returns how the navigation went so
+	 * the caller can decide whether the destructive legacy path is even a
+	 * question.
+	 *
+	 *  - "done"       a view is settled: we attached, or we told the operator
+	 *                 exactly why not and restored what they had.
+	 *  - "recovering" the target's worker is mid-recovery; notices went out and
+	 *                 the autonomous attach ladder carries the attach when it
+	 *                 settles. The previous view is intact.
+	 *  - "aborted"    a newer navigation or disposal won the epoch; do nothing.
+	 *  - "failed"     the daemon channel itself is unavailable; the caller
+	 *                 decides between retrying later and, only for a virgin
+	 *                 empty chat, the legacy in-place switch.
+	 */
+	private async navigateHistoryViaDaemon(
+		session: ResolvedHistorySession,
+		epoch: number,
+		observedAtStart: string | null,
+		previousAttachment: AttachRef | null,
+	): Promise<"done" | "recovering" | "aborted" | "failed"> {
+		let sidecar: DaemonSidecar;
+		try {
+			sidecar = await this.ensureSidecar({ reattach: false });
+		} catch {
+			return "failed";
+		}
+		if (this.disposed || epoch !== this.viewEpoch) return "aborted";
+		try {
+			// Fast path: the file already has a resident worker. That includes
+			// threads this window itself left running moments ago — which is
+			// exactly why jumping back and forth now costs nothing.
+			const wanted = normalizeFsPath(session.path);
+			const listed = await this.listSessions(sidecar);
+			let activeId = listed.find(
+				(ref) =>
+					ref.sessionFile !== undefined &&
+					normalizeFsPath(ref.sessionFile) === wanted &&
+					(ref.lifecycle ?? "live") === "live" &&
+					(ref.rlmDepth ?? 0) === 0,
+			)?.activeSessionId;
+			if (this.disposed || epoch !== this.viewEpoch) return "aborted";
+			if (!activeId) {
+				// Not resident yet: make it one. `create` with a sessionPath
+				// resumes the file under a fresh worker and — unlike
+				// switch_session, which disposes the caller's session first —
+				// does not touch anything already running.
+				const created = await sidecar.create({ sessionPath: session.path, cwd: session.cwd });
+				activeId = created.activeSessionId ?? created.id;
+				if (this.disposed || epoch !== this.viewEpoch) return "aborted";
+				if (!activeId) return "failed";
+			}
+			const attached = await this.attachViaDaemon(
+				activeId,
+				session.path,
+				epoch,
+				"That thread is running in the background — switching views no longer stops it.",
+			);
+			if (this.disposed || epoch !== this.viewEpoch) return "aborted";
+			if (!attached) {
+				const message = this.lastDaemonAttachError ?? "";
+				if (SessionController.isTransientWorkerAttachError(message)) {
+					if (this.attached === null && this.observingId === null && !this.observationRestoring) {
+						// The autonomous ladder owns retries for a plain own-RPC
+						// view: the click is captured as an attach attempt and
+						// lands as soon as the worker settles.
+						const canonical = this.lastDaemonAttachCanonicalId ?? activeId;
+						this.attachAttempt = { activeSessionId: canonical, sessionPath: session.path, sessionId: session.id };
+						this.attachAttemptEpoch = epoch;
+						this.scheduleReattach(0);
+						this.broadcast({
+							type: "notice",
+							level: "info",
+							text: "That session's worker is still recovering — the view will attach automatically when it is ready.",
+						});
+						this.pushStatus();
+						return "recovering";
+					}
+					this.broadcast({
+						type: "notice",
+						level: "info",
+						text: "That session's worker is still recovering — try again in a moment.",
+					});
+					this.restoreAttachedView(previousAttachment, epoch);
+					return "recovering";
+				}
+				if (this.client) {
+					// A session hot in someone ELSE's client (a terminal,
+					// another window) refuses writable attach outright. Offer
+					// the read-only observe view exactly like the legacy
+					// terminal-locked fallback did, so the operator still gets
+					// eyes on the session instead of a dead end.
+					const observed = await this.startObserving(activeId, previousAttachment, epoch, session.path, observedAtStart);
+					if (this.disposed || epoch !== this.viewEpoch) return "aborted";
+					if (observed) return "done";
+				}
+				this.broadcast({
+					type: "notice",
+					level: "error",
+					text: `Could not resume that session: ${message || "daemon attach failed"}. Your current thread was left untouched.`,
+				});
+				this.restoreAttachedView(previousAttachment, epoch);
+				return "done";
+			}
+			// Release only the previous DAEMON attachment. The own-RPC view has
+			// no attachment to release — it simply keeps streaming behind the
+			// scenes and stays exactly where it was.
+			const currentAttachment = this.attached;
+			if (!currentAttachment || epoch !== this.viewEpoch) return "aborted";
+			if (previousAttachment && currentAttachment !== previousAttachment && this.sidecar?.connected) {
+				try {
+					await this.detachDaemonSession(this.sidecar, previousAttachment.activeSessionId);
+				} catch {
+					// The daemon may already have released the prior viewer.
+				}
+			}
+			if (!(await this.clearObservation(observedAtStart, epoch))) return "aborted";
+			this.returnTargets = [];
+			return "done";
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			if (SessionController.isTransientWorkerAttachError(message)) {
+				this.broadcast({
+					type: "notice",
+					level: "info",
+					text: "That session's worker is still starting — try again in a moment.",
+				});
+				this.restoreAttachedView(previousAttachment, epoch);
+				return "recovering";
+			}
+			this.broadcast({
+				type: "notice",
+				level: "error",
+				text: `Could not resume that session: ${message}. Your current thread was left untouched.`,
+			});
+			this.restoreAttachedView(previousAttachment, epoch);
+			return "done";
+		}
 	}
 
 	/** Attach to a resident session read-only through the daemon observe channel. */
@@ -2899,7 +3080,7 @@ export class SessionController implements vscode.Disposable {
 	 * Attach to a session that is already live somewhere else (a terminal).
 	 * The daemon brokers it; both clients see the same stream, both can prompt.
 	 */
-	private async attachViaDaemon(activeSessionId: string, sessionPath: string, epoch = this.beginNavigation()): Promise<boolean> {
+	private async attachViaDaemon(activeSessionId: string, sessionPath: string, epoch = this.beginNavigation(), noticeText?: string): Promise<boolean> {
 		this.lastDaemonAttachError = null;
 		try {
 			const sidecar = await this.ensureSidecar({ reattach: false });
@@ -2970,7 +3151,7 @@ export class SessionController implements vscode.Disposable {
 			this.broadcast({
 				type: "notice",
 				level: "info",
-				text: "Attached to the live session — you can work here and in the terminal simultaneously.",
+				text: noticeText ?? "Attached to the live session — you can work here and in the terminal simultaneously.",
 			});
 			this.scheduleChildrenRefresh();
 			this.resetViewedSessionState();

@@ -211,10 +211,7 @@ function armSwitchFakes(target) {
 	target.resolveHistorySession = async (sessionPath, sessionId) => ({ path: sessionPath, id: sessionId });
 	target.ensureStarted = async () => {};
 	target.client = {
-		request: async (cmd) =>
-			cmd.type === "switch_session"
-				? { success: false, error: "Session is already active in bbb: /tmp/b.jsonl" }
-				: { success: true, data: {} },
+		request: async (cmd) => ({ success: true, data: {} }),
 	};
 	target.sidecar = {
 		connected: true,
@@ -222,6 +219,11 @@ function armSwitchFakes(target) {
 		dispose: () => {},
 		detach: async () => {},
 		list: async () => [],
+		// The daemon-first navigation resumes a saved file with `create` and
+		// only then attaches — the recovering-worker wait therefore surfaces on
+		// the ATTACH, not on a switch_session refusal as before.
+		create: async () => ({ activeSessionId: "b" }),
+		getMessages: async () => [],
 		attach: async () => {
 			throw new Error(TRANSIENT);
 		},
@@ -271,6 +273,140 @@ check("observing view: no queue while an observation holds the display", control
 check("observing view: the observation itself is untouched", controller.observingId === "h-C");
 check("observing view: the operator is told to retry", notices().some((t) => /try again in a moment/i.test(t)));
 controller.observingId = null;
+
+// --- history navigation never sacrifices a running thread -------------------
+// The regression this section locks: history resume used to route through the
+// RPC `switch_session` envelope, and the engine's replacement path disposes the
+// running session before loading the target — clicking back and forth between
+// history rows killed whatever thread you had just left.
+for (const name of ["live", "offline"]) {
+	const file = path.join(workdir, `${name}.jsonl`);
+	if (!fs.existsSync(file)) fs.writeFileSync(file, "");
+}
+
+// A resident target attaches; the RPC session is never asked to morph.
+{
+	const nav = makeController();
+	const rpcRequests = [];
+	const liveFile = path.join(workdir, "live.jsonl");
+	nav.resolveHistorySession = async (sessionPath, sessionId) => ({ path: sessionPath, id: sessionId, cwd: workdir });
+	nav.ensureStarted = async () => {};
+	nav.client = {
+		request: async (cmd) => {
+			rpcRequests.push(cmd.type);
+			return { success: true, data: {} };
+		},
+	};
+	Object.defineProperty(nav, "state", { get: () => ({ sessionFile: path.join(workdir, "own.jsonl") }), configurable: true });
+	nav.cachedMessages = [{ role: "user", content: "still my own thread" }];
+	nav.sidecar = {
+		connected: true,
+		connect: async () => {},
+		dispose: () => {},
+		detach: async () => {},
+		list: async () => [{ activeSessionId: "h-live", sessionFile: liveFile }],
+		getMessages: async () => [],
+		getSessionStats: async () => ({}),
+		getState: async () => ({}),
+		attach: async () => ({
+			snapshot: {
+				summary: { activeSessionId: "h-live", sessionId: "h-live-uuid" },
+				state: { sessionId: "h-live-uuid" },
+				messages: [],
+			},
+		}),
+	};
+	posts.length = 0;
+	await nav.switchSession(liveFile, "live");
+	check("a resident target is attached", nav.attached?.activeSessionId === "h-live", JSON.stringify(nav.attached));
+	check("the running thread was never asked to switch into it", rpcRequests.length === 0, JSON.stringify(rpcRequests));
+	clearTimeout(nav.childrenTimer);
+	nav.clearReattachTimer?.();
+}
+
+// An offline file is created as a resident session and attached — the own
+// view's session is never asked to switch into it.
+{
+	const nav = makeController();
+	const rpcRequests = [];
+	const offlineFile = path.join(workdir, "offline.jsonl");
+	nav.resolveHistorySession = async (sessionPath, sessionId) => ({ path: sessionPath, id: sessionId, cwd: workdir });
+	nav.ensureStarted = async () => {};
+	nav.client = {
+		request: async (cmd) => {
+			rpcRequests.push(cmd.type);
+			return { success: true, data: {} };
+		},
+	};
+	Object.defineProperty(nav, "state", { get: () => ({ sessionFile: path.join(workdir, "own.jsonl") }), configurable: true });
+	nav.cachedMessages = [{ role: "user", content: "my running thread" }];
+	const created = [];
+	nav.sidecar = {
+		connected: true,
+		connect: async () => {},
+		dispose: () => {},
+		detach: async () => {},
+		list: async () => [],
+		create: async (payload) => {
+			created.push(payload);
+			return { activeSessionId: "h-new" };
+		},
+		attach: async () => ({
+			snapshot: {
+				summary: { activeSessionId: "h-new", sessionId: "h-new-uuid" },
+				state: { sessionId: "h-new-uuid" },
+				messages: [],
+			},
+		}),
+		getMessages: async () => [],
+		getSessionStats: async () => ({}),
+		getState: async () => ({}),
+	};
+	posts.length = 0;
+	await nav.switchSession(offlineFile, "offline");
+	check("an offline file is resumed by daemon create", created.length === 1, JSON.stringify(rpcRequests));
+	check("the create carries the saved file", created[0]?.sessionPath === offlineFile, JSON.stringify(created[0]));
+	check("the resumed session is attached", nav.attached?.activeSessionId === "h-new", JSON.stringify(nav.attached));
+	check("no legacy switch_session ever fired", rpcRequests.length === 0, JSON.stringify(rpcRequests));
+	clearTimeout(nav.childrenTimer);
+	nav.clearReattachTimer?.();
+}
+
+// When the daemon channel itself is gone, a running thread must NOT be
+// sacrificed to satisfy the click — only a virgin chat may take the legacy
+// in-place switch. The old code switched first and asked never.
+{
+	const nav = makeController();
+	nav.resolveHistorySession = async (sessionPath, sessionId) => ({ path: sessionPath, id: sessionId, cwd: workdir });
+	nav.ensureStarted = async () => {};
+	const rpcRequests = [];
+	nav.client = {
+		request: async (cmd) => {
+			rpcRequests.push(cmd.type);
+			return { success: true, data: {} };
+		},
+	};
+	Object.defineProperty(nav, "state", { get: () => ({ sessionFile: path.join(workdir, "own.jsonl") }), configurable: true });
+	nav.cachedMessages = [{ role: "user", content: "precious" }];
+	nav.streaming = true;
+	nav.sidecar = {
+		connected: false,
+		connect: async () => {
+			throw new Error("daemon socket closed");
+		},
+		dispose: () => { this.connected = false; },
+	};
+	posts.length = 0;
+	await nav.switchSession(path.join(workdir, "offline.jsonl"), "offline");
+	check("a running thread is never sacrificed, even when the daemon is gone", rpcRequests.length === 0, JSON.stringify(rpcRequests));
+	check(
+		"the operator is told the thread was spared",
+		notices().some((t) => /left running, untouched/i.test(t)),
+		JSON.stringify(notices().slice(-2)),
+	);
+	clearTimeout(nav.childrenTimer);
+	nav.clearReattachTimer?.();
+}
 
 // --- onSidecarClosed: shutdown vs update, attached and mid-ladder ------------
 const closer = makeController();
