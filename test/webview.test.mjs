@@ -476,6 +476,52 @@ posted.length = 0;
 document.querySelector(".subagents-strip .subagents-back-row").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("back-row click posts backToParent", posted.some((m) => m.type === "backToParent"));
 
+// --- subagent ordering: newest work on top -----------------------------------
+// The daemon's roster is written oldest-first, and a fan-out buries whatever
+// spawned last — the live subagent that is most likely running right now —
+// under ten finished receipts. Live rows and the historical group both order
+// newest-created first; equal or missing stamps keep roster order.
+{
+	hostMessage({
+		type: "sessionChildren",
+		children: [
+			{ id: "c-old", activeSessionId: "ord-c-old", name: "first-spawned", runtimeKind: "subagent", status: "running", created: "2026-09-21T10:00:00.000Z" },
+			{ id: "c-new", activeSessionId: "ord-c-new", name: "last-spawned", runtimeKind: "subagent", status: "idle", created: "2026-09-21T10:05:00.000Z" },
+			{ id: "c-done-older", activeSessionId: "ord-done-older", name: "finished-earlier", runtimeKind: "subagent", status: "inactive", created: "2026-09-21T09:00:00.000Z" },
+			{ id: "c-done-newer", activeSessionId: "ord-done-newer", name: "finished-latest", runtimeKind: "subagent", status: "inactive", created: "2026-09-21T09:30:00.000Z" },
+			{ id: "c-mid", activeSessionId: "ord-c-mid", name: "middle-one", runtimeKind: "subagent", status: "running", created: "2026-09-21T10:02:00.000Z" },
+		],
+	});
+	// The strip's expanded flag is whatever earlier sections left: only click
+	// to open it when no rows are visible, so this check stands on its own.
+	if (document.querySelectorAll(".subagents-list .subagent-row").length === 0) {
+		document.querySelector(".subagents-header")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	}
+const liveOrder = [...document.querySelectorAll(".subagents-list:not(.historical) .subagent-name")].map((n) => n.textContent);
+	check("live subagents order newest-created first",
+		liveOrder.join(" > ") === "last-spawned > middle-one > first-spawned",
+		liveOrder.join(" > "));
+	// Open the strip's historical fold before counting its rows — the header can
+	// only hide finished rows, it cannot reorder the live ones.
+	const histHeadNow = [...document.querySelectorAll(".subagents-subhead")].find((b) => b.textContent.includes("Historical")) ?? document.querySelector(".subagents-subhead");
+	histHeadNow?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	const histOrder = [...document.querySelectorAll(".subagents-list.historical .subagent-name")].map((n) => n.textContent);
+	check("finished subagents order newest-created first",
+		histOrder.join(" > ") === "finished-latest > finished-earlier",
+		histOrder.join(" > "));
+	// Unknown stamps keep the daemon's own order (roster), never crash.
+	hostMessage({
+		type: "sessionChildren",
+		children: [
+			{ id: "noa", activeSessionId: "ord-noa", name: "no-stamp-a", runtimeKind: "subagent", status: "idle" },
+			{ id: "nob", activeSessionId: "ord-nob", name: "no-stamp-b", runtimeKind: "subagent", status: "idle" },
+		],
+	});
+	const fallbackOrder = [...document.querySelectorAll(".subagents-list:not(.historical) .subagent-name")].map((n) => n.textContent);
+	check("no stamps keeps the daemon order", fallbackOrder.join(" > ") === "no-stamp-a > no-stamp-b", fallbackOrder.join(" > "));
+}
+
+
 // --- #34: once connected the splash is done for good. A dropout mid-conversation
 // may only move the status strip — a butterfly fading back over a live transcript
 // is exactly what the operator ruled out.
@@ -1984,6 +2030,32 @@ hostMessage({
 document.querySelector(".pr-subhead")?.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 check("an observed row claims no exit status", !document.querySelector(".pr-status"));
 check("an observed row offers no stop", !document.querySelector(".pr-kill"));
+// --- process ordering: newest work on top ------------------------------------
+// What "run ten jobs" makes of roster order: running oldest-first buries the
+// job the operator asked for seconds ago; finished oldest-first buries the
+// receipt they came to read.
+{
+	const now = Date.now();
+	hostMessage({
+		type: "processes",
+		processes: [
+			{ ref: "run-old", pid: 11, command: "job-started-first", fullCommand: "job-started-first", state: "running", startedMs: now - 120000 },
+			{ ref: "run-new", pid: 12, command: "job-just-started", fullCommand: "job-just-started", state: "running", startedMs: now - 5000 },
+			{ ref: "done-older", pid: 9, command: "receipt-earlier", fullCommand: "receipt-earlier", state: "exited", startedMs: now - 300000, endedMs: now - 240000 },
+			{ ref: "done-newer", pid: 10, command: "receipt-latest", fullCommand: "receipt-latest", state: "exited", startedMs: now - 90000, endedMs: now - 30000 },
+		],
+	});
+	const runOrder = [...document.querySelectorAll(".pr-list:not(.finished) .pr-command")].map((n) => n.textContent);
+	check("running jobs order newest-started first",
+		runOrder.join(" > ") === "job-just-started > job-started-first",
+		runOrder.join(" > "));
+	document.querySelector(".pr-subhead").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+	const doneOrder = [...document.querySelectorAll(".pr-list.finished .pr-command")].map((n) => n.textContent);
+	check("finished receipts order latest-finished first",
+		doneOrder.join(" > ") === "receipt-latest > receipt-earlier",
+		doneOrder.join(" > "));
+}
+
 
 console.log(failed === 0 ? "\nPASS webview harness" : `\n${failed} webview checks FAILED`);
 process.exit(failed === 0 ? 0 : 1);

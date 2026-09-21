@@ -389,6 +389,17 @@ function childStatus(child: SessionChild): "running" | "idle" | "inactive" {
 	return child.status ?? (child.isStreaming ? "running" : "idle");
 }
 
+/** ms timestamp of a roster `created` string; unknown sorts last, never breaks ties. */
+function childCreatedMs(child: SessionChild): number {
+	const ms = Date.parse(child.created ?? "");
+	return Number.isFinite(ms) ? ms : 0;
+}
+
+/** Newest first within a group. Stable, so equal/unknown stamps keep roster order. */
+function byNewest(a: SessionChild, b: SessionChild): number {
+	return childCreatedMs(b) - childCreatedMs(a);
+}
+
 function renderSubagentsStrip(): void {
 	subagentsStrip.textContent = "";
 	const parent = sessionParent;
@@ -404,10 +415,15 @@ function renderSubagentsStrip(): void {
 	// Finished subagents keep their own collapsed group: they are real work the
 	// operator can go back and read, but counting them as live is the drift that
 	// made the strip disagree with what is actually running.
+	// Newest-first inside every group: a fan-out that prints twelve subagents
+	// buries the two that just spawned (the ones that are live right now and
+	// matter) under ten finished receipts, and the FINISHED group has exactly
+	// the same trap — the world's least important receipt on top, the newest
+	// answer at the bottom of a folded scroll.
 	const live = (child: SessionChild): boolean => childStatus(child) !== "inactive";
-	const liveChildren = sessionChildren.filter(live);
-	const liveSiblings = siblings.filter(live);
-	const historical = [...sessionChildren, ...siblings].filter((child) => !live(child));
+	const liveChildren = sessionChildren.filter(live).sort(byNewest);
+	const liveSiblings = siblings.filter(live).sort(byNewest);
+	const historical = [...sessionChildren, ...siblings].filter((child) => !live(child)).sort(byNewest);
 	const liveCount = liveChildren.length + liveSiblings.length;
 
 	// Back row (separate, never part of the toggle) — always reliable.

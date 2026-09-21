@@ -53,6 +53,14 @@ function duration(ms: number): string {
 export class ProcessesPanel {
 	readonly root: HTMLElement;
 	private processes: SessionProcess[] = [];
+	/**
+	 * Where the reader was in each open preview pane, taken just before the
+	 * panel rebuilds. Rebuilds happen for new output AND on the live clock
+	 * tick, and a fresh pane always starts at scrollTop 0 — which is the
+	 * "refresh throws the reader to the top" bug. Scroll state is keyed by ref
+	 * so the right pane gets it back on the very next frame.
+	 */
+	private previewScroll = new Map<string, { top: number; bottom: boolean }>();
 	private expanded = false;
 	/** A collapse by hand is an instruction; it survives until they open it again. */
 	private autoExpandSuppressed = false;
@@ -86,6 +94,7 @@ export class ProcessesPanel {
 			if (!processes.some((entry) => entry.ref === ref)) {
 				this.openRefs.delete(ref);
 				this.previews.delete(ref);
+				this.previewScroll.delete(ref);
 			}
 		}
 		this.syncTicker();
@@ -115,14 +124,51 @@ export class ProcessesPanel {
 		}
 	}
 
+	/** Keep a reader-centered scroll story in panes that crash to scrollTop=0 on rebuild. */
+	private captureScrollState(): void {
+		this.root.querySelectorAll(".pr-output").forEach((pane) => {
+			const ref = pane.closest<HTMLElement>(".pr-item")?.dataset.ref;
+			if (!ref) return;
+			const bottom = pane.scrollHeight > pane.clientHeight && pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 6;
+			this.previewScroll.set(ref, { top: pane.scrollTop, bottom });
+		});
+	}
+
+	/**
+	 * Scroll the preview pane to where the reader was. If the reader was AT
+	 * the bottom — the position that means "follow output as it grows" — keep
+	 * them there as the log grows. Anything else: keep them reading the same
+	 * lines while output arrives beneath. A pane this ref has never known
+	 * presents from the bottom, which is where a log's interesting part lives.
+	 */
+	private restoreScrollState(): void {
+		this.root.querySelectorAll(".pr-output").forEach((pane) => {
+			const ref = pane.closest<HTMLElement>(".pr-item")?.dataset.ref;
+			if (!ref) return;
+			const saved = this.previewScroll.get(ref);
+			pane.scrollTop = saved ? (saved.bottom ? pane.scrollHeight : Math.min(saved.top, pane.scrollHeight)) : pane.scrollHeight;
+		});
+	}
+
 	private render(): void {
 		const root = this.root;
+		// Full rebuilds lose every scrollTop; remember per-pane state FIRST so
+		// the restore at the end of this function is reading, never guessing.
+		this.captureScrollState();
 		root.textContent = "";
 		root.classList.toggle("visible", this.processes.length > 0);
 		if (this.processes.length === 0) return;
 
-		const running = this.processes.filter((entry) => entry.state === "running");
-		const finished = this.processes.filter((entry) => entry.state !== "running");
+		// Newest work on top in both groups: a thread that fans out a dozen jobs
+		// buries the one it just started under ten scroll rows of minutes-old
+		// bookkeeping otherwise. Finished rows order by when they WENT finished —
+		// the receipt the operator most likely came looking for is the latest one.
+		const running = this.processes
+			.filter((entry) => entry.state === "running")
+			.sort((a, b) => b.startedMs - a.startedMs);
+		const finished = this.processes
+			.filter((entry) => entry.state !== "running")
+			.sort((a, b) => (b.endedMs ?? b.startedMs) - (a.endedMs ?? a.startedMs));
 
 		const header = el("button", "pr-header") as HTMLButtonElement;
 		const parts: string[] = [];
@@ -169,10 +215,15 @@ export class ProcessesPanel {
 				root.appendChild(list);
 			}
 		}
+		// Rebuilds read from the map the capture pass wrote; panes get their
+		// rows' scroll back even though the DOM carried them a second ago is
+		// gone. A pane with no prior state opens scrolled to its tail.
+		this.restoreScrollState();
 	}
 
 	private renderRow(entry: SessionProcess): HTMLElement {
 		const wrap = el("div", "pr-item");
+		wrap.dataset.ref = entry.ref;
 		const open = this.openRefs.has(entry.ref);
 		const row = el("div", `pr-row${entry.state === "running" ? " running" : ""}`);
 		row.setAttribute("role", "button");
