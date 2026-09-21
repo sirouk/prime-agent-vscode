@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.38]
+
 - **Subagents and Processes order newest-first, and a running job's output no longer throws the reader around.** A fan-out's own roster is written oldest-first: as the thread spawns subagents, whatever just started — the live one most likely to matter — surfaces at the BOTTOM of the strip, under receipts of subagents done ten minutes ago. The Processes panel has the same trap: a second-out job hides under a dozen entries that finished before lunch. Both groups now order newest-work first within their own sections: live subagents by creation time (the ones actually still going float to the top), finished subagents by the same stamp, running jobs by start time, finished jobs by end time. Rows whose stamps never arrive keep the daemon's own order rather than sorting blindly. And a refresh or a fresh frame of an expanded process output no longer throws the reader to the TOP of the pane. The panel rebuilds its DOM on every new row and on the per-second elapsed tick, and a rebuilt pane starts at scrollTop 0 — the 'can't read my own logs past the header line' symptom. Each open preview pane now records where the reader was (per job, keyed by ref) just before the rebuild; if the reader was at the bottom, output keeps following and the view sticks to the tail; if the reader was mid-log, the same lines stay in view while output accumulates beneath. A pane that just opened starts at the tail of the log, which is where the interesting part almost always is.
 
 
@@ -343,7 +345,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.37...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.38...HEAD
+[1.0.38]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.37...v1.0.38
 [1.0.37]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.36...v1.0.37
 [1.0.36]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.35...v1.0.36
 [1.0.35]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.34...v1.0.35
