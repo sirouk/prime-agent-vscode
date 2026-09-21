@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.36]
+
 - **Switching threads no longer kills the thread you left.** Navigating between history sessions was routed through the daemon's `switch_session` envelope, and the engine answers that by DISPOSING the resident session — aborts the turn mid-stream, cancels every RLM child with "Parent session disposed", tears the kernel down — then loads the clicked file in its place. One click of curiosity was an execution order for the thread you were just reading. History navigation now works the way the CLI's daemon attach always did: a session already live in the daemon is attached to, a saved one is resumed under a FRESH resident worker (`create` with its file), and whatever you had running keeps right on running in the background. Clicking back and forth between threads is a view change, not a fire. If the daemon channel is genuinely unavailable the legacy in-place switch survives only for a virgin, never-used chat — a running thread is never sacrificed to a click, and the notice says so. Verified by the roster-parity suite (eight navigation checks that lock the no-switch invariant against the command journal) and the full live battery against 0.9.5: daemon parity, owned roster, host e2e, and smoke all green.
 
 ## [1.0.35]
@@ -334,7 +336,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.35...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.36...HEAD
+[1.0.36]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.35...v1.0.36
 [1.0.35]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.34...v1.0.35
 [1.0.34]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.33...v1.0.34
 [1.0.33]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.32...v1.0.33
