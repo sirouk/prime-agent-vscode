@@ -45,6 +45,24 @@ function lastTextNode(root: HTMLElement): Text | null {
 	return last;
 }
 
+/**
+ * The collapsed tool row reads the word "ipython" on every python-fluent card,
+ * and in a kernel-heavy thread that single word eats the row's breathing room
+ * for zero information — the dot already carries running/done, the summary
+ * carries what the cell did. So the ipython name in the COLLAPSED header is a
+ * kind glyph: a snake for python, a terminal for a %%bash cell. Hover still
+ * says "ipython", and the expanded body keeps the word spelled out. Any other
+ * tool keeps its text name.
+ */
+function toolHeaderName(name: string, kind: string): HTMLSpanElement {
+	if (name !== "ipython") return el("span", "tool-name", name);
+	const span = el("span", "tool-glyph");
+	span.title = name;
+	span.setAttribute("aria-label", name);
+	span.appendChild(icon(kind === "shell" ? "terminal" : "python", 12));
+	return span;
+}
+
 function toolView(name: string, args: Record<string, unknown>): ToolView {
 	const code = args?.code;
 	if (name === "ipython" && typeof code === "string") {
@@ -140,6 +158,8 @@ const PRUNE_TO = 400;
 interface ToolBlock {
 	root: HTMLElement;
 	chevron: SVGSVGElement;
+	/** Kind glyph in place of a text name (ipython cells), swapped when args change the kind. */
+	glyph: HTMLSpanElement | null;
 	summary: HTMLElement;
 	pill: HTMLElement;
 	body: HTMLElement;
@@ -1528,6 +1548,14 @@ export class Transcript {
 		section.textContent = "";
 		const inputHead = el("div", "tool-section-head");
 		inputHead.appendChild(el("span", "", view.label));
+		// The collapsed header advertises ipython as a glyph; the expanded body is
+		// where the word itself belongs. First span stays view.label for the
+		// semantic checks.
+		if (name === "ipython" && view.label !== "ipython") {
+			const realName = el("span", "tool-realname", name);
+			realName.title = "The tool call is ipython";
+			inputHead.appendChild(realName);
+		}
 		inputHead.appendChild(this.makeCopyButton(view.input));
 		section.appendChild(inputHead);
 
@@ -1575,6 +1603,12 @@ export class Transcript {
 		if (view.input.length <= block.renderedInputLen) return;
 		block.renderedInputLen = view.input.length;
 		block.summary.textContent = this.toolSummary(name, args);
+		if (block.glyph && block.root.dataset.toolKind !== view.kind) {
+			// Args streamed in after the card was born as opaquely "ipython":
+			// the kind icon must follow what the cell now provably is.
+			block.glyph.textContent = "";
+			block.glyph.appendChild(icon(view.kind === "shell" ? "terminal" : "python", 12));
+		}
 		block.root.dataset.toolKind = view.kind;
 		block.root.dataset.toolLang = view.lang;
 		// Repainting the call replaces the <pre>; if the card is open and someone is
@@ -1599,7 +1633,8 @@ export class Transcript {
 		const chevron = icon("chevron", 13);
 		chevron.classList.add("tool-chevron");
 		const statusDot = el("span", "tool-dot running");
-		const nameEl = el("span", "tool-name", name);
+		const initialView = toolView(name, args);
+		const nameEl = toolHeaderName(name, initialView.kind);
 		const summary = el("span", "tool-summary", this.toolSummary(name, args));
 		const pill = el("span", "tool-pill", "running");
 		const copyAllBtn = el("button", "uf-icon tool-copy-all") as HTMLButtonElement;
@@ -1625,6 +1660,7 @@ export class Transcript {
 		const block: ToolBlock = {
 			root,
 			chevron,
+			glyph: nameEl.classList.contains("tool-glyph") ? nameEl : null,
 			summary,
 			pill,
 			body,

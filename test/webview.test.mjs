@@ -133,6 +133,37 @@ check("plain python cell stays a python card, summarised by its real work",
 	!!pyCard && pyCard.querySelector(".tool-summary").textContent === "git status",
 	pyCard?.querySelector(".tool-summary")?.textContent ?? "<none>");
 
+// --- no word salad: the collapsed row carries a glyph, not the word "ipython" --
+// Kernel-heavy threads stack rows of `ipython` x N; the dot carries the state, the
+// summary carries the work, the word only belongs expanded. The glyph flips with
+// the kind (snake -> terminal when a %%bash cell arrives mid-stream).
+{
+	const shellGlyph = shellCard?.querySelector(".tool-toggle .tool-glyph");
+	const pyGlyph = pyCard?.querySelector(".tool-toggle .tool-glyph");
+	check("a shell card's row shows a glyph, not the word ipython",
+		!!shellGlyph && !shellCard.querySelector(".tool-toggle .tool-name"),
+		shellCard?.querySelector(".tool-toggle")?.textContent ?? "<none>");
+	check("a python card's row shows a glyph, not the word ipython",
+		!!pyGlyph && !pyCard.querySelector(".tool-toggle .tool-name"),
+		pyCard?.querySelector(".tool-toggle")?.textContent ?? "<none>");
+	check("a shell row's glyph is the terminal prompt", !!shellGlyph?.querySelector("svg"));
+	check("a python row's glyph is the snake", !!pyGlyph?.querySelector("svg"));
+	check("hover still says ipython (shell)", shellGlyph?.title === "ipython", shellGlyph?.title ?? "<none>");
+	check("hover still says ipython (python)", pyGlyph?.title === "ipython", pyGlyph?.title ?? "<none>");
+	check("the glyph is also announced accessibly", shellGlyph?.getAttribute("aria-label") === "ipython");
+	// Expanded is where the word belongs (next to the semantic label).
+	check("the expanded body still spells ipython on a shell card",
+		shellCard?.querySelector(".tool-section-head .tool-realname")?.textContent === "ipython",
+		shellCard?.querySelector(".tool-section-head")?.textContent ?? "<none>");
+	check("the expanded body still spells ipython on a python card",
+		pyCard?.querySelector(".tool-section-head .tool-realname")?.textContent === "ipython",
+		pyCard?.querySelector(".tool-section-head")?.textContent ?? "<none>");
+	// Other tools keep their text name.
+	const anyEditCard = [...scroller.querySelectorAll(".tool")].find((t) => t.dataset.toolName === "edit");
+	check("non-ipython tools keep their text name",
+		!!anyEditCard?.querySelector(".tool-toggle .tool-name") && !anyEditCard?.querySelector(".tool-toggle .tool-glyph"));
+}
+
 // copy of a shell card fences as bash, without the decorative $ prompt
 let clipboard = "";
 Object.defineProperty(window.navigator, "clipboard", {

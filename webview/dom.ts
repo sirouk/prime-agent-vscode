@@ -65,6 +65,15 @@ export const icons = {
 	],
 	check: ["M4.5 12.5 10 18 19.5 6.5"],
 	spark: ["M12 3.5v3.5", "M12 17v3.5", "M3.5 12H7", "M17 12h3.5", "M6 6l2.2 2.2", "M15.8 15.8 18 18", "M6 18l2.2-2.2", "M15.8 8.2 18 6"],
+	/** Strokes echo the python logo's two interlocked snakes, in this set's line style. */
+	python: [
+		"M12.5 3.5h2.5c1.5 0 2.7 1.2 2.7 2.7v4c0 1.5-1.2 2.7-2.7 2.7H8",
+		"M11.5 20.5H9c-1.5 0-2.7-1.2-2.7-2.7v-4c0-1.5 1.2-2.7 2.7-2.7H16",
+		"M14.6 6.1h.01",
+		"M9.4 17.9h.01",
+	],
+	/** Feather's terminal prompt, for cells whose python was only a shell launcher. */
+	terminal: ["m4 17 6-6-6-6", "m12 19h8"],
 	diff: ["M14 4H4v16h16V10", "M14 4l6 6", "M8.5 13.5h7", "M8.5 17h4.5"],
 	external: ["M14 4h6v6", "M20 4 11 13", "M18 13.5V20H4V6h6.5"],
 	clock: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M12 7v5.2l3.2 2"],

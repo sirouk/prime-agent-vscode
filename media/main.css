@@ -703,6 +703,27 @@ details.thinking .thinking-body {
 	color: var(--pa-accent);
 }
 
+/* Kind glyph used in place of the "ipython" word on a collapsed row. */
+.tool-glyph {
+	display: inline-flex;
+	align-items: center;
+	color: var(--pa-accent);
+	flex: none;
+	line-height: 0;
+}
+
+/* The spelled-out tool name inside the EXPANDED body head. */
+.tool-realname {
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 9.5px;
+	font-weight: 600;
+	color: var(--pa-accent-dim);
+	border: 1px solid var(--pa-border-faint, var(--pa-border));
+	border-radius: 3px;
+	padding: 0 4px;
+	margin-left: 6px;
+}
+
 .tool-summary {
 	font-family: var(--vscode-editor-font-family, monospace);
 	font-size: 10.5px;
