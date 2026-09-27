@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.39]
+
 - **The image gate follows the agent's current model catalog.** The composer decided whether a model takes images from a model list fetched once, when the chat view opened, so a catalog that changed afterwards (an `/endpoints refresh`, a sign-in, a gateway that started reporting image input) kept pastes, drops and Image… refused with "Current model is text-only" until the window reloaded. The list is now fetched again after every slash command, at each session boundary and whenever the model menu opens, and an image the cached list refuses waits for a fresh list before the text-only verdict stands. An open attach menu redraws in place when the answer changes. These background refreshes stay quiet while you are watching another session.
 
 ## [1.0.38]
@@ -347,7 +349,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.38...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.39...HEAD
+[1.0.39]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.38...v1.0.39
 [1.0.38]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.37...v1.0.38
 [1.0.37]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.36...v1.0.37
 [1.0.36]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.35...v1.0.36
