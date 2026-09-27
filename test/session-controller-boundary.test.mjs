@@ -439,6 +439,47 @@ controller.ensureStarted = originalEnsureStarted;
 	controller.ensureStarted = originalEnsureStarted;
 }
 
+// Slash commands such as /endpoints refresh change the agent's model catalog,
+// and the composer's image gate reads the list this view holds.
+{
+	const commands = [];
+	controller.client = {
+		running: true,
+		request: async (command) => {
+			commands.push(command);
+			if (command.type === "get_available_models") {
+				return { success: true, data: { models: [{ provider: "max", id: "claude", input: ["text", "image"] }] } };
+			}
+			return { success: true, data: {} };
+		},
+	};
+	controller.ensureStarted = async () => {};
+	controller.streaming = false;
+	posts.length = 0;
+	await controller.prompt({ text: "/endpoints refresh max", images: [], selections: [], streamingBehavior: "steer" });
+	await new Promise((resolve) => setImmediate(resolve));
+	check(
+		"a slash command re-sends the agent's model catalog to the view",
+		posts.some((message) => message.type === "models" && message.models[0]?.input?.includes("image")),
+		JSON.stringify(commands.map((command) => command.type)),
+	);
+	commands.length = 0;
+	await controller.prompt({ text: "plain words", images: [], selections: [], streamingBehavior: "steer" });
+	await new Promise((resolve) => setImmediate(resolve));
+	check("an ordinary prompt does not re-query the model catalog", !commands.some((command) => command.type === "get_available_models"),
+		JSON.stringify(commands.map((command) => command.type)));
+
+	controller.observingId = "observed-for-quiet-refresh";
+	posts.length = 0;
+	await controller.listModels({ quiet: true });
+	check("a refresh the operator did not ask for stays silent while watching another session",
+		!posts.some((message) => message.type === "notice"), JSON.stringify(posts));
+	await controller.listModels();
+	check("an explicit model listing still explains why it is refused", posts.some((message) => message.type === "notice"));
+	controller.observingId = null;
+	controller.ensureStarted = originalEnsureStarted;
+}
+
 // Restart must not merely await the startup it just stopped. The old coalesced
 // promise has to settle first, then a fresh ensureStarted call creates the
 // replacement process.

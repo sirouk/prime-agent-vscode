@@ -819,20 +819,21 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** Block operations that would otherwise silently address the hidden RPC session. */
-	private guardObservedReadOnly(action: string): boolean {
+	/** Why this view cannot act for the operator right now, if it cannot. */
+	private readOnlyReason(action: string): string | undefined {
 		if (this.attached && this.attachedEpoch !== this.viewEpoch) {
-			this.broadcast({ type: "notice", level: "warning", text: `Please wait for the session switch to finish before ${action}.` });
-			return true;
+			return `Please wait for the session switch to finish before ${action}.`;
 		}
-		if (!this.observingId && !this.observationRestoring) return false;
-		this.broadcast({
-			type: "notice",
-			level: "warning",
-			text: this.observationRestoring
-				? `Please wait while your session view is restored before ${action}.`
-				: `You are watching another live session read-only. Stop watching it before ${action}.`,
-		});
-		return true;
+		if (!this.observingId && !this.observationRestoring) return undefined;
+		return this.observationRestoring
+			? `Please wait while your session view is restored before ${action}.`
+			: `You are watching another live session read-only. Stop watching it before ${action}.`;
+	}
+
+	private guardObservedReadOnly(action: string): boolean {
+		const reason = this.readOnlyReason(action);
+		if (reason) this.broadcast({ type: "notice", level: "warning", text: reason });
+		return reason !== undefined;
 	}
 
 	private isCurrentAttachment(attached: AttachRef): boolean {
@@ -986,6 +987,7 @@ export class SessionController implements vscode.Disposable {
 				await sidecar.prompt(attached.activeSessionId, text, behavior, images);
 				if (!this.isCurrentAttachment(attached)) return;
 				this.broadcast({ type: "promptAccepted", kind: "prompt" });
+				this.refreshModelsAfterCommand(payload);
 			} catch (err) {
 				if (this.isCurrentAttachment(attached)) this.rejectPrompt(payload, err instanceof Error ? err.message : "daemon prompt failed", reply);
 			}
@@ -1051,6 +1053,7 @@ export class SessionController implements vscode.Disposable {
 			this.output.appendLine(`[prime-agent] prompt response: success=${response.success}`);
 			if (response.success) {
 				this.broadcast({ type: "promptAccepted", kind });
+				this.refreshModelsAfterCommand(payload);
 			} else {
 				this.rejectPrompt(payload, response.error ?? "prompt rejected", reply);
 			}
@@ -1061,6 +1064,18 @@ export class SessionController implements vscode.Disposable {
 			this.output.appendLine("[prime-agent] prompt request failed");
 			this.rejectPrompt(payload, error, reply);
 		}
+	}
+
+	/**
+	 * Slash commands such as /endpoints, /login and /model change the agent's model
+	 * catalog, and the composer's image gate and model menu read the list this view
+	 * holds, so a command sends it again.
+	 */
+	private refreshModelsAfterCommand(payload: PromptPayload): void {
+		if (!payload.text.trimStart().startsWith("/")) return;
+		this.listModels({ quiet: true }).catch((err) => {
+			this.debugLog.append(`model list refresh after a command failed: ${err instanceof Error ? err.message : String(err)}`);
+		});
 	}
 
 	private composeMessageText(payload: PromptPayload): string {
@@ -1824,8 +1839,9 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
-	async listModels(): Promise<void> {
-		if (this.guardObservedReadOnly("listing models")) return;
+	/** `quiet` is for refreshes the operator did not ask for: they skip without a notice. */
+	async listModels(options: { quiet?: boolean } = {}): Promise<void> {
+		if (options.quiet ? this.readOnlyReason("listing models") !== undefined : this.guardObservedReadOnly("listing models")) return;
 		const attached = this.attached;
 		if (attached) {
 			try {

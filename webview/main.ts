@@ -233,6 +233,7 @@ const composerDeps = {
 	onAttachSelection: () => post({ type: "attachSelection" }),
 	onAttachActiveFile: () => post({ type: "attachActiveFile" }),
 	onSetModel: (provider: string, modelId: string) => post({ type: "setModel", provider, modelId }),
+	onRequestModels: () => post({ type: "requestModels" }),
 	onSetThinking: (level: string) => post({ type: "setThinkingLevel", level }),
 	onToggleFavorite: (provider: string, modelId: string) => post({ type: "toggleFavoriteModel", provider, modelId }),
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => post({ type: "openFile", path, startLine, endLine }),
@@ -665,6 +666,9 @@ function adoptAuthoritativeSession(sessionId: string | undefined): boolean {
 	// `ready` — i.e. once per webview. Whoever discards it has to ask again, or
 	// the "/" menu is empty for every thread after the first one opened here.
 	post({ type: "requestCommands" });
+	// The thread may run in another worker whose extensions registered models
+	// this view has never seen, and the image gate reads that list.
+	post({ type: "requestModels" });
 	return true;
 }
 

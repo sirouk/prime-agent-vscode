@@ -270,17 +270,20 @@ check("live badge", document.querySelector(".live-label").textContent === "live"
 check("context meter labeled", document.querySelector(".context-label").textContent.includes("262k"));
 
 // --- model menu with favorites ---
-hostMessage({
-	type: "models",
-	models: [
-		{ provider: "chutes", id: "kimi", contextWindow: 262144, reasoning: true, input: ["text", "image"] },
-		{ provider: "chutes", id: "glm", contextWindow: 131072, reasoning: false, input: ["text"] },
-		{ provider: "openai", id: "gpt-5", contextWindow: 400000, reasoning: true, input: ["text", "image"] },
-	],
-});
+const baseModels = [
+	{ provider: "chutes", id: "kimi", contextWindow: 262144, reasoning: true, input: ["text", "image"] },
+	{ provider: "chutes", id: "glm", contextWindow: 131072, reasoning: false, input: ["text"] },
+	{ provider: "openai", id: "gpt-5", contextWindow: 400000, reasoning: true, input: ["text", "image"] },
+];
+/** The same catalog with glm taking images, as after an endpoint refresh. */
+const glmSeesImages = baseModels.map((model) => (model.id === "glm" ? { ...model, input: ["text", "image"] } : model));
+hostMessage({ type: "models", models: baseModels });
 hostMessage({ type: "favorites", favorites: [{ provider: "chutes", modelId: "kimi" }] });
 const modelBtn = [...document.querySelectorAll(".rail-pill.model")][0];
+posted.length = 0;
 modelBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+check("opening the model menu asks for the agent's current catalog", posted.some((m) => m.type === "requestModels"),
+	JSON.stringify(posted.map((m) => m.type)));
 const dropdown = document.querySelector(".dropdown");
 check("model menu opens", !!dropdown);
 check("model menu has search", !!dropdown.querySelector(".dropdown-search"));
@@ -343,11 +346,19 @@ document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubb
 // --- unified attach menu (vision-gated image item on a text model) ---
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 const attachBtn = [...document.querySelectorAll(".composer-rail .icon-btn")].find((b) => b.title.startsWith("Attach"));
+posted.length = 0;
 attachBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
 const attachMenu = document.querySelector(".dropdown");
 check("attach menu opens", !!attachMenu);
 const imageItem = [...attachMenu.querySelectorAll(".dropdown-item")].find((r) => r.textContent.includes("Image"));
 check("image item disabled on text-only model", imageItem.className.includes("disabled"));
+check("a text-only verdict in the attach menu asks for a fresh catalog", posted.some((m) => m.type === "requestModels"),
+	JSON.stringify(posted.map((m) => m.type)));
+hostMessage({ type: "models", models: glmSeesImages });
+const refreshedImageItem = [...document.querySelectorAll(".dropdown .dropdown-item")].find((r) => r.textContent.includes("Image"));
+check("the open attach menu enables Image… once the fresh catalog says the model takes images",
+	!!refreshedImageItem && !refreshedImageItem.className.includes("disabled"), refreshedImageItem?.className ?? "<no item>");
+hostMessage({ type: "models", models: baseModels });
 document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 
 // --- composer send ---
@@ -1401,6 +1412,9 @@ hostMessage({ type: "status", status: { ...baseStatus, sessionId: "session-bound
 check("a session boundary re-requests the slash catalog it just discarded",
 	posted.some((message) => message.type === "requestCommands"),
 	JSON.stringify(posted.map((message) => message.type)));
+check("a session boundary re-requests the model catalog the image gate reads",
+	posted.some((message) => message.type === "requestModels"),
+	JSON.stringify(posted.map((message) => message.type)));
 hostMessage({ type: "commands", commands: [
 	{ name: "compact", description: "Compact the context" },
 	{ name: "security-pipeline", description: "Run the security review" },
@@ -1410,12 +1424,16 @@ textarea.value = "";
 textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
 
 // --- paste image on a text-only model shows a composer hint ---
+// The view's catalog can lag the agent's, so the verdict waits for a fresh one.
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
 posted.length = 0;
 const pasteEvent = new window.Event("paste", { bubbles: true, cancelable: true });
 // happy-dom has no DataTransfer-backed ClipboardEvent; inject the shape onPaste reads.
 pasteEvent.clipboardData = { files: [{ type: "image/png", name: "shot.png" }] };
 textarea.dispatchEvent(pasteEvent);
+check("a paste the cached catalog refuses asks for a fresh catalog first",
+	posted.filter((m) => m.type === "requestModels").length === 1, JSON.stringify(posted.map((m) => m.type)));
+hostMessage({ type: "models", models: baseModels });
 const pasteHint = document.querySelector(".composer-hint");
 check(
 	"paste image on text-only model shows hint",
@@ -1429,9 +1447,23 @@ posted.length = 0;
 hostMessage({ type: "status", status: { ...baseStatus } });
 const textOnlyImageRequest = requestImageFromPicker();
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
+posted.length = 0;
 hostMessage({ type: "imagePicked", requestId: textOnlyImageRequest.requestId, images: [{ data: "aGk=", mimeType: "image/png", name: "pic.png" }] });
+check("a picked image waits for a fresh catalog", posted.some((m) => m.type === "requestModels") &&
+	document.querySelectorAll(".composer-chips .compose-chip.image").length === 0);
+hostMessage({ type: "models", models: baseModels });
 check("image pick refused on text-only model", document.querySelectorAll(".composer-chips .compose-chip.image").length === 0);
 check("refusal hint visible", pasteHint.classList.contains("visible") && pasteHint.textContent.includes("text-only"), pasteHint.textContent);
+// A stale catalog: the agent's own says glm takes images, so the held image attaches.
+hostMessage({ type: "status", status: { ...baseStatus } });
+const staleCatalogImageRequest = requestImageFromPicker();
+hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
+hostMessage({ type: "imagePicked", requestId: staleCatalogImageRequest.requestId, images: [{ data: "aGk=", mimeType: "image/png", name: "fresh.png" }] });
+hostMessage({ type: "models", models: glmSeesImages });
+check("an image a stale catalog refused attaches once the fresh catalog accepts it",
+	document.querySelectorAll(".composer-chips .compose-chip.image").length === 1);
+document.querySelector(".composer-chips .compose-chip.image .chip-remove").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+hostMessage({ type: "models", models: baseModels });
 // switch back to a vision model: the chip now attaches
 hostMessage({ type: "status", status: { ...baseStatus } });
 const visionImageRequest = requestImageFromPicker();

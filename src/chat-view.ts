@@ -501,7 +501,8 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			await controller.refreshSnapshot();
 			return;
 		case "requestModels":
-			await controller.listModels();
+			// The webview asks on its own (menu opens, session boundaries, held images).
+			await controller.listModels({ quiet: true });
 			return;
 		case "requestCommands":
 			await controller.listCommands();

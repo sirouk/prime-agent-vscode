@@ -20,6 +20,8 @@ const MAX_IMAGES = 8;
 const MAX_IMAGE_BYTES = MAX_DECODED_IMAGE_BYTES;
 const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
+/** How long an image waits for a fresh model list before the text-only verdict stands. */
+const HELD_IMAGE_TIMEOUT_MS = 15_000;
 
 /** Decoded byte count without allocating an image-sized buffer in the webview. */
 function base64Bytes(value: string): number {
@@ -37,6 +39,7 @@ export interface ComposerDeps {
 	onAttachSelection: () => void;
 	onAttachActiveFile: () => void;
 	onSetModel: (provider: string, modelId: string) => void;
+	onRequestModels: () => void;
 	onSetThinking: (level: string) => void;
 	onToggleFavorite: (provider: string, modelId: string) => void;
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => void;
@@ -80,6 +83,8 @@ export class Composer {
 	private currentThinking = "off";
 	private reasoning = true;
 	private vision = false;
+	private heldImageAttachments: Array<() => void> = [];
+	private heldImageTimer: number | undefined;
 	private steerDefault: "steer" | "followUp" = "steer";
 	private modelMenu: Dropdown | null = null;
 	private thinkingMenu: Dropdown | null = null;
@@ -217,6 +222,8 @@ export class Composer {
 	setModels(models: RpcModel[]): void {
 		this.models = models;
 		this.updateReasoningState();
+		if (this.attachMenu?.isOpen()) this.attachMenu.show(this.attachMenuItems());
+		this.settleHeldImages();
 	}
 
 	setFavorites(favorites: ModelRef[]): void {
@@ -331,7 +338,17 @@ export class Composer {
 			this.attachMenu.hide();
 			return;
 		}
-		const items: DropdownItem[] = [
+		this.modelMenu?.hide();
+		this.thinkingMenu?.hide();
+		this.attachMenu = new Dropdown(anchor, {});
+		this.attachMenu.show(this.attachMenuItems());
+		// A stale list can disable Image… for a model that takes images; the fresh
+		// list redraws this menu in place (setModels).
+		if (!this.vision) this.deps.onRequestModels();
+	}
+
+	private attachMenuItems(): DropdownItem[] {
+		return [
 			{
 				label: "Mention a file in chat",
 				sub: "Type @ then search the workspace index",
@@ -350,10 +367,6 @@ export class Composer {
 				onSelect: () => this.deps.onPickImage(),
 			},
 		];
-		this.modelMenu?.hide();
-		this.thinkingMenu?.hide();
-		this.attachMenu = new Dropdown(anchor, {});
-		this.attachMenu.show(items);
 	}
 
 	private insertTextAtCaret(text: string): void {
@@ -620,7 +633,7 @@ export class Composer {
 	addImages(images: ImageAttachment[]): void {
 		if (images.length === 0) return;
 		if (!this.vision) {
-			this.showHint("Current model is text-only — switch to a vision model to attach images.");
+			this.whenVisionConfirmed(() => this.addImages(images));
 			return;
 		}
 		// Keep the fully synchronous accept path for everything the provider
@@ -730,6 +743,9 @@ export class Composer {
 	resetForSessionBoundary(): void {
 		window.clearTimeout(this.draftDebounce);
 		this.draftDebounce = undefined;
+		window.clearTimeout(this.heldImageTimer);
+		this.heldImageTimer = undefined;
+		this.heldImageAttachments = [];
 		window.clearTimeout(this.mentionDebounce);
 		this.mentionDebounce = undefined;
 
@@ -941,6 +957,10 @@ export class Composer {
 		this.attachMenu?.hide();
 		this.modelMenu = new Dropdown(this.modelBtn, { placeholder: "Search models…", maxHeight: 340 });
 		this.modelMenu.show(items);
+		// The agent's catalog changes under the view (endpoint refreshes, sign-ins).
+		// The open menu keeps its rows so a search in progress is not reset; the
+		// fresh list updates the image gate and the next opening.
+		this.deps.onRequestModels();
 	}
 
 	// ---- previous-prompt history (Up/Down from an empty composer) ----
@@ -1217,22 +1237,46 @@ export class Composer {
 		const imageFiles = Array.from(files).filter((f) => SUPPORTED_IMAGE_MIME_TYPES.has(f.type));
 		if (imageFiles.length === 0) return;
 		event.preventDefault();
-		if (!this.vision) {
-			this.showHint("Current model is text-only — switch to a vision model to attach images.");
-			return;
-		}
-		this.readImageFiles(imageFiles);
+		this.whenVisionConfirmed(() => this.readImageFiles(imageFiles));
 	}
 
 	private onDrop(event: DragEvent): void {
 		event.preventDefault();
 		const files = event.dataTransfer?.files;
 		if (!files) return;
+		const imageFiles = Array.from(files).filter((f) => SUPPORTED_IMAGE_MIME_TYPES.has(f.type));
+		if (imageFiles.length === 0) return;
+		this.whenVisionConfirmed(() => this.readImageFiles(imageFiles));
+	}
+
+	/**
+	 * Attaches when the current model takes images. The model list can be older
+	 * than the agent's, because an endpoint refreshed its models or a provider was
+	 * signed in, so an image the list refuses waits for a fresh list before the
+	 * operator is told the model is text-only.
+	 */
+	private whenVisionConfirmed(attach: () => void): void {
+		if (this.vision) {
+			attach();
+			return;
+		}
+		this.heldImageAttachments.push(attach);
+		if (this.heldImageAttachments.length > 1) return;
+		this.deps.onRequestModels();
+		this.heldImageTimer = window.setTimeout(() => this.settleHeldImages(), HELD_IMAGE_TIMEOUT_MS);
+	}
+
+	private settleHeldImages(): void {
+		if (this.heldImageAttachments.length === 0) return;
+		window.clearTimeout(this.heldImageTimer);
+		this.heldImageTimer = undefined;
+		const held = this.heldImageAttachments;
+		this.heldImageAttachments = [];
 		if (!this.vision) {
 			this.showHint("Current model is text-only — switch to a vision model to attach images.");
 			return;
 		}
-		this.readImageFiles(Array.from(files).filter((f) => SUPPORTED_IMAGE_MIME_TYPES.has(f.type)));
+		for (const attach of held) attach();
 	}
 
 	private readImageFiles(files: File[]): void {
