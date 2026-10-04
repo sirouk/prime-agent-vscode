@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.40]
+
 - **Prime Agent's native slash commands now work from the "/" menu.** The agent's `get_commands` lists only extension, prompt and skill commands, and its built-ins are executed by the terminal UI — so `/reload` and the rest never appeared in the menu, and typing one sent it to the model as ordinary text. The menu now offers `/new`, `/reload`, `/compact`, `/model`, `/effort`, `/export`, `/name`, `/resume`, plus `/refine`, `/goal` and `/autonomous`, which the agent itself runs from a prompt. Each of the first eight performs the action this panel already had for it instead of reaching the model, and a command the agent's own catalog defines under the same name is left to the agent. `/reload` reloads extensions, skills and prompts in place for a session attached through the daemon; for this window's own agent process, which has no reload request, it restarts the process and resumes the thread, refuses while a run is in progress, and refreshes the "/" and model menus afterwards. Terminal-only built-ins such as `/settings` and `/login` are still not offered, because nothing here can perform them.
 
 ## [1.0.39]
@@ -351,7 +353,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.39...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.40...HEAD
+[1.0.40]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.39...v1.0.40
 [1.0.39]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.38...v1.0.39
 [1.0.38]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.37...v1.0.38
 [1.0.37]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.36...v1.0.37
