@@ -490,6 +490,45 @@ export class SessionController implements vscode.Disposable {
 		await this.ensureStarted();
 	}
 
+	/**
+	 * `/reload`: pick up changed extensions, skills and prompts without losing the
+	 * thread. A daemon-resident session reloads in place. This window's own RPC
+	 * process has no reload verb and the daemon will not address it, so it is
+	 * restarted and the thread is resumed onto the fresh process.
+	 */
+	async reload(): Promise<void> {
+		if (this.guardObservedReadOnly("reloading")) return;
+		if (this.effectiveStreaming() || this.compacting) {
+			this.broadcast({ type: "notice", level: "warning", text: "Reloading would cut off the run in progress — stop it first, then run /reload." });
+			return;
+		}
+		const attached = this.attached;
+		if (attached) {
+			try {
+				const sidecar = await this.ensureSidecar();
+				await sidecar.request({ type: "reload", activeSessionId: attached.activeSessionId }, 60_000);
+			} catch (err) {
+				if (this.isCurrentAttachment(attached)) {
+					this.broadcast({ type: "notice", level: "error", text: `Reload failed: ${err instanceof Error ? err.message : String(err)}` });
+				}
+				return;
+			}
+			if (!this.isCurrentAttachment(attached)) return;
+		} else {
+			const sessionFile = this.state?.sessionFile;
+			const sessionId = this.state?.sessionId ?? (sessionFile ? path.basename(sessionFile, ".jsonl") : undefined);
+			// An empty thread has nothing to resume, and is not in history to resume from.
+			const resume = sessionFile && sessionId && (this.state?.messageCount ?? 0) > 0 ? { sessionFile, sessionId } : null;
+			await this.restart();
+			if (this.disposed) return;
+			if (resume) await this.switchSession(resume.sessionFile, resume.sessionId);
+		}
+		this.broadcast({ type: "notice", level: "info", text: "Reloaded extensions, skills and prompts." });
+		await Promise.all([this.listCommands(), this.listModels({ quiet: true })]).catch((err) => {
+			this.debugLog.append(`catalog refresh after reload failed: ${err instanceof Error ? err.message : String(err)}`);
+		});
+	}
+
 	stop(): void {
 		this.intentionalStop = true;
 		this.startGeneration += 1;

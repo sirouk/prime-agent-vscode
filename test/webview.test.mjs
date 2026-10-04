@@ -1406,7 +1406,7 @@ const slashItems = () => {
 	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
 	return [...document.querySelectorAll(".ac-item")].map((item) => item.textContent.trim());
 };
-check("slash menu lists the agent's commands", slashItems().length === 2, JSON.stringify(slashItems()));
+check("slash menu lists the agent's commands", slashItems().some((item) => item.startsWith("/security-pipeline")), JSON.stringify(slashItems()));
 posted.length = 0;
 hostMessage({ type: "status", status: { ...baseStatus, sessionId: "session-boundary-slash", sessionName: "slash" } });
 check("a session boundary re-requests the slash catalog it just discarded",
@@ -1419,7 +1419,39 @@ hostMessage({ type: "commands", commands: [
 	{ name: "compact", description: "Compact the context" },
 	{ name: "security-pipeline", description: "Run the security review" },
 ] });
-check("the slash menu works again in the resumed thread", slashItems().length === 2, JSON.stringify(slashItems()));
+check("the slash menu works again in the resumed thread", slashItems().some((item) => item.startsWith("/security-pipeline")), JSON.stringify(slashItems()));
+textarea.value = "";
+textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+
+// --- Native commands: the agent's get_commands never lists its built-ins and
+// RPC never executes them, so the menu supplies the ones this panel can run and
+// routes them to the panel's own actions instead of sending them to the model.
+check("slash menu offers the native /reload the agent does not list", slashItems().some((item) => item.startsWith("/reload")), JSON.stringify(slashItems()));
+const nativeCount = (name) => [...slashItems()].filter((item) => item.startsWith(`/${name}`)).length;
+check("a native the agent's catalog also defines is listed once, not shadowed", nativeCount("compact") === 1, JSON.stringify(slashItems()));
+// Sending also clears the saved draft; that post is not what is under test.
+const lastSent = () => posted.filter((m) => m.type !== "draftChanged");
+const runSlash = (text) => {
+	posted.length = 0;
+	textarea.value = text;
+	textarea.selectionStart = textarea.selectionEnd = text.length;
+	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+	// First Enter accepts the open autocomplete row, the second sends the line.
+	if (document.querySelector(".autocomplete.visible")) textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+	textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+	return lastSent().map((m) => m.type);
+};
+// The real catalog has no /compact; the one above only exists to prove a catalog entry wins.
+hostMessage({ type: "commands", commands: [{ name: "security-pipeline", description: "Run the security review" }] });
+check("/reload posts reload and is not sent to the model", JSON.stringify(runSlash("/reload")) === JSON.stringify(["reload"]), JSON.stringify(posted));
+check("/model opens the host model picker", JSON.stringify(runSlash("/model")) === JSON.stringify(["pickModel"]), JSON.stringify(posted));
+check("the /thinking alias opens the thinking picker", JSON.stringify(runSlash("/thinking")) === JSON.stringify(["pickThinkingLevel"]), JSON.stringify(posted));
+runSlash("/compact keep the schema");
+check("/compact carries its instructions", lastSent().length === 1 && lastSent()[0].type === "compact" && lastSent()[0].instructions === "keep the schema", JSON.stringify(posted));
+runSlash("/name Release prep");
+check("/name posts the new session name", lastSent().length === 1 && lastSent()[0].type === "renameSession" && lastSent()[0].name === "Release prep", JSON.stringify(posted));
+check("/name without a name posts nothing and keeps the text", JSON.stringify(runSlash("/name")) === "[]" && textarea.value.trim() === "/name", `${JSON.stringify(posted)} ${textarea.value}`);
+check("an agent-run command such as /goal is still sent as a prompt", JSON.stringify(runSlash("/goal ship it")) === JSON.stringify(["prompt"]), JSON.stringify(posted));
 textarea.value = "";
 textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
 

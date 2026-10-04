@@ -72,6 +72,7 @@ try {
 	assert.equal(parseWebviewMessage({ type: "deleteSession", path: "/tmp/session\0.jsonl", sessionId: "safe-id" }), undefined);
 	assert.equal(parseWebviewMessage({ type: "openFile", path: "src/app.ts", endLine: 4 }), undefined);
 	assert.equal(parseWebviewMessage({ type: "searchFiles", query: "src", requestId: Number.NaN }), undefined);
+	assert.deepEqual(parseWebviewMessage({ type: "reload", extra: "dropped" }), { type: "reload" });
 	assert.equal(parseWebviewMessage({ type: "setCompactThreshold", percent: 19 }), undefined);
 	assert.equal(parseWebviewMessage({ type: "setCompactThreshold", percent: 22.5 }), undefined);
 	assert.deepEqual(parseWebviewMessage({ type: "setCompactThreshold", percent: 55 }), { type: "setCompactThreshold", percent: 55 });

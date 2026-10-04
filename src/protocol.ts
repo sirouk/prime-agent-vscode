@@ -319,6 +319,7 @@ export type WebviewToHost =
 	| { type: "exportHtml" }
 	| { type: "exportChat" }
 	| { type: "restart" }
+	| { type: "reload" }
 	| { type: "requestState" }
 	| { type: "requestModels" }
 	| { type: "requestCommands" }

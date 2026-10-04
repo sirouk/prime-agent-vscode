@@ -237,6 +237,36 @@ const composerDeps = {
 	onSetThinking: (level: string) => post({ type: "setThinkingLevel", level }),
 	onToggleFavorite: (provider: string, modelId: string) => post({ type: "toggleFavoriteModel", provider, modelId }),
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => post({ type: "openFile", path, startLine, endLine }),
+	onNativeCommand: (action: import("./native-commands.js").NativeAction, args: string) => {
+		switch (action) {
+			// The header buttons carry view bookkeeping beyond the post; typing the
+			// command must do exactly what clicking them does.
+			case "new":
+				newChatBtn.click();
+				break;
+			case "resume":
+				historyBtn.click();
+				break;
+			case "reload":
+				post({ type: "reload" });
+				break;
+			case "compact":
+				post(args ? { type: "compact", instructions: args } : { type: "compact" });
+				break;
+			case "model":
+				post({ type: "pickModel" });
+				break;
+			case "effort":
+				post({ type: "pickThinkingLevel" });
+				break;
+			case "export":
+				post({ type: "exportChat" });
+				break;
+			case "name":
+				post({ type: "renameSession", name: args });
+				break;
+		}
+	},
 };
 const composer = new Composer(composerDeps);
 

@@ -310,6 +310,7 @@ export function parseWebviewMessage(value: unknown): WebviewToHost | undefined {
 		case "exportHtml":
 		case "exportChat":
 		case "restart":
+		case "reload":
 		case "requestState":
 		case "requestModels":
 		case "requestCommands":
@@ -492,6 +493,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			return;
 		case "setCompactThreshold":
 			controller.setCompactThreshold(message.percent);
+			return;
+		case "reload":
+			await controller.reload();
 			return;
 		case "restart":
 			await controller.restart();

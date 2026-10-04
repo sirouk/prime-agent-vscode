@@ -7,6 +7,7 @@ import { Dropdown, type DropdownItem } from "./dropdown.js";
 import { fitImageDataUrl, MAX_DECODED_IMAGE_BYTES, planImageFit } from "./image-fit.js";
 import { el, icon, iconButton, svgIcon } from "./dom.js";
 import type { ImageAttachment, ModelRef, RpcModel, RpcSlashCommand, SelectionAttachment } from "../src/protocol.js";
+import { type NativeAction, resolveNativeAction, visibleNativeCommands } from "./native-commands.js";
 
 /** Keys that move the caret without producing an input event. */
 const CARET_KEYS = new Set(["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
@@ -45,6 +46,8 @@ export interface ComposerDeps {
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => void;
 	onDraftChanged: (text: string) => void;
 	onSetCompactThreshold: (percent: number | null) => void;
+	/** Run a native slash command the panel performs itself instead of sending it as a prompt. */
+	onNativeCommand: (action: NativeAction, args: string) => void;
 }
 
 export class Composer {
@@ -217,6 +220,10 @@ export class Composer {
 
 	setCommands(commands: RpcSlashCommand[]): void {
 		this.commands = commands;
+	}
+
+	private catalogNames(): Set<string> {
+		return new Set(this.commands.map((c) => c.name));
 	}
 
 	setModels(models: RpcModel[]): void {
@@ -820,8 +827,16 @@ export class Composer {
 			this.closeAutocomplete();
 			return;
 		}
+		const native = this.images.length === 0 && this.selections.length === 0 ? resolveNativeAction(text, this.catalogNames()) : null;
+		if (native?.action === "name" && !native.args) {
+			// Keep the text: the operator is one word away from a valid command.
+			this.showHint("Usage: /name <session name>");
+			this.closeAutocomplete();
+			return;
+		}
 		this.rememberPrompt(text);
-		this.deps.onSend(text, this.images, this.selections);
+		if (native) this.deps.onNativeCommand(native.action, native.args);
+		else this.deps.onSend(text, this.images, this.selections);
 		this.textarea.value = "";
 		this.images = [];
 		this.selections = [];
@@ -1339,7 +1354,8 @@ export class Composer {
 		const slashQuery = this.currentSlashQuery();
 		if (slashQuery !== null && slashQuery.length <= 30 && !slashQuery.includes("\n")) {
 			const q = slashQuery.toLowerCase();
-			const items = this.commands
+			const catalog = this.catalogNames();
+			const items = [...visibleNativeCommands(catalog), ...this.commands]
 				.filter((c) => c.name.toLowerCase().includes(q))
 				.slice(0, 12)
 				.map((c) => ({ label: `/${c.name}`, sub: c.description, insert: `/${c.name} ` }));
