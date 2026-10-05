@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.42]
+
 - **Code streaming into an open tool card no longer fights you.** The Python or shell box inside a card is the thing that scrolls, but every streamed chunk rebuilt it from scratch, so a card you had open kept showing the first screenful of the code while the rest arrived out of sight, and anything you scrolled inside it was thrown back to the top several times a second. The box is now repainted in place: it follows the tail as code arrives, stays exactly where you put it once you scroll up inside it, and goes back to following when you return to the end. The collapsed summary line and the chat's own follow-the-tail behaviour were already steady and are unchanged. Gated by a real-Chromium `codestream` check in the screenshot matrix, which fails against the old code.
 - **A streaming tool call no longer flickers its collapsed row or loses the tail.** The row summarises a Python or shell call by picking its most telling line, and it was fed half-typed text, so it announced `from`, `i`, `O`, `OUT = Path('/mnt/data'`, `mkdir /mnt/data` in turn (and a brand-new card flashed `{"code":""}`). While a call streams, the row now reads only finished lines, a Python cell's row waits for its first line, rewrites are paced to a few per second and skipped when the text is unchanged, and the call's true summary lands the moment it finishes arriving. Separately, opening a card or letting its code box fill just after the chat snapped to the tail made the late scroll event read as "the reader left the bottom": the follow lock dropped and the stream ran off below the fold (measured: 32 of 44 frames off the tail, gap growing to 377px). Only a real move up gives the lock away now, and opening a card at the tail keeps following. Gated by new unit checks and a real-Chromium check that fails against the previous code.
 - **File links in the transcript now open in the editor.** A link like `[Download](sandbox:/mnt/data/report.pine)`, `/root/lab/out.csv`, `docs/setup.md`, `src/run.py:42` or `…#L10-L20` was rendered as an inert dotted link, and a link wrapped in bold (`**[Download](…)**`, how agents mark the thing to click) was not parsed at all and showed as literal `[text](url)`. Both are fixed. A click asks the host to open the file: an absolute path opens if it exists; a relative path resolves against the workspace; a path that does not exist on this machine (an agent's `sandbox:` path) falls back to the workspace file of that name, asking you to choose if several match, and saying so plainly if none does. `//host`, `javascript:` and every other scheme stay inert, and the strictly workspace-confined `openFile` used by chips and tool cards is untouched.
@@ -361,7 +363,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.41...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.42...HEAD
+[1.0.42]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.41...v1.0.42
 [1.0.41]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.40...v1.0.41
 [1.0.40]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.39...v1.0.40
 [1.0.39]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.38...v1.0.39
