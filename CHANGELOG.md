@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.41]
+
 - **Opening a session another window is running no longer dead-ends on "Session is already active in …".** A window's own agent session is client-owned in the daemon, which hides it from every other client: `list` omits it, `attach` answers "Unknown active session", and resuming its file from history answers "already active" — so whether two windows (or machines on one host) could share a thread depended on how the first one happened to have opened it. History navigation now reads the owner id from the worker descriptor the daemon wrote, asks the daemon to promote that worker to an ordinary resident session, and retries, so the second window attaches and both can watch and steer. A promoted session no longer ends when its first window closes; it stays resident like a terminal-brokered one until stopped. When the owner id cannot be read (the agent is on another host, or its process is gone) the original refusal is reported unchanged. Gated by a live owned-roster leg that proves the refusal, the promotion and the attach against a real 0.9.8 daemon, plus roster-parity checks of the retry and the no-retry paths.
 
 ## [1.0.40]
@@ -355,7 +357,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.40...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.41...HEAD
+[1.0.41]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.40...v1.0.41
 [1.0.40]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.39...v1.0.40
 [1.0.39]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.38...v1.0.39
 [1.0.38]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.37...v1.0.38
