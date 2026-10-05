@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { locateAgent, type LocatedAgent } from "./agent-locator.js";
-import { DaemonSidecar } from "./daemon-sidecar.js";
+import { DaemonSidecar, promoteClientOwnedSession } from "./daemon-sidecar.js";
 import { agentDirForSessionFile, defaultAgentDir, resolveOwnerClientId, type OwnerLookup } from "./daemon-owner.js";
 import type { AttachSnapshot, DaemonServerMessage, RosterEntry, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
 import type {
@@ -2668,7 +2668,18 @@ export class SessionController implements vscode.Disposable {
 				// resumes the file under a fresh worker and — unlike
 				// switch_session, which disposes the caller's session first —
 				// does not touch anything already running.
-				const created = await sidecar.create({ sessionPath: session.path, cwd: session.cwd, agentDir: agentDirForSessionFile(session.path) });
+				const createTarget = { sessionPath: session.path, cwd: session.cwd, agentDir: agentDirForSessionFile(session.path) };
+				let created: SessionSummaryRef;
+				try {
+					created = await sidecar.create(createTarget);
+				} catch (err) {
+					// Another window's own RPC session is client-owned: `list`
+					// cannot see it, so we land here, and `create` answers
+					// "already active". Promote it once and the retry reuses the
+					// now-visible worker instead of refusing.
+					if (!(await this.promoteForeignOwnedSession(err, session.path))) throw err;
+					created = await sidecar.create(createTarget);
+				}
 				activeId = created.activeSessionId ?? created.id;
 				if (this.disposed || epoch !== this.viewEpoch) return "aborted";
 				if (!activeId) return "failed";
@@ -2758,6 +2769,29 @@ export class SessionController implements vscode.Disposable {
 			});
 			this.restoreAttachedView(previousAttachment, epoch);
 			return "done";
+		}
+	}
+
+	/**
+	 * Make another client's client-owned worker for `sessionPath` shareable.
+	 *
+	 * Only a refusal that names a live worker qualifies, and only when that
+	 * worker's owner id can be read back from the descriptor the daemon wrote —
+	 * i.e. the agent runs on the same host as this extension. Anything else
+	 * (a different host, a dead owner, a daemon that refuses) returns false and
+	 * the caller reports the original error, never a guess.
+	 */
+	private async promoteForeignOwnedSession(err: unknown, sessionPath: string): Promise<boolean> {
+		const refusal = err as { code?: string; activeSessionId?: string } | null;
+		if (refusal?.code !== "session_already_active" || !refusal.activeSessionId) return false;
+		const owner = resolveOwnerClientId({ sessionFile: sessionPath, activeSessionId: refusal.activeSessionId });
+		if (!owner) return false;
+		try {
+			await promoteClientOwnedSession(owner, refusal.activeSessionId);
+			return true;
+		} catch (promoteErr) {
+			this.debugLog.append(`promote of ${refusal.activeSessionId} failed: ${promoteErr instanceof Error ? promoteErr.message : String(promoteErr)}`);
+			return false;
 		}
 	}
 

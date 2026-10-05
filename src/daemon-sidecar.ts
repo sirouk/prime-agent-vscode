@@ -13,6 +13,7 @@
  * own RPC session runs (RPC mode itself is a daemon client and autostarts it).
  */
 
+import { randomUUID } from "node:crypto";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -204,6 +205,12 @@ export class DaemonSidecar {
 	 * and `list`/`attach` are read-only, so they are never journaled at all.
 	 */
 	impersonateClientId: string | null = null;
+	/**
+	 * Command ids are `<prefix>-<n>`. The daemon's journal dedupes mutating
+	 * commands on (clientId, commandId) and replays the first answer, so two
+	 * connections that claim one identity must not share a prefix.
+	 */
+	idPrefix = "side";
 	/**
 	 * Runaway-peer frame cap. Overridable so the transport regressions can prove
 	 * the guard without pushing the real 64 MiB through a socket.
@@ -446,7 +453,7 @@ export class DaemonSidecar {
 	}
 
 	private nextId(): string {
-		return `side-${(this.nextIdValue++).toString(36)}`;
+		return `${this.idPrefix}-${(this.nextIdValue++).toString(36)}`;
 	}
 
 	async request<T = unknown>(command: Record<string, unknown>, timeoutMs = 30_000): Promise<T> {
@@ -631,5 +638,36 @@ export class DaemonSidecar {
 			pending.reject(new Error("sidecar disposed"));
 		}
 		this.pending.clear();
+	}
+}
+
+/**
+ * Hand a client-owned worker over to the daemon at large.
+ *
+ * An RPC window's own session is client-owned, so the daemon hides it from
+ * every other client — `list` omits it, `attach` answers "Unknown active
+ * session", and `create` with its file answers "Session is already active in
+ * <id>". `promote_owned_session` is the daemon's own way out: it clears the
+ * owner so the worker becomes an ordinary resident session that any number of
+ * clients can attach to. The daemon only honours it from the owner's identity,
+ * which is a plain claim on the envelope, so this opens a short-lived
+ * connection that makes that claim and drops it again.
+ *
+ * Side effect to know about: a promoted worker no longer dies with its owner
+ * process. It stays resident until someone stops it, exactly like a session
+ * the daemon brokered for a terminal.
+ */
+export async function promoteClientOwnedSession(ownerClientId: string, activeSessionId: string): Promise<void> {
+	const owner = new DaemonSidecar();
+	owner.impersonateClientId = ownerClientId;
+	// The owner's own connections already spent `side-<n>` ids under this
+	// identity; reusing one would make the daemon replay an old answer and skip
+	// the promotion while reporting success.
+	owner.idPrefix = `promote-${randomUUID()}`;
+	try {
+		await owner.connect();
+		await owner.request({ type: "promote_owned_session", activeSessionId }, 15_000);
+	} finally {
+		owner.dispose();
 	}
 }

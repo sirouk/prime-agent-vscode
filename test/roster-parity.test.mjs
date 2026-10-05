@@ -372,6 +372,65 @@ for (const name of ["live", "offline"]) {
 	nav.clearReattachTimer?.();
 }
 
+// A session another window owns through its own RPC process is client-owned:
+// the daemon hides it from `list` and refuses `create` for its file with
+// "already active". Promoting it once makes it an ordinary resident session, so
+// the retry attaches instead of showing the operator a dead end.
+for (const promotable of [true, false]) {
+	const nav = makeController();
+	const sharedFile = path.join(workdir, "shared.jsonl");
+	if (!fs.existsSync(sharedFile)) fs.writeFileSync(sharedFile, "");
+	nav.resolveHistorySession = async (sessionPath, sessionId) => ({ path: sessionPath, id: sessionId, cwd: workdir });
+	nav.ensureStarted = async () => {};
+	nav.client = { request: async () => ({ success: true, data: {} }) };
+	Object.defineProperty(nav, "state", { get: () => ({ sessionFile: path.join(workdir, "own.jsonl") }), configurable: true });
+	nav.cachedMessages = [{ role: "user", content: "my own thread" }];
+	let creates = 0;
+	const promoted = [];
+	nav.promoteForeignOwnedSession = async (err, file) => {
+		promoted.push({ code: err?.code, id: err?.activeSessionId, file });
+		return promotable;
+	};
+	nav.sidecar = {
+		connected: true,
+		connect: async () => {},
+		dispose: () => {},
+		detach: async () => {},
+		list: async () => [],
+		create: async () => {
+			creates += 1;
+			if (creates === 1 || !promotable) {
+				throw Object.assign(new Error(`Session is already active in h-owned: ${sharedFile}`), {
+					code: "session_already_active",
+					activeSessionId: "h-owned",
+				});
+			}
+			return { activeSessionId: "h-owned" };
+		},
+		attach: async () => ({
+			snapshot: { summary: { activeSessionId: "h-owned", sessionId: "h-owned-uuid" }, state: { sessionId: "h-owned-uuid" }, messages: [] },
+		}),
+		getMessages: async () => [],
+		getSessionStats: async () => ({}),
+		getState: async () => ({}),
+	};
+	posts.length = 0;
+	await nav.switchSession(sharedFile, "shared");
+	check("the refusal that names the owned worker is handed to the promoter", promoted[0]?.id === "h-owned" && promoted[0]?.code === "session_already_active", JSON.stringify(promoted));
+	if (promotable) {
+		check("a promoted worker is re-created once and attached", creates === 2 && nav.attached?.activeSessionId === "h-owned", `creates=${creates} attached=${JSON.stringify(nav.attached)}`);
+	} else {
+		check("an unpromotable refusal is retried never and reported as-is", creates === 1 && nav.attached === null, `creates=${creates}`);
+		check(
+			"the operator is told the real reason and that their thread is untouched",
+			notices().some((t) => /already active in h-owned/.test(t) && /untouched/.test(t)),
+			JSON.stringify(notices().slice(-2)),
+		);
+	}
+	clearTimeout(nav.childrenTimer);
+	nav.clearReattachTimer?.();
+}
+
 // When the daemon channel itself is gone, a running thread must NOT be
 // sacrificed to satisfy the click — only a virgin chat may take the legacy
 // in-place switch. The old code switched first and asked never.

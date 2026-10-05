@@ -32,7 +32,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const require = createRequire(import.meta.url);
-const { DaemonSidecar, resolveOwnerClientId } = require("../dist/daemon-sidecar.cjs");
+const { DaemonSidecar, resolveOwnerClientId, promoteClientOwnedSession } = require("../dist/daemon-sidecar.cjs");
 
 const REQUIRE_DAEMON = process.env.PA_REQUIRE_DAEMON === "1" || process.argv.includes("--require-daemon");
 const WATCHDOG_MS = 90_000;
@@ -134,6 +134,31 @@ async function main() {
 		const attached = await owned.attach(createdId);
 		check("attach with the owner identity returns a snapshot", !!attached?.snapshot);
 		await owned.request({ type: "detach", activeSessionId: createdId }, 10_000).catch(() => {});
+
+		// --- sharing: another window clicking this session in its history -------
+		// `create` for the file is how the extension resumes a saved session, and a
+		// client-owned worker answers it with "already active". Promotion is the
+		// way out; it has to land even though the owner's own connections already
+		// spent `side-<n>` command ids under this identity (the journal replays an
+		// old answer for a repeated id and would report success without promoting).
+		let refusal;
+		try {
+			await stranger.create({ sessionPath: sessionFile, cwd: workRoot });
+		} catch (error) {
+			refusal = error;
+		}
+		check(
+			"create for an owned session's file is refused with the structured code",
+			refusal?.code === "session_already_active" && refusal?.activeSessionId === createdId,
+			refusal ? `${refusal.code} ${refusal.activeSessionId}` : "create unexpectedly succeeded",
+		);
+		await promoteClientOwnedSession(ownerClientId, createdId);
+		check("after promotion a stranger's list sees the session", has(await stranger.list(true), createdId));
+		check("after promotion a stranger can attach", !!(await stranger.attach(createdId))?.snapshot);
+		const reused = await stranger.create({ sessionPath: sessionFile, cwd: workRoot });
+		check("after promotion create reuses the same worker", rowId(reused) === createdId, rowId(reused));
+		// Detaching the last viewer of an empty draft evicts it, so only now.
+		await stranger.request({ type: "detach", activeSessionId: createdId }, 10_000).catch(() => {});
 	} finally {
 		stranger.dispose();
 		owned.dispose();
