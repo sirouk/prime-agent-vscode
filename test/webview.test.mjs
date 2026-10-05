@@ -206,7 +206,7 @@ check("edit copy emits the output once, not twice", clipboard.split("edited src/
 
 	const full = {
 		role: "assistant",
-		content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: { code: "%%bash\ncd /repo\nnpm run build -- --prod" } }],
+		content: [{ type: "toolCall", id: "stream-1", name: "ipython", arguments: { code: "%%bash\ncd /repo\nnpm run build -- --prod\n" } }],
 	};
 	hostMessage({ type: "event", event: { type: "message_update", message: full } });
 
@@ -225,6 +225,40 @@ check("edit copy emits the output once, not twice", clipboard.split("edited src/
 	// tool_execution_start repeats the same args last; it must not regress anything.
 	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "stream-1", toolName: "ipython", args: full.content[0].arguments } });
 	check("tool_execution_start leaves the completed card intact", summaryText().includes("npm build"), JSON.stringify(summaryText()));
+}
+
+// --- the collapsed row must not flicker while a call streams ----------------
+// The summary scorer picks the most telling line of the whole cell, so fed a
+// half-typed line it announced `i`, `O`, `OUT = Path(…` in turn: a header
+// rewritten on every chunk. Streaming frames summarise complete lines only, a
+// Python cell's row waits for its first line, rewrites are paced, and a call
+// that has finished arriving always lands its true summary at once.
+{
+	const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+	const frame = (code) => ({ role: "assistant", content: [{ type: "toolCall", id: "calm-1", name: "ipython", arguments: { code } }] });
+	const update = (code) => hostMessage({ type: "event", event: { type: "message_update", message: frame(code) } });
+	hostMessage({ type: "event", event: { type: "message_start", message: frame("") } });
+	update("");
+	const card = [...document.querySelectorAll(".messages .tool")].pop();
+	const summary = () => card?.querySelector(".tool-summary")?.textContent ?? "";
+	const writes = [];
+	const watcher = new window.MutationObserver(() => writes.push(summary()));
+	watcher.observe(card.querySelector(".tool-summary"), { childList: true, characterData: true, subtree: true });
+
+	update("import os, js");
+	check("a Python cell's row waits for its first line instead of showing a fragment", summary() === "", JSON.stringify(summary()));
+	update("import os, json\nsubprocess.run(['mkdir', '-p', '/mnt/data'])\nOUT = Pa");
+	check("the line still being typed never reaches the row", !summary().includes("OUT") && !summary().includes("Pa"), JSON.stringify(summary()));
+	const first = summary();
+	check("a finished line does", first !== "", JSON.stringify(first));
+	for (let i = 0; i < 25; i++) update(`import os, json\nsubprocess.run(['mkdir', '-p', '/mnt/data'])\nOUT = Path('/mnt/data/${"x".repeat(i)}')\nOUT.mkdir(exist_ok=True)\nopen(OUT / 'f${i}.txt', 'w').write('hello')\n`);
+	check("a burst of frames rewrites the row at most once straight away", writes.length <= 2, JSON.stringify(writes));
+	await wait(450);
+	check("the row catches up to the latest complete lines once the pace allows", summary() !== first && writes.length <= 3, JSON.stringify(writes));
+	const settledArgs = { code: "import os, json\nsubprocess.run(['mkdir', '-p', '/mnt/data'])\nprint('done')\n" };
+	hostMessage({ type: "event", event: { type: "tool_execution_start", toolCallId: "calm-1", toolName: "ipython", args: settledArgs } });
+	check("a call that has finished arriving writes its summary at once", summary().includes("mkdir"), JSON.stringify(summary()));
+	watcher.disconnect();
 }
 
 // --- #23: the user turn shows a price, honestly labeled as the reply's input cost ---

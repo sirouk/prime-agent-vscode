@@ -157,6 +157,9 @@ const LAZY_LOAD_MARGIN_PX = 400;
 const CHANGED_FILES_MAX = 40;
 const PRUNE_TO = 400;
 
+/** Fastest a streaming call's collapsed row may be rewritten. */
+const SUMMARY_MIN_INTERVAL_MS = 300;
+
 interface ToolBlock {
 	root: HTMLElement;
 	chevron: SVGSVGElement;
@@ -176,6 +179,11 @@ interface ToolBlock {
 	renderedInputLen: number;
 	/** What the call card is currently structured as; a streamed update that keeps it can repaint in place. */
 	inputSig: string;
+	/** The collapsed-row text on screen, when it was last written, and a change waiting for its turn. */
+	summaryText: string;
+	summaryAt: number;
+	summaryPending?: string;
+	summaryTimer?: number;
 	/** The call text now painted, read by the copy button at click time rather than captured at paint time. */
 	inputText: string;
 }
@@ -405,7 +413,19 @@ export class Transcript {
 		this.scroller.addEventListener("scroll", () => {
 			// Our own snaps land exactly at the bottom, so this re-sticks correctly
 			// and needs no suppression: scrollToBottom only runs while already stuck.
-			this.setStick(this.atBottom());
+			// Only a move UP gives the lock away. The event for a snap is delivered
+			// a frame later, and if the page grew in between (a card opening, a code
+			// box filling) the reader reads as "off the bottom" without having moved
+			// at all — which dropped the lock and left the stream running off below
+			// the fold.
+			const top = this.scroller.scrollTop;
+			const height = this.scroller.scrollHeight;
+			const movedUp = top < this.lastScrollTop - 1;
+			const grew = this.lastScrollHeight > 0 && height > this.lastScrollHeight;
+			this.lastScrollTop = top;
+			this.lastScrollHeight = height;
+			if (this.atBottom()) this.setStick(true);
+			else if (movedUp || !grew) this.setStick(false);
 			this.maybeLoadEarlier();
 		}, { passive: true });
 		// A viewport that SHRINKS moves the bottom without moving the reader.
@@ -428,6 +448,8 @@ export class Transcript {
 	}
 
 	private viewportObserver: ResizeObserver | null = null;
+	private lastScrollTop = 0;
+	private lastScrollHeight = 0;
 
 	/**
 	 * Within a hair of the bottom. Deliberately tight: the old 48px deadzone meant
@@ -1370,7 +1392,7 @@ export class Transcript {
 				}
 				desired.push(node);
 			} else if (part.type === "toolCall") {
-				const block = this.ensureToolBlock(part.id, part.name, part.arguments ?? {});
+				const block = this.ensureToolBlock(part.id, part.name, part.arguments ?? {}, !isPartial);
 				block.root.dataset.part = `tool-${part.id}`;
 				desired.push(block.root);
 			}
@@ -1632,17 +1654,92 @@ export class Transcript {
 	}
 
 	/**
+	 * The call as far as it is certain. The summary scorer picks the most telling
+	 * line of the whole cell, so fed a half-typed line it announced `i`, then
+	 * `O`, then `OUT = Path('/mnt/data'` — a header rewritten on every chunk.
+	 * While a call streams, the line still being typed is left out; a call with
+	 * no finished line yet is shown as it stands (a one-line command), except a
+	 * Python cell, whose row waits for its first line.
+	 */
+	private completeLinesOnly(args: Record<string, unknown>): Record<string, unknown> {
+		const out: Record<string, unknown> = { ...args };
+		for (const key of ["code", "command"]) {
+			const value = out[key];
+			if (typeof value === "string" && value.includes("\n") && !value.endsWith("\n")) {
+				out[key] = value.slice(0, value.lastIndexOf("\n"));
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * The row's text for a call that is still arriving, or null to leave it as it
+	 * is. A Python cell's first line is still being typed: a row reading
+	 * `import os, jso` that is rewritten a moment later is worse than a row that
+	 * waits (and an empty cell must not fall through to a JSON dump of its args).
+	 */
+	private streamingSummary(name: string, args: Record<string, unknown>): string | null {
+		if (name === "ipython" && typeof args.code === "string" && !args.code.includes("\n")) return null;
+		return this.toolSummary(name, this.completeLinesOnly(args));
+	}
+
+	/**
+	 * Write the collapsed row's text. A settled call writes at once; a streaming
+	 * one writes at most every SUMMARY_MIN_INTERVAL_MS, and only when the text is
+	 * different, so the row changes a few times a second instead of on every chunk
+	 * and never rewrites itself with what it already says.
+	 */
+	private paintSummary(block: ToolBlock, text: string, settled: boolean): void {
+		const apply = (value: string): void => {
+			window.clearTimeout(block.summaryTimer);
+			block.summaryTimer = undefined;
+			block.summaryPending = undefined;
+			block.summaryAt = performance.now();
+			if (value === block.summaryText) return;
+			block.summary.textContent = value;
+			block.summaryText = value;
+		};
+		if (settled) {
+			apply(text);
+			return;
+		}
+		if (text === block.summaryText) {
+			block.summaryPending = undefined;
+			return;
+		}
+		const wait = SUMMARY_MIN_INTERVAL_MS - (performance.now() - block.summaryAt);
+		if (wait <= 0) {
+			apply(text);
+			return;
+		}
+		block.summaryPending = text;
+		if (block.summaryTimer === undefined) {
+			block.summaryTimer = window.setTimeout(() => {
+				block.summaryTimer = undefined;
+				if (block.summaryPending !== undefined) apply(block.summaryPending);
+			}, wait);
+		}
+	}
+
+	/**
 	 * Tool arguments stream in. The first `message_update` carrying a toolCall has
 	 * `arguments: {}` — the code lands over the updates that follow, and only then
 	 * does tool_execution_start repeat it. The card is created on that first empty
 	 * sighting, so without re-rendering here the collapsed summary stays blank and
 	 * the expanded call shows nothing for the life of the card.
 	 */
-	private refreshToolArgs(block: ToolBlock, name: string, args: Record<string, unknown>): void {
+	private refreshToolArgs(block: ToolBlock, name: string, args: Record<string, unknown>, settled: boolean): void {
 		const view = toolView(name, args);
+		// A call that has finished arriving always gets its final summary, even when
+		// no new text came with it: the frames before it were summarised from
+		// complete lines only.
+		if (settled) this.paintSummary(block, this.toolSummary(name, args), true);
 		if (view.input.length <= block.renderedInputLen) return;
 		block.renderedInputLen = view.input.length;
-		block.summary.textContent = this.toolSummary(name, args);
+		if (!settled) {
+			const calm = this.streamingSummary(name, args);
+			if (calm !== null) this.paintSummary(block, calm, false);
+		}
 		if (block.glyph && block.root.dataset.toolKind !== view.kind) {
 			// Args streamed in after the card was born as opaquely "ipython":
 			// the kind icon must follow what the cell now provably is.
@@ -1671,10 +1768,10 @@ export class Transcript {
 		});
 	}
 
-	private ensureToolBlock(id: string, name: string, args: Record<string, unknown>): ToolBlock {
+	private ensureToolBlock(id: string, name: string, args: Record<string, unknown>, settled = true): ToolBlock {
 		const existing = this.toolBlocks.get(id);
 		if (existing) {
-			this.refreshToolArgs(existing, name, args);
+			this.refreshToolArgs(existing, name, args, settled);
 			return existing;
 		}
 
@@ -1688,7 +1785,7 @@ export class Transcript {
 		const statusDot = el("span", "tool-dot running");
 		const initialView = toolView(name, args);
 		const nameEl = toolHeaderName(name, initialView.kind);
-		const summary = el("span", "tool-summary", this.toolSummary(name, args));
+		const summary = el("span", "tool-summary", settled ? this.toolSummary(name, args) : (this.streamingSummary(name, args) ?? ""));
 		const pill = el("span", "tool-pill", "running");
 		const copyAllBtn = el("button", "uf-icon tool-copy-all") as HTMLButtonElement;
 		copyAllBtn.title = "Copy full tool call and all output (markdown)";
@@ -1704,6 +1801,9 @@ export class Transcript {
 		toggle.addEventListener("click", () => {
 			const open = root.classList.toggle("open");
 			toggle.setAttribute("aria-expanded", String(open));
+			// Opening a card at the tail grows the page under a reader who is
+			// following it; that is not a decision to stop following.
+			this.scrollToBottom();
 		});
 
 		const inputSection = el("div", "tool-section");
@@ -1723,6 +1823,8 @@ export class Transcript {
 			renderedInputLen: view.input.length,
 			inputSig: "",
 			inputText: "",
+			summaryText: summary.textContent ?? "",
+			summaryAt: Number.NEGATIVE_INFINITY,
 		};
 		this.renderToolInput(block, name, args);
 		root.dataset.toolName = name;
@@ -1955,12 +2057,16 @@ export class Transcript {
 	scrollToBottom(): void {
 		if (!this.stickToBottom) return;
 		this.scroller.scrollTop = this.scroller.scrollHeight;
+		this.lastScrollTop = this.scroller.scrollTop;
+		this.lastScrollHeight = this.scroller.scrollHeight;
 	}
 
 	/** Unconditional snap — own sends or explicit user jumps. */
 	forceScrollToBottom(): void {
 		this.stickToBottom = true;
 		this.scroller.scrollTop = this.scroller.scrollHeight;
+		this.lastScrollTop = this.scroller.scrollTop;
+		this.lastScrollHeight = this.scroller.scrollHeight;
 		this.jumpBtn?.classList.remove("visible");
 	}
 }

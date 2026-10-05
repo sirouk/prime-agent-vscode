@@ -203,6 +203,25 @@ async function verifyCodeStream(page, out = []) {
 	for (let i = 0; i < 3; i++) { n += 150; await frame(n); }
 	const resumed = await pane();
 	out.push(mk("scrolling back to the end resumes following", resumed.max - resumed.top <= 4, `gap=${resumed.max - resumed.top}`));
+
+	// Opening a card at the tail grows the page under a reader who is following
+	// it. That is not a decision to stop following: the stream must stay in view.
+	// The frame and the click land in ONE task, which is how the race happens —
+	// the snap's scroll event is delivered a frame later, after the page grew, and
+	// used to read as "the reader left the bottom".
+	const toggle = '[data-part="tool-code-tool"] .tool-toggle';
+	await page.evaluate((sel) => document.querySelector(sel)?.click(), toggle);
+	await page.waitForTimeout(60);
+	await page.$eval(".messages", (e) => { e.scrollTop = e.scrollHeight; });
+	await page.waitForTimeout(80);
+	n += 40;
+	await page.evaluate(({ at, sel }) => {
+		window.__codeFrame(at, 30); // the reply grows, so the follow-snap moves the scroll offset
+		document.querySelector(sel)?.click(); // ...and the card opens before that scroll event lands
+	}, { at: Math.min(n, total), sel: toggle });
+	await page.waitForTimeout(80);
+	for (let i = 0; i < 4; i++) { n += 40; await frame(Math.min(n, total)); }
+	out.push(mk("opening a card mid-stream keeps the chat on the tail", (await outer()) <= 12, `gap=${await outer()}`));
 	return out;
 }
 
