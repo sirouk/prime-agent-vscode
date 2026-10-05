@@ -113,6 +113,24 @@
 				host({ type: "event", event: { type: "message_end", message: { ...streamMessage(12), stopReason: "toolUse", usage: { totalTokens: 900, cost: { total: 0.004 } } } } });
 				host({ type: "event", event: { type: "agent_end" } });
 			};
+		} else if (mode === "codestream") {
+			// A live Python call whose code arrives in pieces, under enough transcript
+			// to overflow — the card is opened by the harness.
+			const bulk = [];
+			for (let i = 0; i < 10; i++) {
+				bulk.push({ role: "user", content: `Question ${i}` });
+				bulk.push({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Filler prose to give height. ".repeat(12) }], usage: { totalTokens: 1, cost: { total: 0.001 } } });
+			}
+			host({ type: "snapshot", messages: bulk, state: null, status: { ...baseStatus, streaming: true }, steerDefault: "steer" });
+			const CODE = "import pandas as pd\n\ndef run():\n" + Array.from({ length: 90 }, (_, i) => `    value_${i} = compute(${i}) * 3  # step ${i}`).join("\n") + "\n\nrun()\n";
+			const codeMessage = (n) => ({ role: "assistant", content: [
+				{ type: "text", text: "Building the script." },
+				{ type: "toolCall", id: "code-tool", name: "ipython", arguments: { code: CODE.slice(0, n) } },
+			] });
+			host({ type: "event", event: { type: "agent_start" } });
+			host({ type: "event", event: { type: "message_start", message: codeMessage(40) } });
+			window.__codeFrame = (n) => host({ type: "event", event: { type: "message_update", message: codeMessage(n) } });
+			window.__codeLength = CODE.length;
 		} else if (mode === "attachmenu") {
 			host({ type: "snapshot", messages: [], state: null, status: baseStatus, steerDefault: "steer" });
 			host({ type: "models", models: [

@@ -9,10 +9,12 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as os from "node:os";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { locateAgent, type LocatedAgent } from "./agent-locator.js";
 import { DaemonSidecar, promoteClientOwnedSession } from "./daemon-sidecar.js";
+import { resolveLinkedFile } from "./file-links.js";
 import { agentDirForSessionFile, defaultAgentDir, resolveOwnerClientId, type OwnerLookup } from "./daemon-owner.js";
 import type { AttachSnapshot, DaemonServerMessage, RosterEntry, SavedSessionInfo, SessionSummaryRef } from "./daemon-sidecar.js";
 import type {
@@ -4665,11 +4667,56 @@ export class SessionController implements vscode.Disposable {
 	async openFile(relPath: string, startLine?: number, endLine?: number): Promise<void> {
 		const uri = await this.resolveWorkspaceUri(relPath.replace(/\/$/, ""));
 		if (!uri) return;
+		if (!(await this.showUri(uri, startLine, endLine))) {
+			this.broadcast({ type: "notice", level: "error", text: `Could not open ${relPath}` });
+		}
+	}
+
+	/**
+	 * Open the file a link in the transcript names. Unlike `openFile` — whose
+	 * paths come from the agent's tool calls and stay inside the workspace —
+	 * this follows a link the operator just clicked, so an absolute path is
+	 * honoured when it exists. A path that does not exist here (an agent's
+	 * `sandbox:/mnt/data/...`) falls back to the workspace file of that name.
+	 */
+	async openLinkedFile(target: string, startLine?: number, endLine?: number): Promise<void> {
+		const result = await resolveLinkedFile(target, {
+			workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+			homedir: os.homedir(),
+			realpath: (file) => fs.realpath(file),
+			findByBasename: async (basename) => {
+				const glob = basename.replace(/[\\*?{}\[\]()!]/g, "[$&]");
+				const uris = await vscode.workspace.findFiles(`**/${glob}`, "**/{node_modules,.git}/**", 20);
+				return uris.map((uri) => uri.fsPath);
+			},
+			pick: async (candidates) => {
+				const picked = await vscode.window.showQuickPick(
+					candidates.map((file) => ({ label: path.basename(file), description: vscode.workspace.asRelativePath(file, false), file })),
+					{ title: "Which file did the link mean?", ignoreFocusOut: true },
+				);
+				return picked?.file;
+			},
+		});
+		if (result.kind === "cancelled") return;
+		if (result.kind === "missing") {
+			this.broadcast({
+				type: "notice",
+				level: "error",
+				text: `Could not open ${path.basename(result.tried) || result.tried}: ${result.tried} does not exist on this machine, and no file of that name is in the workspace.`,
+			});
+			return;
+		}
+		if (!(await this.showUri(vscode.Uri.file(result.file), startLine, endLine))) {
+			this.broadcast({ type: "notice", level: "error", text: `Could not open ${result.file}` });
+		}
+	}
+
+	private async showUri(uri: vscode.Uri, startLine?: number, endLine?: number): Promise<boolean> {
 		try {
 			const stat = await vscode.workspace.fs.stat(uri);
 			if (stat.type === vscode.FileType.Directory) {
 				await vscode.commands.executeCommand("revealInExplorer", uri);
-				return;
+				return true;
 			}
 			const doc = await vscode.workspace.openTextDocument(uri);
 			const editor = await vscode.window.showTextDocument(doc);
@@ -4679,8 +4726,9 @@ export class SessionController implements vscode.Disposable {
 				editor.selection = new vscode.Selection(start, end);
 				editor.revealRange(new vscode.Range(start, end), vscode.TextEditorRevealType.InCenter);
 			}
+			return true;
 		} catch {
-			this.broadcast({ type: "notice", level: "error", text: `Could not open ${relPath}` });
+			return false;
 		}
 	}
 

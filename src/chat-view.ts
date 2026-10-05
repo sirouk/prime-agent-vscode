@@ -383,13 +383,14 @@ export function parseWebviewMessage(value: unknown): WebviewToHost | undefined {
 			return isBoundedString(value.query, MAX_QUERY_CHARS, true) && isRequestId(value.requestId)
 				? { type: "searchFiles", query: value.query, requestId: value.requestId }
 				: undefined;
-		case "openFile": {
+		case "openFile":
+		case "openLinkedFile": {
 			if (!isPath(value.path)) return undefined;
 			if (value.startLine !== undefined && !isLineNumber(value.startLine)) return undefined;
 			if (value.endLine !== undefined && !isLineNumber(value.endLine)) return undefined;
 			if (value.endLine !== undefined && (value.startLine === undefined || value.endLine < value.startLine)) return undefined;
 			return {
-				type: "openFile",
+				type: value.type,
 				path: value.path,
 				...(value.startLine === undefined ? {} : { startLine: value.startLine }),
 				...(value.endLine === undefined ? {} : { endLine: value.endLine }),
@@ -537,6 +538,9 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			return;
 		case "openFile":
 			await controller.openFile(message.path, message.startLine, message.endLine);
+			return;
+		case "openLinkedFile":
+			await controller.openLinkedFile(message.path, message.startLine, message.endLine);
 			return;
 		case "openDiff":
 			await controller.openDiff(message.path);

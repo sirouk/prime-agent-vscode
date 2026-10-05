@@ -71,6 +71,11 @@ try {
 	assert.equal(parseWebviewMessage({ type: "switchSession", path: "/tmp/forged.jsonl" }), undefined);
 	assert.equal(parseWebviewMessage({ type: "deleteSession", path: "/tmp/session\0.jsonl", sessionId: "safe-id" }), undefined);
 	assert.equal(parseWebviewMessage({ type: "openFile", path: "src/app.ts", endLine: 4 }), undefined);
+	assert.deepEqual(parseWebviewMessage({ type: "openLinkedFile", path: "/mnt/data/x.pine", startLine: 3, endLine: 9, extra: 1 }), { type: "openLinkedFile", path: "/mnt/data/x.pine", startLine: 3, endLine: 9 });
+	assert.deepEqual(parseWebviewMessage({ type: "openLinkedFile", path: "docs/a.md" }), { type: "openLinkedFile", path: "docs/a.md" });
+	assert.equal(parseWebviewMessage({ type: "openLinkedFile", path: "docs/a.md", endLine: 4 }), undefined);
+	assert.equal(parseWebviewMessage({ type: "openLinkedFile", path: "bad\0.md" }), undefined);
+	assert.equal(parseWebviewMessage({ type: "openLinkedFile" }), undefined);
 	assert.equal(parseWebviewMessage({ type: "searchFiles", query: "src", requestId: Number.NaN }), undefined);
 	assert.deepEqual(parseWebviewMessage({ type: "reload", extra: "dropped" }), { type: "reload" });
 	assert.equal(parseWebviewMessage({ type: "setCompactThreshold", percent: 19 }), undefined);

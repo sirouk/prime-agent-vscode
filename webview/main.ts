@@ -273,6 +273,7 @@ const composer = new Composer(composerDeps);
 const transcript = new Transcript(scroller, changedFilesBar, {
 	onOpenLink: (href) => post({ type: "openExternal", url: href }),
 	onOpenFile: (path, startLine, endLine) => post({ type: "openFile", path, startLine, endLine }),
+	onOpenLinkedFile: (path, startLine, endLine) => post({ type: "openLinkedFile", path, startLine, endLine }),
 	onOpenDiff: (path) => post({ type: "openDiff", path }),
 	onForkFromUser: (ordinal) => post({ type: "forkFromUser", ordinal }),
 	onSpawnedCardClick: (browseRef) => post({ type: "browseChild", browseRef }),

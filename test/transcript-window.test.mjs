@@ -157,6 +157,44 @@ for (const anchor of anchors) anchor.dispatchEvent(new window.MouseEvent("click"
 const opened = posted.filter((m) => m.type === "openExternal").map((m) => m.url);
 check("only allow-listed absolute URLs reach the host", JSON.stringify(opened) === JSON.stringify(["http://example.com/x", "https://ok.example/y"]), JSON.stringify(opened));
 
+// ---- file links: a click asks the host to open the file in the editor --------
+hostMessage({
+	type: "snapshot",
+	status, state: null,
+	messages: [{
+		role: "assistant",
+		content: [{
+			type: "text",
+			text: [
+				"- **[Download SF07 Pine](sandbox:/mnt/data/ETH_Lab_Best_SF07.pine)**",
+				"- [Setup](docs/setup%20guide.md#L10-L20) and [Run](src/run.py:42) and [Abs](/root/lab/out.csv)",
+				"- [Url](file:///root/lab/x.md) [Js](javascript:alert(1)) [Proto](//evil.example/x) [Anchor](#top) [Drive](vscode://x/y)",
+			].join("\n"),
+		}],
+	}],
+});
+const fileAnchors = [...document.querySelectorAll(".md a")];
+check("a link wrapped in bold is a link, not literal markdown", fileAnchors[0]?.textContent === "Download SF07 Pine" && fileAnchors[0].closest("strong") !== null, fileAnchors[0]?.outerHTML);
+check("no literal [text](url) leaks out of the bold wrapper", !(document.querySelector(".md")?.textContent ?? "").includes("]("));
+check("a file link keeps its target visible in the tooltip", fileAnchors[0]?.title === "sandbox:/mnt/data/ETH_Lab_Best_SF07.pine", fileAnchors[0]?.title);
+check("a file link never navigates the webview", fileAnchors[0]?.getAttribute("href") === "#");
+check("a file link is dressed as a working link", !fileAnchors[0]?.classList.contains("md-link-inert"));
+posted.length = 0;
+for (const anchor of fileAnchors) anchor.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+const linkedOpens = posted.filter((m) => m.type === "openLinkedFile").map((m) => [m.path, m.startLine, m.endLine]);
+check(
+	"clicks ask the host to open exactly the file targets, with their lines",
+	JSON.stringify(linkedOpens) === JSON.stringify([
+		["/mnt/data/ETH_Lab_Best_SF07.pine", undefined, undefined],
+		["docs/setup guide.md", 10, 20],
+		["src/run.py", 42, undefined],
+		["/root/lab/out.csv", undefined, undefined],
+		["/root/lab/x.md", undefined, undefined],
+	]),
+	JSON.stringify(linkedOpens),
+);
+check("javascript:, //host, #anchor and other schemes stay inert and post nothing", posted.filter((m) => m.type === "openExternal").length === 0 && fileAnchors.slice(5).every((a) => a.classList.contains("md-link-inert")), JSON.stringify(fileAnchors.slice(5).map((a) => a.className)));
+
 // ---- an unmatched delimiter must not make rendering quadratic --------------
 const started = Date.now();
 hostMessage({

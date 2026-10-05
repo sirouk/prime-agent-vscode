@@ -4,7 +4,7 @@
 
 import { parseIpythonBashCell, previewBashCommand, previewIpythonCode } from "./code-preview.js";
 import { butterfly, el, icon } from "./dom.js";
-import { copyToClipboard, renderMarkdown } from "./markdown.js";
+import { copyToClipboard, renderMarkdown, type LinkHandlers } from "./markdown.js";
 
 /**
  * How a tool call should be presented.
@@ -96,6 +96,8 @@ import type {
 export interface TranscriptDeps {
 	onOpenLink: (href: string) => void;
 	onOpenFile: (path: string, startLine?: number, endLine?: number) => void;
+	/** A file link in prose was clicked; the host resolves it (absolute, relative, or an agent's sandbox path). */
+	onOpenLinkedFile: (path: string, startLine?: number, endLine?: number) => void;
 	onOpenDiff: (path: string) => void;
 	onForkFromUser: (ordinal: number) => void;
 	onSpawnedCardClick: (browseRef: string) => void;
@@ -172,6 +174,10 @@ interface ToolBlock {
 	 * shorter one, which is how a late partial frame is stopped from blanking it.
 	 */
 	renderedInputLen: number;
+	/** What the call card is currently structured as; a streamed update that keeps it can repaint in place. */
+	inputSig: string;
+	/** The call text now painted, read by the copy button at click time rather than captured at paint time. */
+	inputText: string;
 }
 
 /** A locally rendered prompt which has not yet been confirmed by the agent. */
@@ -370,12 +376,18 @@ export class Transcript {
 		}, true);
 	}
 
+	private readonly links: LinkHandlers;
+
 	constructor(
 		private readonly scroller: HTMLElement,
 		changedFilesBar: HTMLElement,
 		private readonly deps: TranscriptDeps,
 	) {
 		this.changedFilesBar = changedFilesBar;
+		this.links = {
+			external: (href) => deps.onOpenLink(href),
+			file: (path, startLine, endLine) => deps.onOpenLinkedFile(path, startLine, endLine),
+		};
 		// Scroll-lock: auto-follow only while the reader is already at the bottom.
 		//
 		// Intent is read from the input events, not from the scroll position. A
@@ -995,7 +1007,7 @@ export class Transcript {
 		const summary = el("summary", "", bits.join(" · "));
 		summary.title = "Everything before this point was replaced by this summary. The full transcript is still in the session file.";
 		const body = el("div", "compaction-summary-body");
-		renderMarkdown(message.summary ?? "", body, this.deps.onOpenLink);
+		renderMarkdown(message.summary ?? "", body, this.links);
 		details.append(summary, body);
 		return details;
 	}
@@ -1334,7 +1346,7 @@ export class Transcript {
 				// unchanged tail frame must not blow away a selection inside it.
 				if (md.dataset.src !== part.text) {
 					md.textContent = "";
-					renderMarkdown(part.text, md, this.deps.onOpenLink);
+					renderMarkdown(part.text, md, this.links);
 					md.dataset.src = part.text;
 				}
 				desired.push(md);
@@ -1556,7 +1568,9 @@ export class Transcript {
 			realName.title = "The tool call is ipython";
 			inputHead.appendChild(realName);
 		}
-		inputHead.appendChild(this.makeCopyButton(view.input));
+		block.inputSig = this.toolInputSig(name, args, view);
+		block.inputText = view.input;
+		inputHead.appendChild(this.makeCopyButton(() => block.inputText));
 		section.appendChild(inputHead);
 
 		if (name === "edit" && Array.isArray(args?.edits)) {
@@ -1564,18 +1578,9 @@ export class Transcript {
 			return;
 		}
 		const pre = el("pre");
-		if (view.kind === "shell") {
-			pre.className = "term";
-			pre.textContent = "";
-			for (const [index, line] of view.input.split("\n").entries()) {
-				if (index > 0) pre.appendChild(document.createTextNode("\n"));
-				const lineEl = el("span", "term-line", line);
-				if (index === 0) pre.appendChild(el("span", "term-prompt", "$ "));
-				pre.appendChild(lineEl);
-			}
-		} else {
-			pre.textContent = view.input;
-		}
+		if (view.kind === "shell") pre.className = "term";
+		this.fillInputPre(pre, view);
+		this.trackTailFollow(pre);
 		section.appendChild(pre);
 
 		// Edit-tool convenience: jump to the target file.
@@ -1589,6 +1594,41 @@ export class Transcript {
 			});
 			section.appendChild(openBtn);
 		}
+	}
+
+	private fillInputPre(pre: HTMLElement, view: ToolView): void {
+		if (view.kind === "shell") {
+			pre.textContent = "";
+			for (const [index, line] of view.input.split("\n").entries()) {
+				if (index > 0) pre.appendChild(document.createTextNode("\n"));
+				const lineEl = el("span", "term-line", line);
+				if (index === 0) pre.appendChild(el("span", "term-prompt", "$ "));
+				pre.appendChild(lineEl);
+			}
+		} else {
+			pre.textContent = view.input;
+		}
+	}
+
+	/** Everything a card's call section is built from except the streaming text itself. */
+	private toolInputSig(name: string, args: Record<string, unknown>, view: ToolView): string {
+		const path = typeof args?.path === "string" ? args.path : "";
+		return `${name}|${view.kind}|${view.label}|${Array.isArray(args?.edits) ? "edits" : ""}|${path}`;
+	}
+
+	/**
+	 * Remember whether the reader is following the tail of a pane that is
+	 * repainted while it streams. Wheel-up lands before the next frame, so a
+	 * flick away is never fought; "follow" is the default so a pane that was
+	 * hidden (card collapsed) when its text arrived still pins once it is opened.
+	 */
+	private trackTailFollow(pane: HTMLElement): void {
+		pane.addEventListener("wheel", (event) => {
+			if ((event as WheelEvent).deltaY < 0) pane.dataset.follow = "off";
+		}, { passive: true });
+		pane.addEventListener("scroll", () => {
+			pane.dataset.follow = pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 4 ? "on" : "off";
+		}, { passive: true });
 	}
 
 	/**
@@ -1611,8 +1651,21 @@ export class Transcript {
 		}
 		block.root.dataset.toolKind = view.kind;
 		block.root.dataset.toolLang = view.lang;
-		// Repainting the call replaces the <pre>; if the card is open and someone is
-		// reading it, that would jump them to the top mid-stream.
+		// The code box is the thing that scrolls, and it is a child of the section:
+		// rebuilding the section replaced it every frame, so a card that was open
+		// showed the first screenful of the code while the rest streamed in out of
+		// sight, and any scrolling inside it was thrown away. While the card's
+		// structure is unchanged only the text is repainted, in the same <pre>,
+		// following its tail unless the reader scrolled up inside it.
+		const pre = block.inputSection.querySelector(":scope > pre") as HTMLElement | null;
+		if (pre && block.inputSig === this.toolInputSig(name, args, view)) {
+			const follow = pre.dataset.follow !== "off";
+			const top = pre.scrollTop;
+			this.fillInputPre(pre, view);
+			block.inputText = view.input;
+			pre.scrollTop = follow ? pre.scrollHeight : top;
+			return;
+		}
 		this.preservingScroll(block.inputSection, "tool", () => {
 			this.renderToolInput(block, name, args);
 		});
@@ -1668,6 +1721,8 @@ export class Transcript {
 			resultSection: null,
 			state: "running",
 			renderedInputLen: view.input.length,
+			inputSig: "",
+			inputText: "",
 		};
 		this.renderToolInput(block, name, args);
 		root.dataset.toolName = name;
@@ -1715,12 +1770,12 @@ export class Transcript {
 		return parts.join("\n\n");
 	}
 
-	private makeCopyButton(text: string): HTMLButtonElement {
+	private makeCopyButton(text: string | (() => string)): HTMLButtonElement {
 		const btn = el("button", "tool-copy", "Copy") as HTMLButtonElement;
 		btn.title = "Copy to clipboard";
 		btn.addEventListener("click", (event) => {
 			event.stopPropagation();
-			copyToClipboard(text, () => {
+			copyToClipboard(typeof text === "function" ? text() : text, () => {
 				btn.textContent = "Copied";
 				setTimeout(() => (btn.textContent = "Copy"), 1000);
 			});

@@ -50,8 +50,56 @@ function sanitizeHref(href: string): string {
 	return "#";
 }
 
+/** What a click on a rendered link does; `file` absent means file targets stay inert. */
+export interface LinkHandlers {
+	external(href: string): void;
+	file?(path: string, startLine?: number, endLine?: number): void;
+}
+
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+const WINDOWS_DRIVE = /^[a-z]:[\\/]/i;
+
+/**
+ * A link target that names a FILE rather than a page: what the agent writes for
+ * things it saved (`sandbox:/mnt/data/x.pine`, `/root/lab/x.py`, `docs/setup.md`,
+ * `src/a.ts:12`, `src/a.ts#L10-L20`). Only `sandbox:` and `file:` schemes count;
+ * every other scheme, a protocol-relative `//host/x`, and a bare `#anchor` stay
+ * inert. The host decides whether such a path exists and where.
+ */
+export function parseFileLink(raw: string): { path: string; startLine?: number; endLine?: number } | null {
+	let target = raw.trim();
+	const scheme = /^(sandbox|file):/i.exec(target);
+	if (scheme) {
+		target = target.slice(scheme[0].length);
+		// `file:///abs`, `file://localhost/abs` and `sandbox:///abs` all reduce to `/abs`.
+		target = target.replace(/^\/\/(?:localhost)?(?=\/)/i, "");
+	} else if (URL_SCHEME.test(target) && !WINDOWS_DRIVE.test(target)) {
+		return null;
+	}
+	if (target.startsWith("//") || target.startsWith("#") || target === "") return null;
+	let startLine: number | undefined;
+	let endLine: number | undefined;
+	const fragment = /#L(\d+)(?:-L?(\d+))?$/.exec(target);
+	const suffix = fragment ? null : /:(\d+)(?:-(\d+))?$/.exec(target);
+	const lines = fragment ?? suffix;
+	if (lines) {
+		target = target.slice(0, lines.index);
+		startLine = Number(lines[1]);
+		if (lines[2] !== undefined) endLine = Number(lines[2]);
+		if (endLine !== undefined && endLine < startLine) endLine = undefined;
+	}
+	target = target.split("?")[0];
+	try {
+		target = decodeURIComponent(target);
+	} catch {
+		// keep the literal text: a stray % is a filename character, not an escape
+	}
+	if (target === "" || target.includes("\0")) return null;
+	return { path: target, ...(startLine === undefined ? {} : { startLine }), ...(endLine === undefined ? {} : { endLine }) };
+}
+
 /** Render inline markdown (code spans, bold, italic, links) into parent. */
-function renderInline(text: string, parent: HTMLElement, onOpenLink: (href: string) => void): void {
+function renderInline(text: string, parent: HTMLElement, links: LinkHandlers, depth = 0): void {
 	// Tokenize with a single pass regex; code spans win over emphasis.
 	// Every alternative is newline-bounded AND length-bounded. With open-ended
 	// classes an unmatched delimiter ("[", "**", a stray backtick) rescanned to
@@ -76,11 +124,11 @@ function renderInline(text: string, parent: HTMLElement, onOpenLink: (href: stri
 			parent.appendChild(code);
 		} else if (match[3] || match[4]) {
 			const strong = el("strong");
-			strong.textContent = match[3] ?? match[4] ?? "";
+			emphasisContent(strong, match[3] ?? match[4] ?? "", links, depth);
 			parent.appendChild(strong);
 		} else if (match[5] || match[6]) {
 			const em = el("em");
-			em.textContent = match[5] ?? match[6] ?? "";
+			emphasisContent(em, match[5] ?? match[6] ?? "", links, depth);
 			parent.appendChild(em);
 		} else if (match[7] && match[8]) {
 			const label = match[7];
@@ -88,16 +136,21 @@ function renderInline(text: string, parent: HTMLElement, onOpenLink: (href: stri
 			const a = el("a") as HTMLAnchorElement;
 			a.textContent = label;
 			const href = sanitizeHref(rawHref);
-			const openable = href !== "#";
+			const file = href === "#" && links.file ? parseFileLink(rawHref) : null;
+			const openable = href !== "#" || file !== null;
+			// The anchor itself never navigates the webview: a file target keeps the
+			// inert "#" and is opened by the host from the click handler below.
 			a.href = href;
 			// Hand the HOST the sanitized absolute URL, never the raw text: the two
 			// must agree on the destination, or a click opens something the link
-			// never claimed (and a relative target only earns an error notice).
+			// never claimed. A file target is shown as written so the reader can
+			// see exactly which path a click will ask for.
 			a.title = openable ? rawHref : `${rawHref} — not an openable link`;
 			if (!openable) a.className = "md-link-inert";
 			a.addEventListener("click", (event) => {
 				event.preventDefault();
-				if (openable) onOpenLink(href);
+				if (file) links.file?.(file.path, file.startLine, file.endLine);
+				else if (openable) links.external(href);
 			});
 			// Middle-click and modifier-click bypass the click handler entirely, so
 			// an inert target must not stay navigable through them either.
@@ -111,13 +164,23 @@ function renderInline(text: string, parent: HTMLElement, onOpenLink: (href: stri
 	}
 }
 
+/**
+ * Emphasis can wrap a link (`**[Download](sandbox:/x)**`), which is how agents
+ * mark the thing to click. Parse the inside one level further; deeper nesting
+ * stays literal text, which also keeps the work per delta bounded.
+ */
+function emphasisContent(node: HTMLElement, text: string, links: LinkHandlers, depth: number): void {
+	if (depth >= 2) node.textContent = text;
+	else renderInline(text, node, links, depth + 1);
+}
+
 interface ListLine {
 	indent: number;
 	ordered: boolean;
 	text: string;
 }
 
-export function renderMarkdown(markdown: string, container: HTMLElement, onOpenLink: (href: string) => void): void {
+export function renderMarkdown(markdown: string, container: HTMLElement, links: LinkHandlers): void {
 	container.classList.add("md");
 	const lines = markdown.replace(/\r\n/g, "\n").split("\n");
 	let i = 0;
@@ -172,7 +235,7 @@ export function renderMarkdown(markdown: string, container: HTMLElement, onOpenL
 			const tr = el("tr");
 			for (const cell of headerCells) {
 				const th = el("th");
-				renderInline(cell, th, onOpenLink);
+				renderInline(cell, th, links);
 				tr.appendChild(th);
 			}
 			thead.appendChild(tr);
@@ -182,7 +245,7 @@ export function renderMarkdown(markdown: string, container: HTMLElement, onOpenL
 				const trBody = el("tr");
 				for (const cell of row) {
 					const td = el("td");
-					renderInline(cell, td, onOpenLink);
+					renderInline(cell, td, links);
 					trBody.appendChild(td);
 				}
 				tbody.appendChild(trBody);
@@ -196,7 +259,7 @@ export function renderMarkdown(markdown: string, container: HTMLElement, onOpenL
 		const heading = line.match(/^(#{1,4})\s+(.*)$/);
 		if (heading) {
 			const h = el(`h${heading[1].length}`);
-			renderInline(heading[2], h, onOpenLink);
+			renderInline(heading[2], h, links);
 			container.appendChild(h);
 			i++;
 			continue;
@@ -217,7 +280,7 @@ export function renderMarkdown(markdown: string, container: HTMLElement, onOpenL
 				quoteLines.push(lines[i].replace(/^\s*>\s?/, ""));
 				i++;
 			}
-			renderMarkdown(quoteLines.join("\n"), quote, onOpenLink);
+			renderMarkdown(quoteLines.join("\n"), quote, links);
 			quote.classList.remove("md");
 			container.appendChild(quote);
 			continue;
@@ -233,7 +296,7 @@ export function renderMarkdown(markdown: string, container: HTMLElement, onOpenL
 				items.push({ indent: m[1].length, ordered: /^\d/.test(m[2]), text: m[3] });
 				i++;
 			}
-			container.appendChild(buildList(items, onOpenLink));
+			container.appendChild(buildList(items, links));
 			continue;
 		}
 
@@ -251,7 +314,7 @@ export function renderMarkdown(markdown: string, container: HTMLElement, onOpenL
 			i++;
 		}
 		const p = el("p");
-		renderInline(paraLines.join("\n"), p, onOpenLink);
+		renderInline(paraLines.join("\n"), p, links);
 		p.style.whiteSpace = "pre-wrap";
 		container.appendChild(p);
 	}
@@ -274,7 +337,7 @@ function splitTableRow(line: string): string[] {
 	return trimmed.split("|").map((cell) => cell.trim());
 }
 
-function buildList(items: ListLine[], onOpenLink: (href: string) => void): HTMLElement {
+function buildList(items: ListLine[], links: LinkHandlers): HTMLElement {
 	const rootIsOrdered = items[0]?.ordered ?? false;
 	const root = el(rootIsOrdered ? "ol" : "ul");
 	let currentList = root;
@@ -290,7 +353,7 @@ function buildList(items: ListLine[], onOpenLink: (href: string) => void): HTMLE
 		}
 		currentList = stack[stack.length - 1];
 		const li = el("li");
-		renderInline(item.text, li, onOpenLink);
+		renderInline(item.text, li, links);
 		currentList.appendChild(li);
 	}
 	return root;

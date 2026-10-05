@@ -163,6 +163,50 @@ async function armDelete(page, item) {
 }
 
 /**
+ * A tool call's code streams into an OPEN card. The code box is what scrolls, so
+ * it has to be the same box from frame to frame (a rebuilt one restarts at the
+ * top), follow the tail while the reader is not touching it, and stay where the
+ * reader put it once they scroll up inside it. Real Chromium: pure layout.
+ */
+async function verifyCodeStream(page, out = []) {
+	const pane = () => page.$eval(".tool-body pre", (e) => ({ top: e.scrollTop, max: e.scrollHeight - e.clientHeight, tagged: e.__seen === true }));
+	const frame = async (n) => {
+		await page.evaluate((i) => window.__codeFrame(i), n);
+		await page.waitForTimeout(40);
+	};
+	const outer = () => page.$eval(".messages", (e) => e.scrollHeight - e.scrollTop - e.clientHeight);
+
+	await page.click(".tool-toggle");
+	await page.waitForTimeout(60);
+	await page.$eval(".tool-body pre", (e) => { e.__seen = true; });
+	const total = await page.evaluate(() => window.__codeLength);
+	let n = 200;
+	for (; n < total * 0.6; n += 150) await frame(n);
+	let m = await pane();
+	out.push(mk("the code box is long enough to scroll", m.max > 100, `max=${m.max}`));
+	out.push(mk("the same code box survives every streamed frame", m.tagged));
+	out.push(mk("the code box follows the tail while it streams", m.max - m.top <= 4, `gap=${m.max - m.top}`));
+	out.push(mk("the chat stays pinned to the tail beneath it", (await outer()) <= 12, `gap=${await outer()}`));
+
+	await page.hover(".tool-body pre");
+	await page.mouse.wheel(0, -200);
+	await page.waitForTimeout(60);
+	const held = await pane();
+	out.push(mk("wheeling up inside the code box leaves the tail", held.max - held.top > 20, `gap=${held.max - held.top}`));
+	for (let i = 0; i < 5; i++) { n += 150; await frame(n); }
+	const after = await pane();
+	out.push(mk("further frames do not drag the reader back down", Math.abs(after.top - held.top) <= 2, `top ${held.top} -> ${after.top}`));
+	out.push(mk("the held code box is still the same box", after.tagged));
+
+	await page.$eval(".tool-body pre", (e) => { e.scrollTop = e.scrollHeight; });
+	await page.waitForTimeout(60);
+	for (let i = 0; i < 3; i++) { n += 150; await frame(n); }
+	const resumed = await pane();
+	out.push(mk("scrolling back to the end resumes following", resumed.max - resumed.top <= 4, `gap=${resumed.max - resumed.top}`));
+	return out;
+}
+
+/**
  * Scroll behaviour under a live stream. Runs in real Chromium because this is
  * pure layout: happy-dom reports every scroll metric as 0, so a DOM-only version
  * of these checks could never fail.
@@ -758,6 +802,7 @@ const MODES = {
 	modelmenu2: { file: "preview-modelmenu2.png", height: 660, verify: verifyModelmenu2 },
 	history2: { file: "preview-history2.png", height: 560, verify: verifyHistory2 },
 	scrollfollow: { file: "preview-scrollfollow.png", height: 520, verify: verifyScrollFollow },
+	codestream: { file: "preview-codestream.png", height: 700, verify: verifyCodeStream },
 	longthread: { file: "preview-longthread.png", height: 560, verify: verifyLongThread },
 	markdownnote: { file: "preview-markdownnote.png", height: 420, verify: verifyMarkdownnote },
 	retry: { file: "preview-retry.png", height: 480, verify: verifyRetry },

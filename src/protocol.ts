@@ -332,6 +332,7 @@ export type WebviewToHost =
 	| { type: "deleteSession"; path: string; sessionId: string }
 	| { type: "searchFiles"; query: string; requestId: number }
 	| { type: "openFile"; path: string; startLine?: number; endLine?: number }
+	| { type: "openLinkedFile"; path: string; startLine?: number; endLine?: number }
 	| { type: "openDiff"; path: string }
 	| { type: "pickImage"; requestId: number }
 	| { type: "attachActiveFile" }
