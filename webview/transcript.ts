@@ -241,6 +241,7 @@ export class Transcript {
 	injectSpawnCard(options: { id: string; browseRef?: string; name?: string; created?: string | null }): void {
 		const card = el("div", "spawned-card");
 		if (this.spawnCardIds.has(options.id)) return;
+		this.captureScrollFollow();
 		this.spawnCardIds.add(options.id);
 		const dot = el("span", "spawned-dot");
 		card.appendChild(dot);
@@ -271,7 +272,7 @@ export class Transcript {
 			event.stopPropagation();
 			if (options.browseRef) this.deps.onSpawnedCardClick(options.browseRef);
 		});
-		this.scrollToBottom();
+		this.followScrollToBottom();
 	}
 
 	private stickToBottomFieldsPlaceholder = false;
@@ -411,21 +412,18 @@ export class Transcript {
 			if (!this.atBottom()) this.setStick(false);
 		}, { passive: true });
 		this.scroller.addEventListener("scroll", () => {
-			// Our own snaps land exactly at the bottom, so this re-sticks correctly
-			// and needs no suppression: scrollToBottom only runs while already stuck.
-			// Only a move UP gives the lock away. The event for a snap is delivered
-			// a frame later, and if the page grew in between (a card opening, a code
-			// box filling) the reader reads as "off the bottom" without having moved
-			// at all — which dropped the lock and left the stream running off below
-			// the fold.
 			const top = this.scroller.scrollTop;
-			const height = this.scroller.scrollHeight;
-			const movedUp = top < this.lastScrollTop - 1;
-			const grew = this.lastScrollHeight > 0 && height > this.lastScrollHeight;
-			this.lastScrollTop = top;
-			this.lastScrollHeight = height;
+			// A delayed event for our own snap may arrive after content grows.
+			// Keep following only if the position is still the one WE wrote.
+			// Growth must never hide a real scrollbar/keyboard/touch move.
 			if (this.atBottom()) this.setStick(true);
-			else if (movedUp || !grew) this.setStick(false);
+			else if (Math.abs(top - this.lastScrollTop) > 1 || this.lastScrollHeight === 0 || this.scroller.scrollHeight <= this.lastScrollHeight) this.setStick(false);
+			// While following, retain the geometry of our last snap. An ignored
+			// growth event must not make the next pre-render check look off-tail.
+			if (!this.stickToBottom || this.atBottom()) {
+				this.lastScrollTop = top;
+				this.lastScrollHeight = this.scroller.scrollHeight;
+			}
 			this.maybeLoadEarlier();
 		}, { passive: true });
 		// A viewport that SHRINKS moves the bottom without moving the reader.
@@ -450,14 +448,25 @@ export class Transcript {
 	private viewportObserver: ResizeObserver | null = null;
 	private lastScrollTop = 0;
 	private lastScrollHeight = 0;
+	/** The reader's position is checked BEFORE a render grows the content. */
+	private captureScrollFollow(): void {
+		if (!this.stickToBottom) return;
+		if (this.atBottom()) {
+			// Accept a reader move within 50px before growth. The post-render
+			// check must not reclassify it using the NEW content height.
+			this.lastScrollTop = this.scroller.scrollTop;
+			this.lastScrollHeight = this.scroller.scrollHeight;
+			return;
+		}
+		// Asynchronous layout (an image/code pane) can grow between frames.
+		// Only exempt growth when the reader has not moved from our last snap.
+		const unchanged = Math.abs(this.scroller.scrollTop - this.lastScrollTop) <= 1;
+		const grew = this.lastScrollHeight > 0 && this.scroller.scrollHeight > this.lastScrollHeight;
+		if (!unchanged || !grew) this.setStick(false);
+	}
 
-	/**
-	 * Within a hair of the bottom. Deliberately tight: the old 48px deadzone meant
-	 * a short scroll up left the view "stuck", so the next frame yanked it back
-	 * down and the reader could never get out during a fast reply.
-	 */
 	private atBottom(): boolean {
-		return this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight <= 12;
+		return this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight <= 50;
 	}
 
 	private setStick(value: boolean): void {
@@ -474,15 +483,16 @@ export class Transcript {
 		if (!this.jumpBtn) {
 			this.jumpBtn = el("button", "jump-to-latest");
 			this.jumpBtn.title = "Jump to bottom";
-			this.jumpBtn.setAttribute("aria-label", "Jump to bottom");
+			this.jumpBtn.setAttribute("aria-label", "New messages — jump to bottom");
+			this.jumpBtn.appendChild(el("span", "", "New messages"));
 			this.jumpBtn.appendChild(icon("chevron", 12));
 			this.jumpBtn.classList.add("down");
 			this.jumpBtn.addEventListener("click", () => {
-				this.stickToBottom = true;
-				this.scrollToBottom();
-				this.updateJumpButton();
+				this.forceScrollToBottom();
 			});
-			this.scroller.appendChild(this.jumpBtn);
+			// Outside the scrolling content: showing the pill must not change
+			// scrollHeight, shift history, or become a browser scroll anchor.
+			this.scroller.parentElement?.appendChild(this.jumpBtn);
 		}
 		this.jumpBtn.classList.add("visible");
 	}
@@ -564,9 +574,7 @@ export class Transcript {
 		// boundary between sessions (and is also used by restart), so retaining the
 		// previous thread's strip here would be a false claim about this thread.
 		this.renderChangedFiles([]);
-		// The jump pill lived inside the scroller we just emptied; keeping the
-		// detached node would leave the operator with no way back to the bottom
-		// for the rest of the session.
+		this.jumpBtn?.remove();
 		this.jumpBtn = null;
 		// Windowing state belongs to the transcript we just discarded.
 		this.prunedNotice = null;
@@ -750,6 +758,7 @@ export class Transcript {
 	}
 
 	handleEvent(event: AgentEvent): void {
+		this.captureScrollFollow();
 		switch (event.type) {
 			case "agent_start":
 				this.dismissWelcome();
@@ -838,7 +847,7 @@ export class Transcript {
 				break;
 		}
 		this.pruneOldRows();
-		this.scrollToBottom();
+		this.followScrollToBottom();
 	}
 
 	isStreaming(): boolean {
@@ -1799,11 +1808,12 @@ export class Transcript {
 		const body = el("div", "tool-body");
 		root.append(header, body);
 		toggle.addEventListener("click", () => {
+			this.captureScrollFollow();
 			const open = root.classList.toggle("open");
 			toggle.setAttribute("aria-expanded", String(open));
 			// Opening a card at the tail grows the page under a reader who is
 			// following it; that is not a decision to stop following.
-			this.scrollToBottom();
+			this.followScrollToBottom();
 		});
 
 		const inputSection = el("div", "tool-section");
@@ -1981,7 +1991,7 @@ export class Transcript {
 		const section = this.ensureResultSection(block, "output", false);
 		const pre = section.querySelector("pre");
 		if (pre) this.setPaneText(pre as HTMLElement, text);
-		this.scrollToBottom();
+		// handleEvent applies the outer scroll guard once for the whole update.
 	}
 
 	private renderToolResult(message: ToolResultMessage): void {
@@ -2055,8 +2065,17 @@ export class Transcript {
 	// ---------------------------------------------------------------
 
 	scrollToBottom(): void {
+		// The user may have moved since the last render, before the browser
+		// delivers "scroll". This also guards viewport/roster resize callbacks.
+		if (Math.abs(this.scroller.scrollTop - this.lastScrollTop) > 1 && !this.atBottom()) this.setStick(false);
+		this.followScrollToBottom();
+	}
+
+	/** After a guarded render, browser adjustments from pruning are not user input. */
+	private followScrollToBottom(): void {
 		if (!this.stickToBottom) return;
-		this.scroller.scrollTop = this.scroller.scrollHeight;
+		const bottom = Math.max(0, this.scroller.scrollHeight - this.scroller.clientHeight);
+		if (Math.abs(this.scroller.scrollTop - bottom) > 1) this.scroller.scrollTop = this.scroller.scrollHeight;
 		this.lastScrollTop = this.scroller.scrollTop;
 		this.lastScrollHeight = this.scroller.scrollHeight;
 	}

@@ -274,19 +274,18 @@ async function verifyScrollFollow(page, out = []) {
 	));
 	out.push(mk("jump-to-bottom pill is offered while detached", await page.$eval(".jump-to-latest", (e) => e.classList.contains("visible")).catch(() => false)));
 
-	// 3b. A SMALL nudge has to count too. The old lock only released past a 48px
-	//     deadzone, so a short scroll left the view "stuck" and the next frame
-	//     dragged it straight back — the version of this that felt unescapable.
+	// 3b. A nudge just beyond the requested 50px follow zone must detach.
+	//     test/scroll-anchor.test.mjs checks both exact edges (49px and 51px).
 	await page.$eval(".messages", (e) => { e.scrollTop = e.scrollHeight; });
 	await page.waitForTimeout(60);
 	await page.hover(".messages");
-	await page.mouse.wheel(0, -40);
+	await page.mouse.wheel(0, -60);
 	await page.waitForTimeout(60);
 	const afterNudge = await metrics();
 	for (let i = 13; i <= 15; i++) await frame(i);
 	const afterNudgeStream = await metrics();
 	out.push(mk(
-		"a small scroll up is respected, not swallowed by a deadzone",
+		"a scroll beyond the 50px follow zone is respected",
 		afterNudgeStream.max - afterNudgeStream.top > 12 && Math.abs(afterNudgeStream.top - afterNudge.top) <= 4,
 		`top ${afterNudge.top} -> ${afterNudgeStream.top}, gap=${afterNudgeStream.max - afterNudgeStream.top}`,
 	));

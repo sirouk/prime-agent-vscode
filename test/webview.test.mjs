@@ -1797,9 +1797,9 @@ Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 200
 Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
 scroller.scrollTop = 0;
 scroller.dispatchEvent(new window.Event("scroll"));
-const jumpBtn = scroller.querySelector(".jump-to-latest");
+const jumpBtn = document.querySelector(".jump-to-latest");
 check("jump-to-bottom appears once the reader scrolls away", !!jumpBtn && jumpBtn.className.includes("visible"), jumpBtn?.className ?? "<none>");
-check("jump button is a labeled down arrow", jumpBtn?.title === "Jump to bottom" && jumpBtn.getAttribute("aria-label") === "Jump to bottom" && jumpBtn.className.includes("down"),
+check("jump button is a labeled down arrow", jumpBtn?.title === "Jump to bottom" && jumpBtn.getAttribute("aria-label") === "New messages — jump to bottom" && jumpBtn.className.includes("down"),
 	`${jumpBtn?.title ?? "<none>"} / ${jumpBtn?.className ?? ""}`);
 hostMessage({ type: "event", event: { type: "message_start", message: { role: "assistant", model: "kimi", content: [{ type: "text", text: "still going" }] } } });
 hostMessage({ type: "event", event: { type: "message_update", message: { role: "assistant", model: "kimi", content: [{ type: "text", text: "still going and going" }] } } });
