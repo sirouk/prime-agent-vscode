@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.45]
+
 - **The live scroll regression also runs in release CI.** Install Chromium and its system dependencies before verification so the streaming scroll test can run on a clean GitHub runner. The chat fix from 1.0.44 is unchanged.
 
 ## [1.0.44]
@@ -369,7 +371,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.44...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.45...HEAD
+[1.0.45]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.44...v1.0.45
 [1.0.44]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.43...v1.0.44
 [1.0.43]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.42...v1.0.43
 [1.0.42]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.41...v1.0.42
