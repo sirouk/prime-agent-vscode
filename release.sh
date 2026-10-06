@@ -298,6 +298,9 @@ gate_tests() {
         run_gate "$layer" "node $layer" || failures=$((failures+1))
     done
     run_gate "live scroll anchor" "node test/scroll-anchor.test.mjs" || failures=$((failures+1))
+    run_gate "live scroll resync" "node test/scroll-resync.test.mjs" || failures=$((failures+1))
+    run_gate "live tool replay scroll" "node test/scroll-tool-replay.test.mjs" || failures=$((failures+1))
+    run_gate "live scroll identities" "node test/scroll-identity.test.mjs" || failures=$((failures+1))
     run_gate "preview screenshot matrix" "node test/preview-shot.mjs" || failures=$((failures+1))
     if [ "$failures" != "0" ]; then
         fail "$failures verification layer(s) failed — fix them before publishing"

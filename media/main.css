@@ -462,6 +462,13 @@ textarea::-webkit-scrollbar {
 /* ---------- working indicator ---------- */
 
 .working-row {
+	position: absolute;
+	bottom: 10px;
+	left: 12px;
+	z-index: 4;
+	pointer-events: none;
+	border-radius: 4px;
+	background: var(--pa-surface);
 	display: flex;
 	align-items: center;
 	gap: 8px;

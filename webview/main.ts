@@ -135,6 +135,7 @@ menu.append(
 	menuItem("Export chat…", "export", () => post({ type: "exportChat" })),
 	menuItem("Restart agent process", "refresh", () => {
 		transcript.renderSnapshot([]);
+		renderedTranscriptSessionId = undefined;
 		post({ type: "restart" });
 	}),
 	menuSeparator(),
@@ -202,6 +203,8 @@ let nextFileSearchRequestId = 0;
 const pendingFileSearches = new Map<number, number>();
 /** Last host-confirmed session identity displayed in this panel. */
 let authoritativeSessionId: string | undefined;
+/** Status can announce navigation before its snapshot; track what the transcript actually rendered. */
+let renderedTranscriptSessionId: string | undefined;
 const composerDeps = {
 	onSend: (text: string, images: import("../src/protocol.js").ImageAttachment[], selections: import("../src/protocol.js").SelectionAttachment[]) => {
 		const clientRequestId = `${promptClientScope}-${++nextPromptClientRequestId}`;
@@ -927,13 +930,14 @@ window.addEventListener("message", (messageEvent) => {
 
 function dispatchHostMessage(message: HostToWebview): void {
 	switch (message.type) {
-		case "snapshot":
+		case "snapshot": {
+			const preserveScroll = Boolean(message.status.sessionId && message.status.sessionId === renderedTranscriptSessionId);
 			adoptAuthoritativeSession(message.status.sessionId);
 			pendingPrompts.clear();
-			transcript.clearSpawnCards?.();
 			spawnSeenBaseline = false;
 			resetSubagentActivityBaseline();
-			transcript.renderSnapshot(message.messages ?? []);
+			transcript.renderSnapshot(message.messages ?? [], preserveScroll, message.status.streaming);
+			renderedTranscriptSessionId = message.status.sessionId;
 			// Up/Down recall has to survive a reload or a resume, so it is seeded
 			// from the thread itself rather than only from what this panel sent.
 			composer.setPromptHistory(userPromptsOf(message.messages ?? []));
@@ -943,6 +947,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			applyStatus(message.status);
 			if (message.steerDefault) composer.setSteerDefault(message.steerDefault);
 			break;
+		}
 		case "event":
 			transcript.handleEvent(message.event);
 			if (message.event.type === "agent_start" || message.event.type === "agent_end") {
@@ -1028,10 +1033,10 @@ function dispatchHostMessage(message: HostToWebview): void {
 			// spawn-card dedupe keeps suppressing every id seen before the observed
 			// transcript, and "Subagent spawned" never appears again for them.
 			pendingPrompts.clear();
-			transcript.clearSpawnCards?.();
 			spawnSeenBaseline = false;
 			resetSubagentActivityBaseline();
-			transcript.renderSnapshot(message.messages);
+			transcript.renderSnapshot(message.messages, message.sessionId === renderedTranscriptSessionId);
+			renderedTranscriptSessionId = message.sessionId;
 			showView("chat");
 			break;
 		case "observedEvent":

@@ -200,6 +200,13 @@ interface OptimisticUserRow {
 export class Transcript {
 	private toolBlocks = new Map<string, ToolBlock>();
 	private streamingBubble: HTMLElement | null = null;
+	/** Replay events must update their existing row, never steal a settled tool card. */
+	private assistantRows = new Map<string, HTMLElement>();
+	private ambiguousAssistantKeys = new Set<string>();
+	private assistantMessages = new WeakMap<HTMLElement, AssistantMessage>();
+	private renderingKey: string | undefined;
+	private anchorCounts = new Map<string, number>();
+	private snapshotKeys = new WeakMap<object, string>();
 	/** Pending optimistic rows, keyed by the webview request that created them. */
 	private optimisticRows = new Map<string, OptimisticUserRow>();
 	/** Ordinal of each durable user message within the complete session history. */
@@ -406,7 +413,9 @@ export class Transcript {
 		// touchmove unstick synchronously, so the very next frame already knows.
 		this.wireSelectionPreserve();
 		this.scroller.addEventListener("wheel", (event) => {
-			if ((event as WheelEvent).deltaY < 0) this.setStick(false);
+			const delta = (event as WheelEvent).deltaY;
+			if (delta < 0) this.setStick(false);
+			else if (delta > 0 && this.atBottom()) this.setStick(true);
 		}, { passive: true });
 		this.scroller.addEventListener("touchmove", () => {
 			if (!this.atBottom()) this.setStick(false);
@@ -416,7 +425,7 @@ export class Transcript {
 			// A delayed event for our own snap may arrive after content grows.
 			// Keep following only if the position is still the one WE wrote.
 			// Growth must never hide a real scrollbar/keyboard/touch move.
-			if (this.atBottom()) this.setStick(true);
+			if (this.atBottom() && (this.stickToBottom || top > this.lastScrollTop + 1)) this.setStick(true);
 			else if (Math.abs(top - this.lastScrollTop) > 1 || this.lastScrollHeight === 0 || this.scroller.scrollHeight <= this.lastScrollHeight) this.setStick(false);
 			// While following, retain the geometry of our last snap. An ignored
 			// growth event must not make the next pre-render check look off-tail.
@@ -551,8 +560,31 @@ export class Transcript {
 	// Snapshot rebuild
 	// ---------------------------------------------------------------
 
-	renderSnapshot(messages: AgentMessage[]): void {
+	renderSnapshot(messages: AgentMessage[], preserveScroll = false, streaming = false): void {
+		if (preserveScroll) this.captureScrollFollow();
+		const following = this.stickToBottom;
+		const savedTop = this.scroller.scrollTop;
+		const viewportTop = this.scroller.getBoundingClientRect().top;
+		const anchor = preserveScroll && !following
+			? Array.from(this.scroller.children).find((node) =>
+				(node as HTMLElement).dataset.messageKey && node.getBoundingClientRect().bottom > viewportTop)
+			: undefined;
+		const anchorKey = (anchor as HTMLElement | undefined)?.dataset.messageKey;
+		const anchorOffset = anchor ? anchor.getBoundingClientRect().top - viewportTop : 0;
+		// Keep history that the reader already loaded; a resync is not navigation.
+		const renderStart = preserveScroll && !following && this.scroller.querySelector(".row, .custom-note, .compaction-summary")
+			? Math.min(this.olderMessages.length, Math.max(0, messages.length - INITIAL_RENDER))
+			: Math.max(0, messages.length - INITIAL_RENDER);
 		this.scroller.textContent = "";
+		this.spawnCardIds.clear();
+		this.assistantRows.clear();
+		this.ambiguousAssistantKeys.clear();
+		this.snapshotKeys = new WeakMap<object, string>();
+		this.anchorCounts.clear();
+		messages.forEach((message, index) => {
+			const base = this.messageAnchorBase(message) ?? `index:${index}`;
+			this.snapshotKeys.set(message, this.nextAnchorKey(base));
+		});
 		this.toolBlocks.clear();
 		this.streamingBubble = null;
 		this.welcome = null;
@@ -562,7 +594,7 @@ export class Transcript {
 		// Run state belongs to the session we just left. Inheriting it paints a
 		// brand-new session as "running" with a Stop button no agent_end can clear,
 		// and stopWorking() also kills the 1s timer whose row we just deleted.
-		this.streaming = false;
+		this.streaming = streaming;
 		this.stopWorking();
 		this.optimisticRows.clear();
 		this.userOrdinals = new WeakMap<object, number>();
@@ -586,15 +618,28 @@ export class Transcript {
 		// 3000-message session rendered whole costs ~330ms and ~100k DOM nodes
 		// before the operator sees anything, and every reflow after that pays for
 		// all of it. The rest stays in memory as data and renders on demand.
-		this.olderMessages = messages.length > INITIAL_RENDER ? messages.slice(0, messages.length - INITIAL_RENDER) : [];
-		for (const message of messages.slice(Math.max(0, messages.length - INITIAL_RENDER))) {
+		this.olderMessages = messages.slice(0, renderStart);
+		for (const message of messages.slice(renderStart)) {
 			this.renderMessage(message, false);
 		}
 		this.renderEarlierBar();
 		if (!this.hasContent) this.showWelcome();
+		if (streaming) this.startWorking();
 		// A freshly opened session always lands on the latest message, whatever
 		// the scroll position was in the session we came from.
-		this.forceScrollToBottom();
+		if (!preserveScroll || following) {
+			this.forceScrollToBottom();
+		} else {
+			const restored = anchorKey ? Array.from(this.scroller.children).find((node) =>
+				(node as HTMLElement).dataset.messageKey === anchorKey) : undefined;
+			this.scroller.scrollTop = restored
+				? this.scroller.scrollTop + restored.getBoundingClientRect().top - viewportTop - anchorOffset
+				: savedTop;
+			this.stickToBottom = false;
+			this.lastScrollTop = this.scroller.scrollTop;
+			this.lastScrollHeight = this.scroller.scrollHeight;
+			this.updateJumpButton();
+		}
 	}
 
 	/**
@@ -670,6 +715,8 @@ export class Transcript {
 		}
 		this.renderEarlierBar();
 		this.scroller.scrollTop = topBefore + (this.scroller.scrollHeight - heightBefore);
+		this.lastScrollTop = this.scroller.scrollTop;
+		this.lastScrollHeight = this.scroller.scrollHeight;
 	}
 
 	/**
@@ -678,6 +725,7 @@ export class Transcript {
 	 * without every call site knowing about it.
 	 */
 	private place(node: Node): void {
+		if (node instanceof HTMLElement && this.renderingKey) node.dataset.messageKey = this.renderingKey;
 		if (this.insertAnchor) this.scroller.insertBefore(node, this.insertAnchor);
 		else this.scroller.appendChild(node);
 	}
@@ -706,6 +754,9 @@ export class Transcript {
 			if (node.contains(this.streamingBubble) || node === this.streamingBubble) break;
 			for (const [id, block] of this.toolBlocks) {
 				if (node.contains(block.root)) this.toolBlocks.delete(id);
+			}
+			for (const [key, row] of this.assistantRows) {
+				if (row === node || node.contains(row)) this.assistantRows.delete(key);
 			}
 			node.remove();
 			toRemove -= 1;
@@ -747,14 +798,86 @@ export class Transcript {
 	// Live events
 	// ---------------------------------------------------------------
 
+	private nextAnchorKey(base: string): string {
+		const occurrence = this.anchorCounts.get(base) ?? 0;
+		this.anchorCounts.set(base, occurrence + 1);
+		return `${base}#${occurrence}`;
+	}
+
+	private messageAnchorBase(message: AgentMessage): string | undefined {
+		if (message.role === "assistant") return this.assistantKeys(message as AssistantMessage)[0];
+		const timestamp = this.messageTimestamp(message);
+		return timestamp != null ? `${message.role}:${timestamp}` : undefined;
+	}
+
+	private assistantKeys(message: AssistantMessage): string[] {
+		const keys: string[] = [];
+		const responseId = (message as AssistantMessage & { responseId?: string }).responseId;
+		if (responseId) keys.push(`response:${responseId}`);
+		for (const part of message.content ?? []) {
+			if (part.type === "toolCall") keys.push(`tool:${part.id}`);
+		}
+		if (keys.length === 0 && message.timestamp != null) keys.push(`assistant:${message.timestamp}`);
+		return keys;
+	}
+
+	private assistantRow(message: AssistantMessage): HTMLElement | undefined {
+		for (const key of this.assistantKeys(message)) {
+			if (this.ambiguousAssistantKeys.has(key)) continue;
+			const row = this.assistantRows.get(key);
+			if (row && (row.isConnected || row === this.streamingBubble) && this.compatibleAssistant(row, key, message)) return row;
+		}
+		return undefined;
+	}
+
+	private compatibleAssistant(row: HTMLElement, key: string, message: AssistantMessage): boolean {
+		if (!key.startsWith("assistant:") || row.dataset.settled !== "true") return true;
+		// Timestamp-only identities are weak. Distinct content with the same
+		// millisecond is a new reply, not grounds to suppress it as replay.
+		const previous = this.assistantMessages.get(row);
+		return !previous || JSON.stringify(previous.content) === JSON.stringify(message.content);
+	}
+
+	private settledAssistantRow(message: AssistantMessage): HTMLElement | undefined {
+		for (const key of this.assistantKeys(message)) {
+			if (this.ambiguousAssistantKeys.has(key)) continue;
+			const row = this.assistantRows.get(key);
+			if (row?.isConnected && row.dataset.settled === "true" && this.compatibleAssistant(row, key, message)) return row;
+		}
+		return undefined;
+	}
+
+	private registerAssistant(row: HTMLElement, message: AssistantMessage): void {
+		const keys = this.assistantKeys(message);
+		for (const key of keys) {
+			const previous = this.assistantRows.get(key);
+			if (key.startsWith("assistant:") && previous && previous !== row) this.ambiguousAssistantKeys.add(key);
+			this.assistantRows.set(key, row);
+		}
+		if (keys[0] && !row.dataset.messageKey?.startsWith(`${keys[0]}#`)) {
+			// A tool/response identity can arrive after an empty timestamp-only
+			// start. Use the same durable base that a later snapshot will use.
+			row.dataset.messageKey = this.renderingKey ?? this.nextAnchorKey(keys[0]);
+		}
+		this.assistantMessages.set(row, message);
+		if (message.stopReason || message.errorMessage) row.dataset.settled = "true";
+	}
+
+	/** Empty message_start frames are not a row: wait for the first visible part. */
+	private showStreamingBubble(): void {
+		const row = this.streamingBubble;
+		if (!row || !row.querySelector(":scope > .row-body")?.childNodes.length) return;
+		this.stopWorking();
+		if (!row.isConnected) this.place(row);
+		this.hasContent = true;
+	}
+
 	/** Create the live bubble for a turn whose message_start we never received. */
 	private adoptStreamingBubble(message: AssistantMessage): void {
 		if (this.streamingBubble) return;
 		this.dismissWelcome();
-		this.stopWorking();
-		this.streamingBubble = this.buildAssistantRow(message, true);
-		this.place(this.streamingBubble);
-		this.hasContent = true;
+		this.streamingBubble = this.assistantRow(message) ?? this.buildAssistantRow(message, true);
+		this.showStreamingBubble();
 	}
 
 	handleEvent(event: AgentEvent): void {
@@ -774,10 +897,10 @@ export class Transcript {
 			case "message_start": {
 				const message = event.message;
 				if (message.role === "assistant") {
-					this.stopWorking();
-					this.streamingBubble = this.buildAssistantRow(message as AssistantMessage, true);
-					this.place(this.streamingBubble);
-					this.hasContent = true;
+					if (this.settledAssistantRow(message as AssistantMessage)) break;
+					const existing = this.assistantRow(message as AssistantMessage);
+					this.streamingBubble = existing ?? this.buildAssistantRow(message as AssistantMessage, true);
+					this.showStreamingBubble();
 				} else {
 					this.dismissWelcome();
 					this.renderMessage(message, false);
@@ -788,19 +911,30 @@ export class Transcript {
 			case "message_update": {
 				const message = event.message as AssistantMessage;
 				if (message.role !== "assistant") break;
+				if (this.settledAssistantRow(message)) break;
 				// An update with no bubble means we joined the turn after its
 				// message_start (attach mid-flight, or a catch-up after a resync).
 				// Dropping it froze the transcript for the rest of the turn.
 				this.adoptStreamingBubble(message);
-				if (this.streamingBubble) this.fillAssistantRow(this.streamingBubble, message, true);
+				if (this.streamingBubble) {
+					this.fillAssistantRow(this.streamingBubble, message, true);
+					this.showStreamingBubble();
+				}
 				break;
 			}
 			case "message_end": {
 				const message = event.message;
 				if (message.role === "assistant") {
+					const existing = this.settledAssistantRow(message as AssistantMessage);
+					if (existing) {
+						// Duplicate final frames cannot reparent tool nodes or overwrite
+						// a different live reply. The settled receipt is already complete.
+						break;
+					}
 					this.adoptStreamingBubble(message as AssistantMessage);
 					if (this.streamingBubble) {
 						this.fillAssistantRow(this.streamingBubble, message as AssistantMessage, false);
+						this.showStreamingBubble();
 						this.streamingBubble = null;
 					}
 				}
@@ -896,7 +1030,9 @@ export class Transcript {
 		const mark = butterfly(15, "working-mark");
 		row.appendChild(mark);
 		row.appendChild(el("span", "working-label", "Working"));
-		this.place(row);
+		// Transient activity is an overlay, not transcript content. Removing it
+		// must not shrink scrollHeight and pull completed replies up and down.
+		this.scroller.parentElement?.appendChild(row);
 		this.workingRow = row;
 		const label = row.querySelector(".working-label");
 		window.clearInterval(this.workingTimer);
@@ -978,6 +1114,17 @@ export class Transcript {
 	}
 
 	private renderMessage(message: AgentMessage, isPartial: boolean): void {
+		const previousKey = this.renderingKey;
+		const base = this.messageAnchorBase(message);
+		this.renderingKey = this.snapshotKeys.get(message) ?? (base ? this.nextAnchorKey(base) : undefined);
+		try {
+			this.renderMessageContent(message, isPartial);
+		} finally {
+			this.renderingKey = previousKey;
+		}
+	}
+
+	private renderMessageContent(message: AgentMessage, isPartial: boolean): void {
 		const role = message.role;
 		if (role === "user") {
 			const userMessage = message as UserMessage;
@@ -1417,7 +1564,7 @@ export class Transcript {
 		const settled = Boolean(message.stopReason) || Boolean(message.errorMessage);
 		if (!isPartial && settled) {
 			this.priceUserTurn(message.usage);
-			const meta = this.usageLine(message as AssistantMessage);
+			const meta = this.usageLine(message as AssistantMessage, keyed("usage"));
 			if (meta) {
 				meta.dataset.part = "usage";
 				desired.push(meta);
@@ -1428,6 +1575,7 @@ export class Transcript {
 			}
 		}
 		this.reconcileChildren(body, desired);
+		this.registerAssistant(row, message);
 	}
 
 	private buildThinking(thinking: string, isPartial: boolean): HTMLElement {
@@ -1506,7 +1654,9 @@ export class Transcript {
 		}
 	}
 
-	private usageLine(message: AssistantMessage): HTMLElement | null {
+	private usageMessages = new WeakMap<HTMLElement, AssistantMessage>();
+
+	private usageLine(message: AssistantMessage, existing: HTMLElement | null = null): HTMLElement | null {
 		const parts: string[] = [];
 		const usage = message.usage;
 		if (usage?.totalTokens != null) parts.push(`${formatNumber(usage.totalTokens)} tokens`);
@@ -1519,14 +1669,25 @@ export class Transcript {
 			parts.push(`stopped: ${stop}`);
 		}
 		if (parts.length === 0) return null;
-		const line = el("div", `usage-line${isError ? " error" : ""}`, parts.join(" · "));
-		if (message.model) line.title = message.model;
+		const line = existing ?? el("div", "usage-line");
+		line.classList.toggle("error", isError);
+		let label = line.querySelector(".usage-label") as HTMLElement | null;
+		if (!label) {
+			label = el("span", "usage-label");
+			line.prepend(label);
+		}
+		const text = parts.join(" · ");
+		if (label.textContent !== text) label.textContent = text;
+		this.usageMessages.set(line, message);
+		line.title = message.model ?? "";
+		if (line.querySelector(".usage-copy")) return line;
 		const copyBtn = el("button", "uf-icon usage-copy") as HTMLButtonElement;
 		copyBtn.title = "Copy the full reply (text + thinking)";
 		copyBtn.appendChild(icon("copy", 11));
 		copyBtn.addEventListener("click", (event) => {
 			event.stopPropagation();
-			copyToClipboard(this.assistantCopyMarkdown(message) || this.assistantAllText(message));
+			const current = this.usageMessages.get(line) ?? message;
+			copyToClipboard(this.assistantCopyMarkdown(current) || this.assistantAllText(current));
 		});
 		line.appendChild(copyBtn);
 		return line;

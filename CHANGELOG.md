@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- **Streaming tool replies no longer move completed cards or take over history scrolling.** Late or replayed assistant events are matched to their existing reply; a completed tool card and its token footer cannot be moved into a new live row. Same-session snapshots preserve the reading anchor, previously loaded history and the follow lock, while actual session navigation still opens at the tail. Empty message-start frames no longer create a temporary gap, and the Working indicator sits outside the scroll content so its removal cannot shrink the transcript. Content shrinking to the bottom does not silently resume following; a downward scroll or the New messages button does. Live Chromium checks cover resyncs, tool replay, history loading, short viewports and shrink/clamp races.
+
 ## [1.0.45]
 
 - **The live scroll regression also runs in release CI.** Install Chromium and its system dependencies before verification so the streaming scroll test can run on a clean GitHub runner. The chat fix from 1.0.44 is unchanged.
