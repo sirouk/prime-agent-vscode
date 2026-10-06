@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.44]
+
 - **Reading history stays still during live replies.** The chat checks the reader's position before streaming content grows and follows only within 50 pixels of the bottom. Token chunks, agent messages, spawned-agent cards and tool-call updates share that guard, including updates that arrive before the browser delivers a scroll event. A small “New messages” button sits outside the scroll content so it cannot shift history; clicking it or scrolling to the bottom resumes following. Auto-follow no longer writes the scroll position when it is already at the tail. A live Chromium regression samples each streaming frame, tests 49/51-pixel gaps and delayed scroll events, and runs in the test and release gates.
 
 ## [1.0.42]
@@ -365,7 +367,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.43...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.44...HEAD
+[1.0.44]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.43...v1.0.44
 [1.0.43]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.42...v1.0.43
 [1.0.42]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.41...v1.0.42
 [1.0.41]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.40...v1.0.41
