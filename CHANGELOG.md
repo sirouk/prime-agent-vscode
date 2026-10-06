@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.46]
+
 - **Streaming tool replies no longer move completed cards or take over history scrolling.** Late or replayed assistant events are matched to their existing reply; a completed tool card and its token footer cannot be moved into a new live row. Same-session snapshots preserve the reading anchor, previously loaded history and the follow lock, while actual session navigation still opens at the tail. Empty message-start frames no longer create a temporary gap, and the Working indicator sits outside the scroll content so its removal cannot shrink the transcript. Content shrinking to the bottom does not silently resume following; a downward scroll or the New messages button does. Live Chromium checks cover resyncs, tool replay, history loading, short viewports and shrink/clamp races.
 
 ## [1.0.45]
@@ -373,7 +375,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.45...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.46...HEAD
+[1.0.46]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.45...v1.0.46
 [1.0.45]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.44...v1.0.45
 [1.0.44]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.43...v1.0.44
 [1.0.43]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.42...v1.0.43
