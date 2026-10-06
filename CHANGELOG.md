@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- **The live scroll regression also runs in release CI.** Install Chromium and its system dependencies before verification so the streaming scroll test can run on a clean GitHub runner. The chat fix from 1.0.44 is unchanged.
+
 ## [1.0.44]
 
 - **Reading history stays still during live replies.** The chat checks the reader's position before streaming content grows and follows only within 50 pixels of the bottom. Token chunks, agent messages, spawned-agent cards and tool-call updates share that guard, including updates that arrive before the browser delivers a scroll event. A small “New messages” button sits outside the scroll content so it cannot shift history; clicking it or scrolling to the bottom resumes following. Auto-follow no longer writes the scroll position when it is already at the tail. A live Chromium regression samples each streaming frame, tests 49/51-pixel gaps and delayed scroll events, and runs in the test and release gates.
