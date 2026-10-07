@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.47]
+
 - **Scrolling up stays detached during streaming and refresh.** Same-session rehydration keeps the visible reading anchor and the history already loaded. It no longer tears down tool cards underneath the reader. Snapshot-only catch-up prunes history only while following the tail, never while reading earlier output. Native browser anchoring can no longer turn a layout clamp into auto-follow. A wheel inside code/output cannot return the outer chat to the tail. Small upward gestures stop inner-pane following before streaming updates, and fractional snapshot offsets no longer accumulate into visible drift. Real Chromium wheel and snapshot tests gate the release.
 - **Tool cards stay mounted when a live session rehydrates.** Same-session snapshots now patch existing message rows and tool cards instead of clearing the transcript and recreating it. Tool toggles, code/output panes and token footers retain their nodes, expansion, selection and inner scroll position. An in-flight tool slot remains mounted when a durable snapshot omits it, and stale partial snapshots cannot erase its final receipt. New sessions and authoritative compaction still remove obsolete data. Live Chromium checks observe node removals directly and cover orphan results, pending prompts, retained history, pruning and changed final arguments.
 - **Working is back inside the chat panel, not over the conversation.** A reserved slim activity rail holds a padded pill. Its label stays mounted and the elapsed timer continues through tool/message transitions and same-session snapshots, updating once per second. The rail keeps its height when the run ends, so showing or hiding the pill cannot move the transcript. A new session resets the timer.
@@ -379,7 +381,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.46...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.47...HEAD
+[1.0.47]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.46...v1.0.47
 [1.0.46]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.45...v1.0.46
 [1.0.45]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.44...v1.0.45
 [1.0.44]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.43...v1.0.44
