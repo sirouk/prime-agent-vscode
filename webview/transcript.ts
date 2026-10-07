@@ -2,6 +2,7 @@
  * Transcript: message rendering and the live agent-event state machine.
  */
 
+import { agentIdentityKey, applyAgentIdentity } from "./agent-identity.js";
 import { parseIpythonBashCell, previewBashCommand, previewIpythonCode } from "./code-preview.js";
 import { butterfly, el, icon } from "./dom.js";
 import { copyToClipboard, renderMarkdown, type LinkHandlers } from "./markdown.js";
@@ -89,6 +90,7 @@ import type {
 	AgentEvent,
 	AgentMessage,
 	AssistantMessage,
+	SessionChild,
 	ToolResultMessage,
 	UserMessage,
 } from "../src/protocol.js";
@@ -105,6 +107,22 @@ export interface TranscriptDeps {
 	onShowHistory: () => void;
 	onFocusComposer: () => void;
 	onOptimisticConfirmed?: (clientRequestId: string) => void;
+}
+
+interface SpawnCardOptions {
+	/** Current daemon target, for matching only. Never used as browse authority. */
+	id: string;
+	sessionId?: string;
+	browseRef?: string;
+	name?: string;
+	created?: string | null;
+}
+
+interface SpawnCard {
+	card: HTMLButtonElement;
+	label: HTMLElement;
+	view: HTMLElement;
+	options: SpawnCardOptions;
 }
 
 /** prime-agent's compaction marker: the summary replaces everything before it. */
@@ -234,7 +252,7 @@ export class Transcript {
 	private stickToBottom = true;
 	/** Collapsed until asked, and the choice survives every re-render of the strip. */
 	private changedFilesExpanded = false;
-	private spawnCardIds = new Set<string>();
+	private spawnCards = new Map<string, SpawnCard>();
 	/** Messages held as data, above the rendered window. */
 	private olderMessages: AgentMessage[] = [];
 	private earlierBar: HTMLElement | null = null;
@@ -249,34 +267,84 @@ export class Transcript {
 	 * Durable across resumes because it's re-derived from daemon state, not stored.
 	 */
 	clearSpawnCards(): void {
-		this.spawnCardIds.clear();
+		this.spawnCards.clear();
 		this.scroller.querySelectorAll(".spawned-card").forEach((n) => n.remove());
 	}
 
-	injectSpawnCard(options: { id: string; browseRef?: string; name?: string; created?: string | null }): void {
-		const card = el("div", "spawned-card");
-		if (this.spawnCardIds.has(options.id)) return;
+	/** Refresh mounted cards from the current roster, never a captured old ref. */
+	syncSpawnCards(children: readonly SessionChild[]): void {
+		for (const [key, entry] of Array.from(this.spawnCards)) {
+			const child = children.find((candidate) =>
+				agentIdentityKey(candidate) === key ||
+				(!entry.options.sessionId && candidate.activeSessionId === entry.options.id));
+			this.updateSpawnCard(entry, child ? {
+				id: child.activeSessionId,
+				sessionId: child.sessionId ?? entry.options.sessionId,
+				browseRef: child.browseRef,
+				name: child.name,
+				created: child.created ?? entry.options.created,
+			} : { ...entry.options, browseRef: undefined });
+			const nextKey = agentIdentityKey({ ...entry.options, activeSessionId: entry.options.id });
+			if (nextKey !== key) {
+				this.spawnCards.delete(key);
+				this.spawnCards.set(nextKey, entry);
+			}
+		}
+	}
+
+	private updateSpawnCard(entry: SpawnCard, options: SpawnCardOptions): void {
+		entry.options = options;
+		applyAgentIdentity(entry.card, { ...options, activeSessionId: options.id });
+		entry.label.textContent = `Subagent spawned${options.name ? ` — ${options.name}` : ""}`;
+		entry.label.title = options.created ? `Started ${options.created}` : "Started";
+		entry.card.disabled = !options.browseRef;
+		entry.view.textContent = options.browseRef ? "view ›" : "unavailable";
+		entry.card.title = options.browseRef
+			? `Open ${options.name ?? "this subagent"} and expand its session branch`
+			: "This subagent is not available in the current session roster";
+		entry.card.setAttribute("aria-label", options.browseRef
+			? `Open subagent ${options.name ?? options.sessionId ?? options.id}`
+			: `Subagent ${options.name ?? options.sessionId ?? options.id} is unavailable`);
+	}
+
+	injectSpawnCard(options: SpawnCardOptions): void {
+		const key = agentIdentityKey({ ...options, activeSessionId: options.id });
+		if (!key) return;
+		const existing = this.spawnCards.get(key) ?? [...this.spawnCards.values()].find((entry) =>
+			!entry.options.sessionId && entry.options.id === options.id);
+		if (existing) {
+			this.updateSpawnCard(existing, { ...options, sessionId: options.sessionId ?? existing.options.sessionId });
+			const nextKey = agentIdentityKey({ ...existing.options, activeSessionId: existing.options.id });
+			for (const [priorKey, entry] of this.spawnCards) {
+				if (entry === existing && priorKey !== nextKey) this.spawnCards.delete(priorKey);
+			}
+			this.spawnCards.set(nextKey, existing);
+			return;
+		}
 		this.captureScrollFollow();
 		const readingAnchor = this.readingAnchor();
-		this.spawnCardIds.add(options.id);
+		const card = el("button", "spawned-card") as HTMLButtonElement;
+		card.type = "button";
 		const dot = el("span", "spawned-dot");
-		card.appendChild(dot);
+		dot.setAttribute("aria-hidden", "true");
 		const label = el("span", "spawned-label");
-		label.textContent = `Subagent spawned${options.name ? ` — ${options.name}` : ""}`;
-		label.title = options.created ? `Started ${options.created}` : "Started";
-		card.appendChild(label);
-		const view = el("button", "spawned-view", "view ›") as HTMLButtonElement;
-		view.title = "Look inside this subagent";
-		view.disabled = !options.browseRef;
-		card.appendChild(view);
+		const view = el("span", "spawned-view");
+		card.append(dot, label, view);
+		const entry: SpawnCard = { card, label, view, options };
+		this.spawnCards.set(key, entry);
+		this.updateSpawnCard(entry, options);
+		card.addEventListener("click", () => {
+			if (!card.disabled && entry.options.browseRef) this.deps.onSpawnedCardClick(entry.options.browseRef);
+		});
 		// Ordered insert: before the first existing row newer than created.
 		const createdMs = options.created ? Date.parse(options.created) : NaN;
 		let insertBefore: Element | null = null;
 		if (Number.isFinite(createdMs)) {
-			for (const existing of Array.from(this.scroller.children)) {
-				const t = Number((existing as HTMLElement).dataset?.ts ?? "");
+			card.dataset.ts = String(createdMs);
+			for (const row of Array.from(this.scroller.children)) {
+				const t = Number((row as HTMLElement).dataset?.ts ?? "");
 				if (Number.isFinite(t) && t > createdMs) {
-					insertBefore = existing;
+					insertBefore = row;
 					break;
 				}
 			}
@@ -284,10 +352,6 @@ export class Transcript {
 		if (insertBefore) this.scroller.insertBefore(card, insertBefore);
 		else this.scroller.appendChild(card);
 		this.hasContent = true;
-		view.addEventListener("click", (event) => {
-			event.stopPropagation();
-			if (options.browseRef) this.deps.onSpawnedCardClick(options.browseRef);
-		});
 		this.restoreReadingAnchor(readingAnchor);
 		this.followScrollToBottom();
 	}
@@ -686,7 +750,7 @@ export class Transcript {
 		this.scroller.textContent = "";
 		this.snapshotScrollRemainder = 0;
 		this.compactionSignature = this.snapshotCompactionSignature(messages);
-		this.spawnCardIds.clear();
+		this.spawnCards.clear();
 		this.assistantRows.clear();
 		this.ambiguousAssistantKeys.clear();
 		this.snapshotKeys = new WeakMap<object, string>();
@@ -841,7 +905,7 @@ export class Transcript {
 			}
 		}
 		for (const [key, row] of this.assistantRows) if (!row.isConnected && row !== live) this.assistantRows.delete(key);
-		if (messages.length === 0 || compacted) this.spawnCardIds.clear();
+		if (messages.length === 0 || compacted) this.spawnCards.clear();
 		this.streaming = streaming;
 		this.streamingBubble = live?.isConnected && live.dataset.settled !== "true" ? live : null;
 		// Keep the message registered by the accepted snapshot. Re-registering

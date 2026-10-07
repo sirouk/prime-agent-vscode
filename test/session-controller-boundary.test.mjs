@@ -767,6 +767,129 @@ controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 	check("without activity and nothing busy, it is idle", status({ activeSessionId: "a" }) === "idle");
 }
 
+// --- canonical child identity is display data, never browse authority ----------
+{
+	const rosterPosts = [];
+	const roster = new SessionController(
+		{ subscriptions: [], extensionUri: { fsPath: process.cwd() }, globalState: state, workspaceState: state },
+		{ append: () => {}, appendLine: () => {} },
+	);
+	// This fixture has no RPC client, worker, or daemon. Suppress constructor and
+	// reset polling before exercising the real roster projection against a fake.
+	if (roster.processTimer) clearTimeout(roster.processTimer);
+	roster.processTimer = null;
+	roster.scheduleProcessRefresh = () => {};
+	roster.scheduleChildrenRefresh = () => {};
+	roster.threadDiffs.harvestSubagents = async () => {};
+	roster.attach({ post: (message) => rosterPosts.push(message) });
+	roster.state = { sessionId: "identity-parent-uuid" };
+	let summaries = [];
+	let listCalls = 0;
+	roster.sidecar = {
+		connected: true,
+		list: async () => { listCalls += 1; return summaries; },
+		dispose: () => {},
+	};
+	const latest = () => rosterPosts.filter((message) => message.type === "sessionChildren").at(-1);
+	try {
+		await roster.refreshChildren(); // Seed an empty roster; the next child is new.
+		summaries = [{
+			id: "identity-child-active", activeSessionId: "identity-child-active", sessionId: "identity-child-uuid",
+			parentSessionId: "identity-parent-uuid", runtimeKind: "subagent", sessionName: "original-name",
+			created: "2026-09-21T10:00:00.000Z", rosterStatus: "running", isStreaming: true,
+		}];
+		await roster.refreshChildren();
+		const activeRow = latest()?.children[0];
+		const activeRef = activeRow?.browseRef;
+		check("child rows publish the daemon UUID independently of the active handle",
+			activeRow?.sessionId === "identity-child-uuid" && activeRow.activeSessionId === "identity-child-active", JSON.stringify(activeRow));
+		check("the spawn receipt publishes the same canonical identity as its row",
+			latest()?.spawned?.[0]?.sessionId === activeRow?.sessionId && latest()?.spawned?.[0]?.sessionId === "identity-child-uuid", JSON.stringify(latest()?.spawned));
+		check("canonical display identity does not replace the opaque browse capability",
+			typeof activeRef === "string" && activeRef !== activeRow?.sessionId && activeRef !== activeRow?.activeSessionId);
+
+		summaries = [{ ...summaries[0], sessionName: "renamed-child" }];
+		await roster.refreshChildren();
+		check("renaming a child keeps its canonical identity and current capability",
+			latest()?.children[0]?.sessionId === "identity-child-uuid" && latest()?.children[0]?.browseRef === activeRef && latest()?.children[0]?.name === "renamed-child" && latest()?.spawned?.length === 0, JSON.stringify(latest()));
+
+		// Passivation changes the attach selector to the UUID and revokes the old
+		// ref, but it is the SAME child, not another spawn or another identity.
+		const { activeSessionId: _oldActiveId, ...passiveSummary } = summaries[0];
+		summaries = [{ ...passiveSummary, id: "identity-child-uuid", rosterStatus: "inactive", isStreaming: false }];
+		await roster.refreshChildren();
+		const passiveRow = latest()?.children[0];
+		const passiveRef = passiveRow?.browseRef;
+		check("passivation keeps the canonical identity without fabricating a spawn",
+			passiveRow?.sessionId === "identity-child-uuid" && passiveRow.activeSessionId === "identity-child-uuid" && latest()?.spawned?.length === 0, JSON.stringify(latest()));
+		check("passivation keeps finished status and rotates the current browse ref",
+			passiveRow?.status === "inactive" && typeof passiveRef === "string" && passiveRef !== activeRef && !roster.browseableChildren.has(activeRef) && roster.browseableChildren.has(passiveRef));
+		const readsBeforeInvalid = listCalls;
+		check("a canonical UUID is not accepted as a browse capability", (await roster.browseChild("identity-child-uuid")) === false);
+		check("the passivated child's stale active ref is not accepted", (await roster.browseChild(activeRef ?? "missing-ref")) === false);
+		check("invalid identities and stale refs are refused before another daemon lookup", listCalls === readsBeforeInvalid);
+
+		roster.resetChildrenBaseline();
+		await roster.refreshChildren();
+		const renewedRow = latest()?.children[0];
+		check("a new display context remints authority but preserves canonical identity",
+			renewedRow?.sessionId === "identity-child-uuid" && renewedRow.browseRef !== passiveRef && !roster.browseableChildren.has(passiveRef) && latest()?.spawned?.length === 0, JSON.stringify(latest()));
+		const renewedRef = renewedRow?.browseRef;
+		summaries = [];
+		await roster.refreshChildren();
+		check("a child leaving the offered roster loses its browse capability", !roster.browseableChildren.has(renewedRef));
+
+		// Older summaries can omit the daemon UUID. Do not label a changing active
+		// handle as canonical; the real UUID may be discovered on a later roster.
+		summaries = [{
+			id: "identity-without-uuid-active", activeSessionId: "identity-without-uuid-active",
+			parentSessionId: "identity-parent-uuid", runtimeKind: "subagent", sessionName: "late-uuid",
+			rosterStatus: "running", isStreaming: true,
+		}];
+		await roster.refreshChildren();
+		check("missing daemon UUID stays absent from child and spawn identity fields",
+			latest()?.children[0]?.sessionId === undefined && latest()?.spawned?.[0]?.sessionId === undefined && latest()?.children[0]?.activeSessionId === "identity-without-uuid-active", JSON.stringify(latest()));
+		summaries = [{ ...summaries[0], sessionId: "identity-discovered-uuid" }];
+		await roster.refreshChildren();
+		check("a late daemon UUID is projected without changing the daemon attach selector",
+			latest()?.children[0]?.sessionId === "identity-discovered-uuid" && latest()?.children[0]?.activeSessionId === "identity-without-uuid-active", JSON.stringify(latest()));
+
+		// In a child view, parent and sibling identity must use the same daemon
+		// UUID. The status sessionId remains the latched draft/view identity.
+		roster.attached = { activeSessionId: "identity-child-active", sessionPath: validPath, sessionId: "latched-display-id" };
+		roster.attachedEpoch = roster.viewEpoch;
+		roster.resetChildrenBaseline();
+		summaries = [
+			{ id: "identity-parent-active", activeSessionId: "identity-parent-active", sessionId: "identity-parent-uuid", runtimeKind: "root" },
+			{ id: "identity-child-active", activeSessionId: "identity-child-active", sessionId: "identity-child-uuid", runtimeKind: "subagent", parentActiveSessionId: "identity-parent-active", parentSessionId: "identity-parent-uuid" },
+		];
+		await roster.refreshChildren();
+		check("parent and viewed sibling publish canonical session identity",
+			latest()?.parent?.sessionId === "identity-parent-uuid" && latest()?.siblings?.[0]?.sessionId === "identity-child-uuid" && latest()?.viewedActiveSessionId === "identity-child-active", JSON.stringify(latest()));
+		check("the current-view identity is explicit display data with no browse authority",
+			latest()?.viewedSession?.sessionId === "identity-child-uuid" && latest()?.viewedSession?.activeSessionId === "identity-child-active" && latest()?.viewedSession?.browseRef === undefined, JSON.stringify(latest()?.viewedSession));
+		check("canonical roster identity does not rewrite the status draft boundary", roster.buildStatus().sessionId === "latched-display-id");
+		const { parentActiveSessionId: _parentActive, ...uuidParentOnlyChild } = summaries[1];
+		summaries = [summaries[0], uuidParentOnlyChild];
+		await roster.refreshChildren();
+		check("current-view identity remains available without an active parent link",
+			latest()?.viewedSession?.sessionId === "identity-child-uuid" && latest()?.viewedSession?.browseRef === undefined, JSON.stringify(latest()));
+		check("canonical identity does not invent browse authority for UUID-only parent topology",
+			latest()?.parent === undefined && (latest()?.siblings?.length ?? 0) === 0 && roster.browseableChildren.size === 0, JSON.stringify(latest()));
+		roster.attached = null;
+		roster.attachedEpoch = null;
+		roster.resetChildrenBaseline();
+		roster.observingId = "observed-identity";
+		const readsBeforeObserve = listCalls;
+		await roster.refreshChildren();
+		check("an observed view does not mine hidden RPC child capabilities", listCalls === readsBeforeObserve && roster.browseableChildren.size === 0);
+	} finally {
+		roster.attached = null;
+		roster.attachedEpoch = null;
+		roster.dispose();
+	}
+}
+
 // --- choosing a model to retry a refused compaction --------------------------
 // Name-free on purpose: a refusal is one model's verdict on one thread, so the
 // only thing checkable up front is whether a candidate could hold the thread.

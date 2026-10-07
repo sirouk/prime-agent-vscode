@@ -698,7 +698,7 @@ check("dismiss posts and hides", !document.querySelector(".install-banner.visibl
 hostMessage({
 	type: "sessionChildren",
 	children: [
-		{ id: "sub-a", activeSessionId: "aaaa1111", name: "verify-threads", runtimeKind: "subagent", created: "2026-08-07T15:00:00Z", isStreaming: true, attachedClients: 0, rlmDepth: 1 },
+		{ id: "sub-a", activeSessionId: "aaaa1111", browseRef: "browse-spawn-verify", name: "verify-threads", runtimeKind: "subagent", created: "2026-08-07T15:00:00Z", isStreaming: true, attachedClients: 0, rlmDepth: 1 },
 	],
 	spawned: [{ activeSessionId: "aaaa1111", browseRef: "browse-spawn-verify", name: "verify-threads", created: "2026-08-07T15:00:00Z" }],
 });

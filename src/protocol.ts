@@ -159,6 +159,8 @@ export interface RpcSessionState {
 export interface SessionChild {
 	/** bare id (uuid or sub-xxxx) for display */
 	id: string;
+	/** Stable display identity (normally the daemon session UUID), never attach authority. */
+	sessionId?: string;
 	/** daemon attach target (12-char active id, or the id when resident); display only. */
 	activeSessionId: string;
 	/** Opaque host-issued capability required to browse this rendered child. */
@@ -430,7 +432,7 @@ export type HostToWebview =
 			steerDefault?: "steer" | "followUp";
 		}
 	| { type: "favorites"; favorites: ModelRef[] }
-	| { type: "sessionChildren"; children: SessionChild[]; parent?: SessionChild; siblings?: SessionChild[]; viewedActiveSessionId?: string; spawned?: Array<{ activeSessionId: string; browseRef?: string; name?: string; created?: string }> }
+	| { type: "sessionChildren"; children: SessionChild[]; parent?: SessionChild; siblings?: SessionChild[]; viewedActiveSessionId?: string; viewedSession?: SessionChild; spawned?: Array<{ activeSessionId: string; sessionId?: string; browseRef?: string; name?: string; created?: string }> }
 	| { type: "installPrompt"; url: string; reason: string }
 	| ThreadDiffsMessage
 	| { type: "draft"; text: string }

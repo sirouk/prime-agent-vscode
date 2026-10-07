@@ -2835,47 +2835,128 @@ body.vscode-light pre.term {
 	50% { opacity: 1; transform: scale(1); }
 }
 
-/* ---------- subagent spawn card ---------- */
+/* ---------- stable subagent identity (independent of run/status colors) ---------- */
+
+.agent-identity {
+	--agent-color: var(--agent-color-dark);
+}
+
+body.vscode-light .agent-identity,
+body.vscode-high-contrast-light .agent-identity {
+	--agent-color: var(--agent-color-light);
+}
+
+.subagent-identity,
+.session-agent-mark,
+.spawned-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 3px;
+	background: var(--agent-color);
+	flex: 0 0 8px;
+}
+
+.session-agent-mark {
+	display: none;
+}
+
+.session-title-wrap.agent-identity .session-agent-mark {
+	display: inline-block;
+}
+
+.subagent-row.agent-identity {
+	min-width: 0;
+	border-left: 2px solid color-mix(in srgb, var(--agent-color) 55%, transparent);
+}
+
+.subagent-row.agent-identity.viewing {
+	background: color-mix(in srgb, var(--agent-color) 12%, transparent);
+	border-left-color: var(--agent-color);
+}
+
+.subagent-row.agent-identity.viewing .subagent-name {
+	color: var(--pa-text);
+}
+
+.subagent-row .subagent-name {
+	min-width: 0;
+}
+
+.subagent-row .subagent-badge,
+.subagent-row .subagent-go {
+	flex-shrink: 0;
+}
+
+.subagent-row .subagent-dot {
+	margin-left: auto;
+}
+
+.subagent-row:disabled {
+	cursor: default;
+}
+
+.subagent-row:focus-visible,
+.subagents-header:focus-visible,
+.subagents-subhead:focus-visible,
+.subagents-back-row:focus-visible,
+.spawned-card:focus-visible {
+	outline: 2px solid var(--vscode-focusBorder, var(--pa-accent));
+	outline-offset: -2px;
+}
+
+/* ---------- subagent spawn card (one native button, no nested controls) ---------- */
 
 .spawned-card {
 	display: flex;
 	align-items: center;
 	gap: 7px;
+	width: 100%;
+	min-width: 0;
 	margin: 1px 0;
-	padding: 3px 9px;
+	padding: 4px 9px;
 	border: 1px solid var(--pa-border-faint, color-mix(in srgb, transparent 60%, var(--pa-border) 40%));
+	border-left: 2px solid var(--agent-color);
 	border-radius: 7px;
 	font-size: 10px;
+	text-align: left;
 	color: var(--pa-dim);
 	background: color-mix(in srgb, transparent 75%, var(--pa-raised) 25%);
 }
 
-.spawned-dot {
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: var(--pa-accent);
-	opacity: 0.9;
-	flex-shrink: 0;
+.spawned-card:not(:disabled):hover {
+	background: color-mix(in srgb, var(--agent-color) 8%, var(--pa-bg));
+	color: var(--pa-text);
+}
+
+.spawned-card:disabled {
+	cursor: default;
 }
 
 .spawned-label {
 	flex: 1;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
 .spawned-view {
+	flex-shrink: 0;
 	font-size: 9.5px;
-	color: var(--pa-faint);
+	color: var(--pa-dim);
 	padding: 0 4px;
 	border-radius: 4px;
 }
 
-.spawned-view:hover {
-	color: var(--pa-accent);
-	background: var(--pa-accent-dim);
+.spawned-card:not(:disabled):hover .spawned-view {
+	color: var(--pa-text);
+}
+
+body.vscode-high-contrast .subagent-identity,
+body.vscode-high-contrast .session-agent-mark,
+body.vscode-high-contrast .spawned-dot {
+	outline: 1px solid var(--pa-text);
+	outline-offset: 1px;
 }
 
 /* ---------- transcript windowing ---------- */

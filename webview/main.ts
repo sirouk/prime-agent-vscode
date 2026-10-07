@@ -2,6 +2,7 @@
  * Prime Agent chat webview: layout, host message dispatch, view switching.
  */
 
+import { agentIdentityKey, applyAgentIdentity, clearAgentIdentity, rememberAgentIdentities } from "./agent-identity.js";
 import { Composer } from "./composer.js";
 import { butterfly, el, icon, iconButton } from "./dom.js";
 import { HistoryView } from "./history.js";
@@ -43,7 +44,9 @@ brand.addEventListener("keydown", (event) => {
 });
 const sessionTitleWrap = el("div", "session-title-wrap");
 const sessionTitle = el("span", "session-title", "");
-sessionTitleWrap.append(sessionTitle);
+const sessionAgentMark = el("span", "session-agent-mark");
+sessionAgentMark.setAttribute("aria-hidden", "true");
+sessionTitleWrap.append(sessionAgentMark, sessionTitle);
 topbar.append(brand, sessionTitleWrap, el("span", "spacer"));
 
 /**
@@ -279,7 +282,7 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 	onOpenLinkedFile: (path, startLine, endLine) => post({ type: "openLinkedFile", path, startLine, endLine }),
 	onOpenDiff: (path) => post({ type: "openDiff", path }),
 	onForkFromUser: (ordinal) => post({ type: "forkFromUser", ordinal }),
-	onSpawnedCardClick: (browseRef) => post({ type: "browseChild", browseRef }),
+	onSpawnedCardClick: (browseRef) => browseSubagent(browseRef),
 	onNewSession: () => post({ type: "newSession" }),
 	onShowHistory: () => {
 		showView("history");
@@ -346,6 +349,27 @@ let runningProcessCount = 0;
 const subagentsStrip = el("div", "subagents-strip") as HTMLElement;
 let subagentsExpanded = false;
 let sessionChildren: SessionChild[] = [];
+
+/** Explicit navigation expands the matching branch, even after a manual fold. */
+function browseSubagent(browseRef: string): void {
+	const child = [...sessionChildren, ...sessionSiblings].find((candidate) => candidate.browseRef === browseRef);
+	if (!child) return;
+	subagentsExpanded = true;
+	subagentsAutoExpandSuppressed = false;
+	if (childStatus(child) === "inactive") historicalExpanded = true;
+	renderSubagentsStrip();
+	// Reveal only inside the roster. scrollIntoView could move a detached
+	// transcript or the whole webview while the parent stream is still visible.
+	const row = Array.from(subagentsStrip.querySelectorAll<HTMLElement>(".subagent-row")).find((candidate) =>
+		candidate.dataset.agentKey === agentIdentityKey(child));
+	if (row) {
+		const bounds = subagentsStrip.getBoundingClientRect();
+		const target = row.getBoundingClientRect();
+		if (target.top < bounds.top) subagentsStrip.scrollTop += target.top - bounds.top;
+		else if (target.bottom > bounds.bottom) subagentsStrip.scrollTop += target.bottom - bounds.bottom;
+	}
+	post({ type: "browseChild", browseRef });
+}
 
 /**
  * Auto-expanding the strip when a subagent starts, without becoming a nuisance.
@@ -440,6 +464,9 @@ function renderSubagentsStrip(): void {
 	const parent = sessionParent;
 	const viewedId = sessionViewedId;
 	const siblings = sessionSiblings;
+	const viewed = sessionViewedAgent ?? [...sessionChildren, ...siblings].find((child) => child.activeSessionId === viewedId);
+	if (viewed?.runtimeKind && viewed.runtimeKind !== "root") applyAgentIdentity(sessionTitleWrap, viewed);
+	else clearAgentIdentity(sessionTitleWrap);
 	const nothingToShow = !parent && sessionChildren.length === 0 && siblings.length === 0;
 	if (nothingToShow) {
 		subagentsStrip.classList.remove("visible");
@@ -464,6 +491,12 @@ function renderSubagentsStrip(): void {
 	// Back row (separate, never part of the toggle) — always reliable.
 	if (parent) {
 		const back = el("button", "subagents-back-row") as HTMLButtonElement;
+		if (parent.runtimeKind && parent.runtimeKind !== "root") {
+			applyAgentIdentity(back, parent);
+			const identity = el("span", "subagent-identity");
+			identity.setAttribute("aria-hidden", "true");
+			back.appendChild(identity);
+		}
 		back.append(el("span", "subagents-back", "‹ parent"), el("span", "subagents-back-name", parent.name ?? parent.id));
 		back.title = "Return to the parent agent";
 		back.addEventListener("click", () => post({ type: "backToParent" }));
@@ -499,6 +532,9 @@ function renderSubagentsStrip(): void {
 
 	const buildRow = (child: SessionChild, isSibling: boolean): HTMLElement => {
 		const row = el("button", `subagent-row${isSibling ? " sibling" : ""}`) as HTMLButtonElement;
+		applyAgentIdentity(row, child);
+		const identity = el("span", "subagent-identity");
+		identity.setAttribute("aria-hidden", "true");
 		const viewing = viewedId === child.activeSessionId;
 		const status = childStatus(child);
 		// One vocabulary for the whole strip: the header counts "running · idle ·
@@ -540,10 +576,11 @@ function renderSubagentsStrip(): void {
 			row.classList.add("viewing");
 			row.title = "Currently viewing — this transcript shows this subagent";
 		}
-		row.append(dot, name, badge, suffix);
+		row.append(identity, name, dot, badge, suffix);
+		row.disabled = !viewing && !child.browseRef;
 		row.addEventListener("click", (event) => {
 			event.stopPropagation();
-			if (!viewing && child.browseRef) post({ type: "browseChild", browseRef: child.browseRef });
+			if (!viewing && child.browseRef) browseSubagent(child.browseRef);
 		});
 		return row;
 	};
@@ -586,7 +623,32 @@ let sessionParent: SessionChild | null = null;
 let historicalExpanded = false;
 let spawnSeenBaseline = false;
 let sessionViewedId: string | null = null;
+let sessionViewedAgent: SessionChild | null = null;
 let sessionSiblings: SessionChild[] = [];
+
+// Browser Back is not the webview's history while looking inside a subagent.
+// Claim the whole gesture: the host can return to root before mouseup arrives.
+let mouseBackClaimed = false;
+function handleMouseBack(event: MouseEvent): void {
+	if (event.button !== 3) return;
+	const inSubagent = !!sessionParent || !!(sessionViewedId && sessionViewedAgent?.runtimeKind && sessionViewedAgent.runtimeKind !== "root");
+	if (event.type === "mousedown") {
+		mouseBackClaimed = !observing && inSubagent;
+		if (!mouseBackClaimed) return;
+		event.preventDefault();
+		event.stopPropagation();
+		post({ type: "backToParent" });
+		return;
+	}
+	if (!mouseBackClaimed) return;
+	event.preventDefault();
+	event.stopPropagation();
+	if (event.type === "auxclick") mouseBackClaimed = false;
+}
+for (const type of ["mousedown", "mouseup", "auxclick"] as const) {
+	window.addEventListener(type, handleMouseBack, { capture: true });
+}
+window.addEventListener("blur", () => { mouseBackClaimed = false; });
 
 // Install prompt banner: one persistent, dismissible card when prime-agent can't run.
 const installBanner = el("div", "install-banner");
@@ -779,6 +841,7 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 		sessionParent = null;
 		sessionSiblings = [];
 		sessionViewedId = null;
+		sessionViewedAgent = null;
 		spawnSeenBaseline = false;
 		resetSubagentActivityBaseline();
 		renderSubagentsStrip();
@@ -989,10 +1052,23 @@ function dispatchHostMessage(message: HostToWebview): void {
 			sessionChildren = message.children ?? [];
 			sessionParent = message.parent ?? null;
 			sessionViewedId = message.viewedActiveSessionId ?? null;
+			sessionViewedAgent = message.viewedSession ?? null;
 			sessionSiblings = message.siblings ?? [];
+			rememberAgentIdentities([...sessionChildren, ...sessionSiblings,
+				...(sessionParent ? [sessionParent] : []), ...(sessionViewedAgent ? [sessionViewedAgent] : [])]);
+			transcript.syncSpawnCards([...sessionChildren, ...sessionSiblings]);
 			const spawnedList = message.spawned ?? [];
 			for (const spawn of spawnedList) {
-				transcript.injectSpawnCard({ id: spawn.activeSessionId, browseRef: spawn.browseRef, name: spawn.name, created: spawn.created });
+				const child = sessionChildren.find((candidate) => spawn.sessionId && candidate.sessionId
+					? candidate.sessionId === spawn.sessionId
+					: candidate.activeSessionId === spawn.activeSessionId);
+				transcript.injectSpawnCard({
+					id: child?.activeSessionId ?? spawn.activeSessionId,
+					sessionId: child?.sessionId ?? spawn.sessionId,
+					browseRef: child?.browseRef,
+					name: child?.name ?? spawn.name,
+					created: child?.created ?? spawn.created,
+				});
 			}
 			const startedSubagents = takeStartedSubagents(spawnedList);
 			// Seed cards ONLY for currently-running children; finished and idle ones
@@ -1003,7 +1079,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 				spawnSeenBaseline = true;
 				for (const child of sessionChildren) {
 					if (childStatus(child) === "running" && child.created) {
-						transcript.injectSpawnCard({ id: child.activeSessionId, browseRef: child.browseRef, name: child.name, created: child.created });
+						transcript.injectSpawnCard({ id: child.activeSessionId, sessionId: child.sessionId, browseRef: child.browseRef, name: child.name, created: child.created });
 					}
 				}
 			}

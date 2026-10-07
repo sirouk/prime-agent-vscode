@@ -3246,7 +3246,6 @@ export class SessionController implements vscode.Disposable {
 				level: "info",
 				text: noticeText ?? "Attached to the live session — you can work here and in the terminal simultaneously.",
 			});
-			this.scheduleChildrenRefresh();
 			this.resetViewedSessionState();
 			this.threadDiffs.clear();
 			// Stats before the first paint: otherwise the gauge shows the previous
@@ -3255,6 +3254,10 @@ export class SessionController implements vscode.Disposable {
 			if (!this.isCurrentAttachment(attachment) || epoch !== this.viewEpoch) return this.rollbackAttachment(sidecar, attachment);
 			this.observationRestoring = false;
 			this.applyAttachedSnapshot(snapshot);
+			// The snapshot establishes the webview's session boundary and clears
+			// its old tree. A fast roster may have arrived while stats were pending;
+			// allow that same offer through again after the acknowledged transcript.
+			this.repaintChildrenStrip();
 			return true;
 		} catch (error) {
 			this.lastDaemonAttachError = error instanceof Error ? error.message : String(error);
@@ -3747,6 +3750,7 @@ export class SessionController implements vscode.Disposable {
 				const activeSessionId = byActive(c);
 				return {
 					id: c.id ?? "",
+					sessionId: c.sessionId,
 					activeSessionId,
 					...(parentId ? { browseRef: this.browseRefFor(activeSessionId, parentId) } : {}),
 					name: rich.sessionName,
@@ -3830,6 +3834,7 @@ export class SessionController implements vscode.Disposable {
 							const row = childRows.find((candidate) => candidate.activeSessionId === byActive(c));
 							return {
 								activeSessionId: byActive(c),
+								sessionId: c.sessionId,
 								browseRef: row?.browseRef,
 								name: (c as Rich).sessionName,
 								created: (c as Rich).created,
@@ -3842,6 +3847,7 @@ export class SessionController implements vscode.Disposable {
 				parent,
 				siblings,
 				viewedActiveSessionId: currentId,
+				viewedSession: currentSummary ? asChild(currentSummary) : undefined,
 				spawned: spawnCards,
 			};
 			// An unchanged roster must not be re-sent: the webview rebuilds the whole
@@ -3933,8 +3939,70 @@ export class SessionController implements vscode.Disposable {
 		return true;
 	}
 
+	/** A directly attached child has no navigation breadcrumb; use verified daemon lineage. */
+	private async returnToVerifiedParent(current: AttachRef, epoch: number): Promise<boolean> {
+		const refuse = (text: string): void => {
+			if (this.disposed || epoch !== this.viewEpoch) return;
+			this.restoreAttachedView(current, epoch);
+			this.broadcast({ type: "notice", level: "warning", text });
+		};
+		let sidecar: DaemonSidecar;
+		let sessions: SessionSummaryRef[];
+		try {
+			sidecar = await this.ensureSidecar({ reattach: false });
+			sessions = await this.listSessions(sidecar);
+		} catch {
+			refuse("Could not verify this agent's parent. Your current stream was left open.");
+			return true;
+		}
+		if (this.disposed || epoch !== this.viewEpoch || this.attached !== current || this.observingId) return true;
+		const targetOf = (session: SessionSummaryRef): string => session.activeSessionId ?? session.id ?? "";
+		const matches = sessions.filter((session) => targetOf(session) === current.activeSessionId);
+		const child = matches.length === 1 ? matches[0] : undefined;
+		if (!child || (child.sessionId && sessions.filter((session) => session.sessionId === child.sessionId).length !== 1)) {
+			refuse("Could not uniquely verify this agent's parent. Your current stream was left open.");
+			return true;
+		}
+		// A root has no level above it. Preserve the existing explicit return to
+		// this window's own session; the mouse handler never claims root Back.
+		if (child.runtimeKind === "root" || (!child.runtimeKind && !child.rlmDepth && !child.parentActiveSessionId && !child.parentSessionId)) return false;
+		const parentActiveId = child.parentActiveSessionId;
+		const parentSessionId = child.parentSessionId;
+		const parents = sessions.filter((session) =>
+			!!(parentActiveId || parentSessionId) &&
+			(!parentActiveId || targetOf(session) === parentActiveId) &&
+			(!parentSessionId || session.sessionId === parentSessionId || targetOf(session) === parentSessionId));
+		const parent = parents.length === 1 ? parents[0] : undefined;
+		const target = parent ? targetOf(parent) : "";
+		if (!parent || !target || target === current.activeSessionId ||
+			sessions.filter((session) => targetOf(session) === target).length !== 1 ||
+			(parent.sessionId && sessions.filter((session) => session.sessionId === parent.sessionId).length !== 1)) {
+			refuse("The parent session is unavailable or ambiguous. Your current stream was left open.");
+			return true;
+		}
+		// Attach first. A missing/recovering parent must not discard the child,
+		// and direct upward navigation never pushes a new breadcrumb.
+		const attached = await this.attachViaDaemon(target, parent.sessionFile ?? "", epoch, "Returned to the parent agent's stream.");
+		if (this.disposed || epoch !== this.viewEpoch) return true;
+		if (!attached) {
+			refuse("Could not open the parent session. Your current stream was left open.");
+			return true;
+		}
+		if (this.attached !== current && sidecar.connected) {
+			try {
+				await this.detachDaemonSession(sidecar, current.activeSessionId);
+			} catch {
+				// The daemon may already have released the old viewer.
+			}
+		}
+		return true;
+	}
+
 	async backToParent(): Promise<void> {
+		if (this.guardObservedReadOnly("returning to the parent agent")) return;
+		const previous = this.attached;
 		const epoch = this.beginNavigation();
+		if (previous && this.returnTargets.length === 0 && await this.returnToVerifiedParent(previous, epoch)) return;
 		const target = this.returnTargets.at(-1) ?? { kind: "rpc" as const };
 		if (target.kind === "attached") {
 			const path = target.sessionPath;

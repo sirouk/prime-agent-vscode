@@ -399,6 +399,215 @@ controller.client = null;
 	controller.browseableChildren.clear();
 }
 
+// --- the child roster must land after the snapshot that adopts its view -------
+// A fast roster can beat slow attach stats. The webview clears the old tree when
+// the final snapshot adopts the child, so that early roster cannot be its only
+// copy. Even an unsolicited preflight refresh must be re-offered after adoption.
+{
+	async function proveRosterPaintOrdering(forcePreflight) {
+		const orderedPosts = [];
+		const trace = [];
+		const ordered = new SessionController(
+			{ subscriptions: [], extensionUri: { fsPath: process.cwd() }, globalState: state, workspaceState: state },
+			{ append: () => {}, appendLine: () => {} },
+		);
+		if (ordered.processTimer) clearTimeout(ordered.processTimer);
+		ordered.processTimer = null;
+		ordered.scheduleProcessRefresh = () => {};
+		ordered.refreshAttachedState = async () => {};
+		ordered.threadDiffs.harvestSubagents = async () => {};
+		const childId = "ordering-child-active";
+		const childUuid = "ordering-child-uuid";
+		const parentId = "ordering-parent-active";
+		const parentUuid = "ordering-parent-uuid";
+		ordered.state = { sessionId: parentUuid };
+		const summaries = [
+			{ id: parentId, activeSessionId: parentId, sessionId: parentUuid, runtimeKind: "root", sessionName: "parent" },
+			{ id: childId, activeSessionId: childId, sessionId: childUuid, runtimeKind: "subagent", sessionName: "child", parentActiveSessionId: parentId, parentSessionId: parentUuid, rosterStatus: "idle" },
+		];
+		ordered.sidecar = {
+			connected: true,
+			list: async () => summaries,
+			attach: async () => ({ snapshot: {
+				activeSessionId: childId,
+				state: { sessionId: childUuid, sessionName: "child", isStreaming: false },
+				summary: summaries[1],
+				messages: [{ role: "assistant", content: [{ type: "text", text: "child transcript" }] }],
+			} }),
+			dispose: () => {},
+		};
+		ordered.ensureSidecar = async () => ordered.sidecar;
+		let statsStarted;
+		let releaseStats;
+		const statsEntered = new Promise((resolve) => { statsStarted = resolve; });
+		const slowStats = new Promise((resolve) => { releaseStats = resolve; });
+		ordered.fetchAttachedStats = async () => { statsStarted(); await slowStats; return ""; };
+		const scheduledRefreshes = [];
+		// Calling refreshChildren starts a real async list projection immediately,
+		// but there are no timers, native agents, worker processes, or real sockets.
+		ordered.scheduleChildrenRefresh = () => { scheduledRefreshes.push(ordered.refreshChildren()); };
+		let browserSessionId = parentUuid;
+		let visibleRoster = null;
+		ordered.attach({ post: (message) => {
+			orderedPosts.push(message);
+			if (message.type === "snapshot") {
+				trace.push(`snapshot:${message.status.sessionId}`);
+				// Mirror main.applyStatus(): a new session snapshot drops the old
+				// tree, including a target roster that arrived before adoption.
+				if (message.status.sessionId !== browserSessionId) visibleRoster = null;
+				browserSessionId = message.status.sessionId;
+			} else if (message.type === "sessionChildren") {
+				trace.push(message.viewedActiveSessionId === childId ? "roster:child-view" : "roster:clear");
+				visibleRoster = message;
+			}
+		} });
+		try {
+			const attaching = ordered.attachViaDaemon(childId, path.join(workdir, "ordering-child.jsonl"), ordered.viewEpoch);
+			await statsEntered;
+			await Promise.all(scheduledRefreshes); // Any fast scheduled roster finishes while stats are held.
+			if (forcePreflight) await ordered.refreshChildren(); // An independent roster event wins this race.
+			releaseStats();
+			const attached = await attaching;
+			await Promise.all(scheduledRefreshes);
+			const snapshotIndex = orderedPosts.findIndex((message) => message.type === "snapshot" && message.status.sessionId === childUuid);
+			const rosterIndices = orderedPosts.flatMap((message, index) => message.type === "sessionChildren" && message.viewedActiveSessionId === childId ? [index] : []);
+			const details = JSON.stringify({ forcePreflight, trace, snapshotIndex, rosterIndices });
+			check(`slow-stats ${forcePreflight ? "preflight" : "scheduled"} fixture completes the real attach`, attached === true && snapshotIndex >= 0, details);
+			if (forcePreflight) {
+				check("an independently refreshed preflight roster really beat the child snapshot", rosterIndices.some((index) => index < snapshotIndex), details);
+				check("a preflight child roster is sent again after the adopting snapshot", rosterIndices.some((index) => index < snapshotIndex) && rosterIndices.some((index) => index > snapshotIndex), details);
+			} else {
+				check("the first scheduled child-view roster follows the final attach snapshot", rosterIndices.length > 0 && rosterIndices[0] > snapshotIndex, details);
+			}
+			check(`slow-stats ${forcePreflight ? "preflight" : "scheduled"} attach leaves the acknowledged child tree visible`,
+				visibleRoster?.viewedActiveSessionId === childId && visibleRoster?.viewedSession?.sessionId === childUuid && visibleRoster?.parent?.activeSessionId === parentId, details);
+		} finally {
+			releaseStats();
+			ordered.attached = null;
+			ordered.attachedEpoch = null;
+			ordered.dispose();
+		}
+	}
+	await proveRosterPaintOrdering(false);
+	await proveRosterPaintOrdering(true);
+}
+
+// --- Back from a directly attached child follows its verified family, not RPC --
+// A history/reconnect/direct attach has no local breadcrumb. Empty returnTargets
+// must not make a nested child jump to this window's unrelated background root.
+{
+	const grandId = "direct-grand-active";
+	const grandUuid = "direct-grand-uuid";
+	const parentId = "direct-parent-active";
+	const parentUuid = "direct-parent-uuid";
+	const rootId = "direct-foreign-root-active";
+	const rootUuid = "direct-foreign-root-uuid";
+	const ownUuid = "direct-own-hidden-rpc-uuid";
+	const rootSummary = { id: rootId, activeSessionId: rootId, sessionId: rootUuid, runtimeKind: "root", rlmDepth: 0, sessionName: "foreign root", sessionFile: path.join(workdir, "direct-root.jsonl") };
+	const chain = (link) => [
+		rootSummary,
+		{ id: parentId, activeSessionId: parentId, sessionId: parentUuid, runtimeKind: "subagent", rlmDepth: 1, sessionName: "direct parent", sessionFile: path.join(workdir, "direct-parent.jsonl"), ...(link === "uuid" ? { parentSessionId: rootUuid } : { parentActiveSessionId: rootId }) },
+		{ id: grandId, activeSessionId: grandId, sessionId: grandUuid, runtimeKind: "subagent", rlmDepth: 2, sessionName: "direct grandchild", sessionFile: path.join(workdir, "direct-grand.jsonl"), ...(link === "uuid" ? { parentSessionId: parentUuid } : { parentActiveSessionId: parentId }) },
+	];
+	function makeDirectHost(rows, failedTargets = new Set()) {
+		const direct = new SessionController(
+			{ subscriptions: [], extensionUri: { fsPath: process.cwd() }, globalState: state, workspaceState: state },
+			{ append: () => {}, appendLine: () => {} },
+		);
+		if (direct.processTimer) clearTimeout(direct.processTimer);
+		direct.processTimer = null;
+		direct.scheduleProcessRefresh = () => {};
+		direct.scheduleChildrenRefresh = () => {};
+		direct.refreshAttachedState = async () => {};
+		direct.fetchAttachedStats = async () => "";
+		direct.threadDiffs.harvestSubagents = async () => {};
+		const log = { posts: [], attaches: [], releases: [], ownRestores: 0, lists: 0 };
+		direct.attach({ post: (message) => log.posts.push(message) });
+		direct.state = { sessionId: ownUuid };
+		direct.attached = { activeSessionId: grandId, sessionId: grandUuid, sessionPath: path.join(workdir, "direct-grand.jsonl") };
+		direct.attachedEpoch = direct.viewEpoch;
+		direct.returnTargets = [];
+		direct.restoreOwnRpcView = async () => { log.ownRestores += 1; return true; };
+		direct.sidecar = {
+			connected: true,
+			list: async () => { log.lists += 1; return rows; },
+			attach: async (selector) => {
+				log.attaches.push({ selector, priorActiveId: direct.attached?.activeSessionId });
+				if (failedTargets.has(selector)) throw new Error("verified parent is unavailable");
+				const target = rows.find((row) => row.activeSessionId === selector || row.id === selector);
+				if (!target) throw new Error("unknown fake target");
+				return { snapshot: {
+					activeSessionId: target.activeSessionId ?? target.id,
+					state: { sessionId: target.sessionId, sessionName: target.sessionName, isStreaming: false },
+					summary: target,
+					messages: [{ role: "assistant", content: [{ type: "text", text: `view of ${target.sessionId}` }] }],
+				} };
+			},
+			detach: async (selector) => { log.releases.push({ selector, currentActiveId: direct.attached?.activeSessionId }); },
+			dispose: () => {},
+		};
+		direct.ensureSidecar = async () => direct.sidecar;
+		return { direct, log };
+	}
+	function disposeDirect(direct) {
+		direct.attached = null;
+		direct.attachedEpoch = null;
+		direct.dispose();
+	}
+	for (const link of ["uuid", "active"]) {
+		const { direct, log } = makeDirectHost(chain(link));
+		try {
+			await direct.backToParent();
+			check(`direct grandchild Back follows its ${link} parent relationship`,
+				direct.attached?.activeSessionId === parentId && log.ownRestores === 0 && log.lists > 0, JSON.stringify(log));
+			check(`direct ${link} parent attach succeeds before the grandchild is released`,
+				log.attaches[0]?.selector === parentId && log.attaches[0]?.priorActiveId === grandId && log.releases[0]?.selector === grandId && log.releases[0]?.currentActiveId === parentId, JSON.stringify(log));
+			await direct.backToParent();
+			check(`second direct ${link} Back follows the actual foreign root, not hidden RPC`,
+				direct.attached?.activeSessionId === rootId && direct.attached?.sessionId === rootUuid && log.ownRestores === 0, JSON.stringify(log));
+			check(`second direct ${link} parent attach succeeds before its child is released`,
+				log.attaches[1]?.selector === rootId && log.attaches[1]?.priorActiveId === parentId && log.releases[1]?.selector === parentId && log.releases[1]?.currentActiveId === rootId, JSON.stringify(log));
+		} finally {
+			disposeDirect(direct);
+		}
+	}
+
+	const uuidChain = chain("uuid");
+	const { parentSessionId: _missingParentLink, ...unlinkedGrand } = uuidChain[2];
+	const blockedCases = [
+		{ name: "missing parent relationship", rows: [uuidChain[0], uuidChain[1], unlinkedGrand] },
+		{ name: "missing verified parent row", rows: [uuidChain[0], uuidChain[2]] },
+		{ name: "failed verified parent attach", rows: uuidChain, failedTargets: new Set([parentId]), allowedAttachCount: 1 },
+		{ name: "ambiguous canonical parent UUID", rows: [...uuidChain, { ...uuidChain[1], id: "other-parent", activeSessionId: "other-parent" }] },
+		{ name: "duplicated parent active target with both relationship links", rows: [
+			uuidChain[0],
+			{ ...uuidChain[1], sessionId: "different-parent-uuid" },
+			uuidChain[1],
+			{ ...uuidChain[2], parentActiveSessionId: parentId },
+		] },
+		{ name: "duplicated parent canonical UUID with both relationship links", rows: [
+			uuidChain[0], uuidChain[1],
+			{ ...uuidChain[1], id: "different-parent-active", activeSessionId: "different-parent-active" },
+			{ ...uuidChain[2], parentActiveSessionId: parentId },
+		] },
+		{ name: "ambiguous current canonical child UUID", rows: [...uuidChain, { ...uuidChain[2], id: "other-grand", activeSessionId: "other-grand" }] },
+		{ name: "inconsistent active and UUID parent relationships", rows: [uuidChain[0], uuidChain[1], { ...uuidChain[2], parentActiveSessionId: rootId }] },
+	];
+	for (const fixture of blockedCases) {
+		const { direct, log } = makeDirectHost(fixture.rows, fixture.failedTargets);
+		const previous = direct.attached;
+		try {
+			await direct.backToParent();
+			check(`direct Back with ${fixture.name} keeps the current child attached`,
+				direct.attached?.activeSessionId === previous.activeSessionId && direct.attached?.sessionId === previous.sessionId && direct.attachedEpoch === direct.viewEpoch && log.ownRestores === 0 && log.releases.length === 0, JSON.stringify(log));
+			check(`direct Back with ${fixture.name} warns without guessed authority`,
+				log.posts.some((message) => message.type === "notice" && message.level === "warning") && log.attaches.length === (fixture.allowedAttachCount ?? 0), JSON.stringify(log));
+		} finally {
+			disposeDirect(direct);
+		}
+	}
+}
+
 // --- the install prompt points at the installer, not a repo doc page --------
 posts.length = 0;
 controller.maybeShowInstallPrompt("test reason");
