@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.48]
+
 - **Live replies stay live until the message ends.** Providers already put `stopReason: "stop"` on partial replies. The renderer now uses message lifecycle and explicitly marked durable snapshots to determine completion, so later deltas keep rendering and final token usage appears only when the reply finishes. A durable catch-up also restores a final reply and its usage when the live end event was missed, even if the agent is still busy.
 - **Older stream frames no longer roll back the live tail.** Partial assistant updates must preserve known thinking, prose and tool slots, and late events stay with their own reply instead of overwriting a newer one. A fuller same-session snapshot remains the watermark for later updates. Final authoritative corrections can still replace or shorten content. Real-frame tests reproduce the prior 86px down/up movement of mounted tool cards and token footers, then check that it stays still.
 - **Replayed execution events cannot shrink a completed tool card.** Duplicate start/end frames keep the final summary, execution state, input and output receipts. Expanded cards no longer collapse their content temporarily and jump back on the next snapshot. Genuine tool execution still streams and finishes normally.
@@ -386,7 +388,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.47...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.48...HEAD
+[1.0.48]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.47...v1.0.48
 [1.0.47]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.46...v1.0.47
 [1.0.46]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.45...v1.0.46
 [1.0.45]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.44...v1.0.45
