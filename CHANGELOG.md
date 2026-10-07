@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.49]
+
 - **Working and New messages float together without a separate row.** Scrolling up fades the shared strip so the transcript stays readable underneath. Scrolling down restores its normal opacity without returning you to the tail. Working lets pointer input pass through; the jump control stays clickable and becomes fully visible for keyboard focus. Live updates, snapshots and run transitions keep the reader's direction, selection and scroll position. Reduced-motion settings disable the fade animation.
 
 ## [1.0.48]
@@ -390,7 +392,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.48...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.49...HEAD
+[1.0.49]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.48...v1.0.49
 [1.0.48]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.47...v1.0.48
 [1.0.47]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.46...v1.0.47
 [1.0.46]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.45...v1.0.46
