@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.51]
+
 - **Open a spawned subagent from its whole transcript card.** Mouse and keyboard activation expand the matching subagent branch, including Historical when needed, then attach to the current host-approved stream. Mounted cards refresh their names and browse references from each roster; unavailable agents cannot reuse old links.
 - **Give subagents stable identity accents.** A session-derived color connects the spawn card, tree row and current-stream header. It survives renames, status changes, reloads and live-to-finished transitions. Separate status dots and labels still say running, idle, finished or the daemon's exceptional state.
 - **Use the mouse Back button to move up one agent level.** The same parent navigation works from a subagent or a nested subagent, including a directly opened stream with no saved tree-navigation step. Parent identity comes from the daemon, not guesses; an unavailable or ambiguous parent leaves the current stream open. Root sessions, read-only observations and the mouse Forward button keep their normal behavior.
@@ -400,7 +402,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.50...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.51...HEAD
+[1.0.51]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.50...v1.0.51
 [1.0.50]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.49...v1.0.50
 [1.0.49]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.48...v1.0.49
 [1.0.48]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.47...v1.0.48
