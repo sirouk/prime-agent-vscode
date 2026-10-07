@@ -585,16 +585,13 @@ try {
    assert.equal(event.inJump, surface === "jump", `${surface}: intended wheel surface`);
    assert.equal(event.defaultPrevented, false, `${surface}: leave browser zoom/pinch unconsumed`);
    // The late bubble sample runs after our handlers but BEFORE native defaults.
-   // Headless Chromium may scroll (rather than zoom) on Ctrl-wheel over a
-   // native scroller. That platform-owned effect must not be blocked here.
+   // Chromium's platform-owned Ctrl-wheel default may scroll or zoom even over
+   // the floating button. Never require the extension to suppress that default.
    unchanged(before, event, `Ctrl-wheel handler over ${surface}`);
-   const nativeResult = await inputState();
-   if (surface === "jump") unchanged(before, nativeResult, "Ctrl-wheel over jump");
-   else {
-    assert.equal(nativeResult.readingUp, before.readingUp, "native Ctrl-wheel default must not fake reading direction");
-    assert.equal(nativeResult.opacity, before.opacity, "native Ctrl-wheel default must not fake fade/unfade");
-    assert.equal(nativeResult.jumpVisible, before.jumpVisible, "native Ctrl-wheel stays detached in this away-from-tail fixture");
-   }
+   const nativeResult = await inputState(), nativeGeometry = await geometry(page);
+   assert.equal(nativeResult.readingUp, before.readingUp, `${surface}: native Ctrl-wheel must not fake reading direction`);
+   assert.equal(nativeResult.opacity, before.opacity, `${surface}: native Ctrl-wheel must not fake fade/unfade`);
+   if (!nativeResult.jumpVisible) assert.ok(nativeGeometry.messages.gap <= 50, `${surface}: only physical return to tail can resume follow`);
    await sample(page, `guard-ctrl-${surface}`);
   }
   await hoverJump();
@@ -605,7 +602,11 @@ try {
   assert.equal(horizontal.deltaX, 150, "exercise substantial horizontal intent");
   assert.equal(horizontal.deltaY, 1, "exercise tiny incidental vertical drift");
   assert.equal(horizontal.defaultPrevented, false, "do not consume dominant horizontal platform gesture");
-  unchanged(horizontalBefore, await inputState(), "horizontal swipe over jump");
+  unchanged(horizontalBefore, horizontal, "horizontal swipe handler over jump");
+  const horizontalResult = await inputState(), horizontalGeometry = await geometry(page);
+  assert.equal(horizontalResult.readingUp, horizontalBefore.readingUp, "native horizontal swipe must not fake vertical reading direction");
+  assert.equal(horizontalResult.opacity, horizontalBefore.opacity, "native horizontal swipe must not fake fade/unfade");
+  if (!horizontalResult.jumpVisible) assert.ok(horizontalGeometry.messages.gap <= 50, "horizontal swipe can resume follow only after physical return to tail");
   await sample(page, "guard-horizontal-drift");
   async function resetDetachedInput() {
    if ((await geometry(page)).jump.visible) await page.locator(".jump-to-latest").click();

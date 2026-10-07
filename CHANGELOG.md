@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- **Keep floating-control checks portable across platforms.** The UI is unchanged from v1.0.49. Tests now distinguish extension-side input handling from the browser's native scroll or zoom behavior, while still checking that pinch, modified-wheel and horizontal gestures are not consumed or mistaken for reading direction.
+
 ## [1.0.49]
 
 - **Working and New messages float together without a separate row.** Scrolling up fades the shared strip so the transcript stays readable underneath. Scrolling down restores its normal opacity without returning you to the tail. Working lets pointer input pass through; the jump control stays clickable and becomes fully visible for keyboard focus. Live updates, snapshots and run transitions keep the reader's direction, selection and scroll position. Reduced-motion settings disable the fade animation.
