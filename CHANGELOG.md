@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- **Working and New messages float together without a separate row.** Scrolling up fades the shared strip so the transcript stays readable underneath. Scrolling down restores its normal opacity without returning you to the tail. Working lets pointer input pass through; the jump control stays clickable and becomes fully visible for keyboard focus. Live updates, snapshots and run transitions keep the reader's direction, selection and scroll position. Reduced-motion settings disable the fade animation.
+
 ## [1.0.48]
 
 - **Live replies stay live until the message ends.** Providers already put `stopReason: "stop"` on partial replies. The renderer now uses message lifecycle and explicitly marked durable snapshots to determine completion, so later deltas keep rendering and final token usage appears only when the reply finishes. A durable catch-up also restores a final reply and its usage when the live end event was missed, even if the agent is still busy.

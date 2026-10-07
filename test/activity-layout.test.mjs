@@ -117,7 +117,8 @@ async function geometry(page) {
    bodyFont: getComputedStyle(document.body).fontSize, messages: { ...m, clientHeight: messages.clientHeight },
    slot: rect(slot), chat: c, composer: cb, subagents: sa, topbar: rect(document.querySelector(".topbar")), status: rect(document.querySelector(".status-strip")), install: rect(document.querySelector(".install-banner")), working: w, label: l, tool: t, header: rect(header),
    sibling: slot?.parentElement === messages.parentElement, contained: !!slot?.contains(working),
-   position: css?.position, visibility: css?.visibility, border: css?.borderTopWidth, chatOverflowX: chatCSS.overflowX, chatOverflowY: chatCSS.overflowY,
+   position: css?.position, slotPosition: getComputedStyle(slot).position, slotPointerEvents: getComputedStyle(slot).pointerEvents,
+   workingPointerEvents: css?.pointerEvents, visibility: css?.visibility, border: css?.borderTopWidth, chatOverflowX: chatCSS.overflowX, chatOverflowY: chatCSS.overflowY,
    transcriptOverlap: intersection(w, m), visibleToolOverlap: intersection(w, clip(t, m)), labelHeaderOverlap: intersection(l, rect(header)),
    workingPaint, labelPaint, messagePaint, toolPaint, clippedWorking: intersection(workingPaint, w) < (w?.width ?? 0) * (w?.height ?? 0),
    paintedTranscriptOverlap: intersection(workingPaint, messagePaint), paintedToolOverlap: intersection(workingPaint, toolPaint), paintedComposerOverlap: intersection(workingPaint, cb), paintedSubagentOverlap: intersection(workingPaint, sa),
@@ -129,34 +130,34 @@ function fits(inner, outer, label) {
  assert.ok(inner.left >= outer.left - 1 && inner.right <= outer.right + 1 && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1, label);
 }
 function noOverlay(g, label) {
- assert.equal(g.sibling, true, `${label}: reserved activity is a messages sibling`);
- assert.equal(g.contained, true, `${label}: Working belongs to the activity slot`);
- assert.ok(g.slot.height >= 30, `${label}: reserves 30px even in a short pane`);
- assert.equal(g.position, "static", `${label}: no absolute Working overlay`);
+ assert.equal(g.sibling, true, `${label}: floating activity is a messages sibling`);
+ assert.equal(g.contained, true, `${label}: Working belongs to the activity strip`);
+ assert.equal(g.slotPosition, "absolute", `${label}: activity reserves no separate row`);
+ assert.equal(g.slotPointerEvents, "none", `${label}: strip background passes input through`);
+ assert.equal(g.workingPointerEvents, "none", `${label}: Working cannot intercept tool interactions`);
+ assert.equal(g.position, "static", `${label}: Working stays in its shared strip`);
  assert.equal(g.visibility, "visible", `${label}: run activity has visible styling`);
  assert.equal(g.chatOverflowX, "hidden", `${label}: chat clips horizontal overflow`);
  assert.equal(g.chatOverflowY, "hidden", `${label}: chat clips vertical overflow`);
- assert.equal(g.transcriptOverlap, 0, `${label}: Working does not overlap transcript viewport`);
- assert.ok(g.working.top >= g.slot.top - 1 && g.working.bottom <= g.slot.bottom + 1, `${label}: Working fits in the slot`);
- assert.ok(g.messages.bottom <= g.slot.top + 1, `${label}: transcript ends before activity`);
- assert.equal(g.paintedTranscriptOverlap, 0, `${label}: painted Working does not overlap transcript`);
- assert.equal(g.paintedToolOverlap, 0, `${label}: painted Working does not overlap a visible tool`);
+ assert.ok(g.working.top >= g.slot.top - 1 && g.working.bottom <= g.slot.bottom + 1, `${label}: Working fits in the strip`);
  assert.equal(g.paintedComposerOverlap, 0, `${label}: painted Working does not overlap composer`);
  assert.equal(g.paintedSubagentOverlap, 0, `${label}: painted Working does not overlap subagents`);
  fits(g.workingPaint, g.chat, `${label}: all painted Working pixels are inside chat`);
  fits(g.messagePaint, g.chat, `${label}: all painted transcript pixels are inside chat`);
  if (g.chat.height >= 54 - 0.01) {
-  // A feasible pane must retain full activity, not conceal it to pass geometry.
-  assert.ok(g.slot.bottom <= g.chat.bottom + 1, `${label}: full activity fits in chat when space is available`);
+  assert.equal(g.paintedToolOverlap, 0, `${label}: tail clearance keeps Working off the latest tool when space is available`);
+  assert.ok(g.slot.top >= g.chat.top - 1 && g.slot.bottom <= g.chat.bottom + 1, `${label}: full activity fits in chat when space is available`);
+  assert.ok(g.messages.bottom >= g.chat.bottom - 1, `${label}: transcript uses the space behind floating controls`);
   assert.ok(g.working.bottom <= g.composer.top + 1, `${label}: full Working stays before composer`);
   if (g.subagents.height > 0) assert.ok(g.working.bottom <= g.subagents.top + 1, `${label}: full Working stays before subagents`);
-  if (g.hit) assert.equal(g.hit.inWorking, true, `${label}: full in-viewport label is unobstructed`);
  } else {
   assert.equal(g.clippedWorking, true, `${label}: undersized chat clips overflowing activity`);
-  if (g.rawLabelPointOutsideChat && g.hit) assert.equal(g.hit.inWorking, false, `${label}: clipped activity cannot hit outside chat`);
  }
- if (g.workingPaintHit) assert.equal(g.workingPaintHit.inWorking, true, `${label}: actual visible Working sample hits the activity row`);
- if (g.labelPaintHit) assert.equal(g.labelPaintHit.inWorking, true, `${label}: actual visible label sample hits Working`);
+ // Intentional floating paint is not an input obstruction: every visible
+ // Working point must reach the transcript underneath, never the status pill.
+ if (g.hit) assert.equal(g.hit.inWorking, false, `${label}: label point passes input through`);
+ if (g.workingPaintHit) assert.equal(g.workingPaintHit.inWorking, false, `${label}: visible Working is not an input target`);
+ if (g.labelPaintHit) assert.equal(g.labelPaintHit.inWorking, false, `${label}: visible label does not intercept input`);
 }
 async function unchangedChrome(page, clipped, label) {
  // Paint clipping must not move the composer/footer. Compare exactly the same
@@ -188,7 +189,7 @@ async function run(name, config, dimensions) {
   await page.evaluate(() => host({ type: "event", event: { type: "agent_end" } })); await frames(page);
   const idle = await geometry(page);
   assert.equal(idle.visibility, "hidden", `${name}: idle hides Working`);
-  assert.equal(idle.slot.height, active.slot.height, `${name}: idle retains the reserved space`);
+  assert.equal(idle.slot.height, active.slot.height, `${name}: idle keeps the same floating strip bounds`);
   assert.equal(idle.messages.clientHeight, active.messages.clientHeight, `${name}: idle never resizes the transcript`);
   assert.deepEqual(errors, [], `${name}: no runtime errors`);
   console.log(`PASS ${name}: ${dimensions.length} viewport checks, active/idle geometry and hit tests`);
@@ -211,8 +212,8 @@ try {
   await run("desktop-dark", { font: 14 }, [180, 240, 320, 480, 760, 1100].map(height => ({ width: 580, height })));
   await run("zoom175-narrow", { font: 14, dpr: 1.75 }, [240, 320, 480, 760].map(height => ({ width: 332, height })));
   await run("font20-light-narrow", { font: 20, theme: "vscode-light" }, [180, 280, 420, 580].map(width => ({ width, height: 480 })));
-  // Probe the compressed pane as well as the feasible one. The activity
-  // lane must not spill outside its parent or cover composer/subagent rows.
+  // Keep the original compressed-pane checks. Floating activity must not
+  // spill outside chat or cover composer/subagent rows.
   await run("highcontrast-max-composer-panels", { font: 20, theme: "vscode-high-contrast", extremes: true }, [240, 320, 480, 760].map(height => ({ width: 280, height })));
  }
 } finally {

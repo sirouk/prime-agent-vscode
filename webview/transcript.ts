@@ -426,7 +426,12 @@ export class Transcript {
 		// touchmove unstick synchronously, so the very next frame already knows.
 		this.wireSelectionPreserve();
 		this.scroller.addEventListener("wheel", (event) => {
-			const delta = (event as WheelEvent).deltaY;
+			// Ctrl-wheel also carries trackpad pinch. Leave platform zoom alone.
+			if (event.ctrlKey) return;
+			const delta = event.deltaY;
+			if (!event.metaKey && !event.altKey && !event.shiftKey && Math.abs(delta) > Math.abs(event.deltaX)) {
+				this.updateActivityDirection(delta);
+			}
 			this.snapshotScrollRemainder = 0;
 			if (delta < 0) this.setStick(false);
 			else if (delta > 0 && this.atBottom()) {
@@ -440,10 +445,43 @@ export class Transcript {
 				this.setStick(true);
 			}
 		}, { passive: true });
-		this.scroller.addEventListener("touchmove", () => {
+		// Only the jump button receives pointer input in the floating strip.
+		// Forward wheels over it to the transcript instead of trapping scrolling.
+		this.activitySlot.addEventListener("wheel", (event) => {
+			// Never consume zoom, horizontal swipes, or modified platform gestures.
+			if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+			this.updateActivityDirection(event.deltaY);
+			this.snapshotScrollRemainder = 0;
+			if (event.deltaY < 0) this.setStick(false);
+			const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.scroller.clientHeight : 1;
+			this.scroller.scrollTop += event.deltaY * unit;
+			if (event.deltaY > 0 && this.atBottom()) this.setStick(true);
+			event.preventDefault();
+		}, { passive: false });
+		let touchY: number | undefined;
+		this.scroller.addEventListener("touchstart", (event) => {
+			touchY = event.touches[0]?.clientY;
+		}, { passive: true });
+		this.scroller.addEventListener("touchmove", (event) => {
+			const nextY = event.touches[0]?.clientY;
+			if (touchY !== undefined && nextY !== undefined) {
+				const delta = touchY - nextY;
+				this.updateActivityDirection(delta);
+				if (delta < 0) this.setStick(false);
+			}
+			touchY = nextY;
 			this.snapshotScrollRemainder = 0;
 			if (!this.atBottom()) this.setStick(false);
 		}, { passive: true });
+		this.scroller.addEventListener("keydown", (event) => {
+			// Selection and platform shortcuts are not vertical reading intent.
+			if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey && event.key !== " ") return;
+			if ((event.target as HTMLElement | null)?.closest("input, textarea, select, button, summary, [contenteditable]")) return;
+			const delta = ["ArrowUp", "PageUp", "Home"].includes(event.key) || event.key === " " && event.shiftKey ? -1
+				: ["ArrowDown", "PageDown", "End", " "].includes(event.key) ? 1 : 0;
+			this.updateActivityDirection(delta);
+			if (delta < 0) this.setStick(false);
+		});
 		this.scroller.addEventListener("scroll", () => {
 			const top = this.scroller.scrollTop;
 			if (Math.abs(top - this.lastScrollTop) > 1) this.snapshotScrollRemainder = 0;
@@ -521,6 +559,11 @@ export class Transcript {
 		return this.scroller.scrollHeight - this.scroller.scrollTop - this.scroller.clientHeight <= 50;
 	}
 
+	/** Reader direction is independent of follow intent and host-driven layout. */
+	private updateActivityDirection(delta: number): void {
+		if (delta !== 0) this.activitySlot.classList.toggle("reading-up", delta < 0);
+	}
+
 	private setStick(value: boolean): void {
 		if (this.stickToBottom === value) return;
 		this.stickToBottom = value;
@@ -542,9 +585,9 @@ export class Transcript {
 			this.jumpBtn.addEventListener("click", () => {
 				this.forceScrollToBottom();
 			});
-			// Outside the scrolling content: showing the pill must not change
-			// scrollHeight, shift history, or become a browser scroll anchor.
-			this.scroller.parentElement?.appendChild(this.jumpBtn);
+			// Share Working's floating strip, outside the scrolling content.
+			// Showing the control must not resize the transcript.
+			this.activitySlot.appendChild(this.jumpBtn);
 		}
 		this.jumpBtn.classList.add("visible");
 	}
@@ -1272,7 +1315,9 @@ export class Transcript {
 		if (!this.workingRow) {
 			const row = el("div", "working-row");
 			row.append(butterfly(13, "working-mark"), el("span", "working-label", "Working · 0s"));
-			this.activitySlot.appendChild(row);
+			// A detached idle view can create the jump control before a run.
+			// Always keep Working first so the control stays on the right.
+			this.activitySlot.prepend(row);
 			this.workingRow = row;
 		}
 		this.workingRow.classList.add("active");
@@ -2565,6 +2610,7 @@ export class Transcript {
 
 	/** Unconditional snap — own sends or explicit user jumps. */
 	forceScrollToBottom(): void {
+		this.updateActivityDirection(1);
 		this.snapshotScrollRemainder = 0;
 		this.stickToBottom = true;
 		this.scroller.scrollTop = this.scroller.scrollHeight;

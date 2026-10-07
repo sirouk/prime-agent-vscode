@@ -275,15 +275,15 @@ button:focus-visible {
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
-	/* In very short panes the fixed activity rail may not fit. Keep its paint
-	   inside chat instead of spilling onto the composer or subagent strip. */
+	/* The floating controls belong to chat, never the composer or roster. */
 	overflow: hidden;
 }
 
 .messages {
 	flex: 1;
 	overflow-y: auto;
-	padding: 14px 10px 10px;
+	/* Clear the floating controls only at the tail, not with a separate row. */
+	padding: 14px 10px 44px;
 	display: flex;
 	flex-direction: column;
 	gap: 14px;
@@ -465,15 +465,35 @@ textarea::-webkit-scrollbar {
 /* ---------- working indicator ---------- */
 
 .chat-activity {
-	flex: 0 0 30px;
+	position: absolute;
+	left: 12px;
+	right: 12px;
+	bottom: 6px;
 	min-height: 30px;
 	display: flex;
 	align-items: center;
-	padding: 2px 12px;
+	gap: 8px;
+	pointer-events: none;
+	opacity: 1;
+	transition: opacity 140ms ease-out;
+}
+
+.chat-activity.reading-up {
+	opacity: 0.12;
+}
+
+.chat-activity:focus-within {
+	opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.chat-activity { transition: none; }
 }
 
 .working-row {
 	display: inline-flex;
+	flex: 0 0 auto;
+	pointer-events: none;
 	align-items: center;
 	gap: 7px;
 	padding: 4px 10px;
@@ -1846,14 +1866,15 @@ body.vscode-light pre.term {
 .messages { position: relative; }
 
 .jump-to-latest {
-	position: absolute;
-	bottom: 40px;
-	right: 10px;
 	display: none;
+	flex: 0 0 auto;
+	pointer-events: auto;
 	align-items: center;
 	justify-content: center;
 	gap: 6px;
-	min-height: 28px;
+	margin-left: auto;
+	min-height: 24px;
+	white-space: nowrap;
 	border-radius: 14px;
 	font-size: 11px;
 	background: var(--vscode-widget-background, var(--pa-raised));
@@ -1861,7 +1882,6 @@ body.vscode-light pre.term {
 	color: var(--pa-dim);
 	box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
 	cursor: pointer;
-	z-index: 5;
 	padding: 4px 10px;
 	opacity: 0.85;
 }

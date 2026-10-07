@@ -227,6 +227,7 @@ async function activity(page) {
   const style=row?getComputedStyle(row):null;
   const visible=!!row&&style.display!=="none"&&style.visibility!=="hidden"&&Number(style.opacity)!==0&&row.getBoundingClientRect().height>0;
   return {present:visible,mounted:!!row,label:label?.textContent,slot:rect(activity),row:rect(row),messages:rect(messages),
+   chat:rect(messages.parentElement),slotPosition:getComputedStyle(activity).position,pointerEvents:style?.pointerEvents,
    sibling:!!activity&&activity.parentElement===messages.parentElement,
    contained:!!activity&&activity.contains(row),position:row?getComputedStyle(row).position:null,
    same:row===window.__workingRef,sameLabel:label===window.__workingLabelRef,changes:window.__workingChanges??[]};
@@ -306,20 +307,32 @@ try {
   assert.equal(await page.locator('[data-part="tool-settled-tool"] .tool-result pre').textContent(),OUTPUT);
   assert.ok((await page.locator('[data-part="usage"]').textContent()).includes("150 tokens"));
  });
- await run("working indicator uses a reserved sibling slot, never overlays transcript",async page=>{
+ await run("working indicator floats without resizing transcript or intercepting tools",async page=>{
   await seed(page);
   const got=await activity(page);
   assert.equal(got.present,true,"streaming snapshot shows Working");
   assert.equal(got.sibling,true,".chat-activity is a sibling of .messages");
-  assert.equal(got.contained,true,"working row belongs to the reserved activity slot");
-  assert.ok(got.slot.height>0,"activity footer reserves space");
-  assert.ok(got.messages.bottom<=got.slot.top+1,"reserved slot is below, not inside or over transcript");
-  assert.ok(got.row.top>=got.slot.top-1&&got.row.bottom<=got.slot.bottom+1,"Working stays within activity slot");
-  assert.notEqual(got.position,"absolute","Working is not an absolute transcript overlay");
+  assert.equal(got.contained,true,"working row belongs to the shared activity strip");
+  assert.equal(got.slotPosition,"absolute","activity strip reserves no separate row");
+  assert.ok(got.slot.height>0,"floating strip has usable bounds");
+  assert.ok(Math.abs(got.messages.bottom-got.chat.bottom)<=1,"transcript reaches the chat bottom behind controls");
+  assert.ok(Math.abs(got.messages.height-got.chat.height)<=1,"controls consume no transcript viewport height");
+  assert.ok(got.row.top>=got.slot.top-1&&got.row.bottom<=got.slot.bottom+1,"Working stays within floating strip");
+  assert.notEqual(got.position,"absolute","Working flows within the shared floating strip");
+  assert.equal(got.pointerEvents,"none","Working cannot intercept underlying tool input");
+  const hidden=await page.evaluate(()=>{
+   const activity=document.querySelector(".chat-activity"),messages=document.querySelector(".messages");
+   const before={height:messages.clientHeight,scrollHeight:messages.scrollHeight};
+   activity.style.display="none";
+   const after={height:messages.clientHeight,scrollHeight:messages.scrollHeight};
+   activity.style.display="";
+   return {before,after};
+  });
+  assert.deepEqual(hidden.before,hidden.after,"floating activity has no layout cost");
   await page.evaluate(()=>window.__event({type:"agent_end"}));await frames(page);
   const idle=await activity(page);
   assert.equal(idle.present,false,"agent_end hides the run indicator");
-  assert.ok(Math.abs(idle.slot.height-got.slot.height)<=1,"idle slot keeps reserved height");
+  assert.ok(Math.abs(idle.slot.height-got.slot.height)<=1,"idle retains floating strip bounds");
   assert.ok(Math.abs(idle.messages.bottom-got.messages.bottom)<=1,"idle transition does not resize transcript viewport");
  });
  await run("Working label and elapsed timer stay mounted and continuous through tool transitions and snapshot",async page=>{

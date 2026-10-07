@@ -309,6 +309,7 @@ gate_tests() {
     run_gate "late assistant response ordering" "node test/live-tail-response-order.test.mjs" || failures=$((failures+1))
     run_gate "captured provider stream lifecycle" "node test/provider-stream-lifecycle.test.mjs" || failures=$((failures+1))
     run_gate "activity rail layout" "node test/activity-layout.test.mjs" || failures=$((failures+1))
+    run_gate "floating activity controls" "node test/activity-floating-controls.test.mjs" || failures=$((failures+1))
     run_gate "retained webview build revision" "node test/webview-revision.test.mjs" || failures=$((failures+1))
     run_gate "preview screenshot matrix" "node test/preview-shot.mjs" || failures=$((failures+1))
     if [ "$failures" != "0" ]; then
