@@ -425,6 +425,8 @@ export type HostToWebview =
 			messages: AgentMessage[];
 			state: RpcSessionState | null;
 			status: StatusSnapshot;
+			/** True for durable get_messages/attach records; excludes the in-flight reply. */
+			durableMessages?: boolean;
 			steerDefault?: "steer" | "followUp";
 		}
 	| { type: "favorites"; favorites: ModelRef[] }

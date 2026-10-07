@@ -275,6 +275,9 @@ button:focus-visible {
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
+	/* In very short panes the fixed activity rail may not fit. Keep its paint
+	   inside chat instead of spilling onto the composer or subagent strip. */
+	overflow: hidden;
 }
 
 .messages {

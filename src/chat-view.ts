@@ -75,13 +75,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 			enableScripts: true,
 			localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
 		};
-		// Assign the document only when the webview has none. buildHtml() mints a
-		// fresh nonce every call, so re-assigning on every activity-bar toggle is
-		// always a different string and always reloads the webview — replaying the
-		// connecting splash and blanking the transcript, the composer and the
-		// operator's draft each time. Reading the property back also self-corrects
-		// if VS Code ever hands us a replaced, empty webview object.
-		if (!view.webview.html) {
+		// Keep the exact document while this build is current. Reassigning mints
+		// a new nonce and reloads chat, so activity-bar toggles must not do it.
+		// A retained document from an older extension build needs one refresh;
+		// otherwise it keeps executing the old renderer and old Working styles.
+		if (!view.webview.html.includes(`data-pa-build="${WEBVIEW_REV}"`)) {
 			view.webview.html = buildHtml(view.webview, this.extensionUri);
 		}
 		for (const d of this.receiveDisposables.splice(0)) d.dispose();
@@ -589,7 +587,7 @@ function buildHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 	const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "main.css"));
 	const nonce = getNonce();
 	return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-pa-build="${WEBVIEW_REV}">
 <head>
 	<meta charset="UTF-8" />
 	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data: blob:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';" />

@@ -173,19 +173,21 @@ try {
   assert.equal(result.after.rows,result.before.rows+1,'exactly one genuinely new row');
   assert.ok(result.liveContinues,'genuine live update still rendered');
  });
- for(const gap of [51,60,80]) await run(`active content shrink clamps without re-sticking, gap ${gap}`,async(page)=>{
+ for(const gap of [51,60,80]) await run(`authoritative content shrink clamps without re-sticking, gap ${gap}`,async(page)=>{
   await page.evaluate(()=>{
-   window.__text=text=>({role:'assistant',timestamp:444,content:[{type:'text',text}]});
+   window.__text=(text,timestamp=444)=>({role:'assistant',timestamp,content:[{type:'text',text}]});
    window.__event({type:'message_start',message:window.__text('Long live content.\n\n'.repeat(40))});
   });await frames(page);await detach(page,gap);const before=await metrics(page);
-  await page.evaluate(()=>window.__event({type:'message_update',message:window.__text('short')}));
+  // An older partial must not shrink the row. A final authoritative correction
+  // may do so, and its native clamp still must not imply a return-to-tail intent.
+  await page.evaluate(()=>window.__event({type:'message_end',message:{...window.__text('short'),stopReason:'stop'}}));
   await frames(page);const clamped=await metrics(page);
   assert.ok(clamped.max<before.top-100,'fixture must force browser scrollTop clamp');
   assert.ok(clamped.gap<=1,'browser clamps to shortened tail');await expectNewMessages(page);
   const box=await page.locator('.messages').boundingBox();
   await page.mouse.move(box.x+12,box.y+box.height/2);await page.mouse.wheel(0,-1);await frames(page);
   const held=await metrics(page);assert.ok(held.top<clamped.top,'native upward wheel really moved');await expectNewMessages(page);
-  await page.evaluate(()=>window.__event({type:'message_update',message:window.__text('New words after clamp. '.repeat(40))}));
+  await page.evaluate(()=>window.__event({type:'message_start',message:window.__text('New words after clamp. '.repeat(40),445)}));
   await frames(page);const grown=await metrics(page);
   assert.ok(grown.max>held.max+50,'new content must grow');
   assert.ok(Math.abs(grown.top-held.top)<=1,'growth must not resume following after clamp/upward wheel');

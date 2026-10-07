@@ -305,6 +305,11 @@ gate_tests() {
     run_gate "stable rehydrate state" "node test/stable-rehydrate-state.test.mjs" || failures=$((failures+1))
     run_gate "stable rehydrate owners" "node test/stable-rehydrate-final.test.mjs" || failures=$((failures+1))
     run_gate "trusted-wheel tool streaming" "node test/scroll-stream-stress.test.mjs" || failures=$((failures+1))
+    run_gate "live-tail per-frame geometry" "node test/live-tail-geometry.test.mjs" || failures=$((failures+1))
+    run_gate "late assistant response ordering" "node test/live-tail-response-order.test.mjs" || failures=$((failures+1))
+    run_gate "captured provider stream lifecycle" "node test/provider-stream-lifecycle.test.mjs" || failures=$((failures+1))
+    run_gate "activity rail layout" "node test/activity-layout.test.mjs" || failures=$((failures+1))
+    run_gate "retained webview build revision" "node test/webview-revision.test.mjs" || failures=$((failures+1))
     run_gate "preview screenshot matrix" "node test/preview-shot.mjs" || failures=$((failures+1))
     if [ "$failures" != "0" ]; then
         fail "$failures verification layer(s) failed — fix them before publishing"

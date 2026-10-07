@@ -953,6 +953,7 @@ export class SessionController implements vscode.Disposable {
 		this.broadcast({ type: "sessionChildren", children: [] });
 		this.broadcast({
 			type: "snapshot",
+			durableMessages: true,
 			messages: [],
 			state: null,
 			status: this.buildStatus(),
@@ -3146,6 +3147,7 @@ export class SessionController implements vscode.Disposable {
 		this.compacting = this.rentedState?.isCompacting === true;
 		this.broadcast({
 			type: "snapshot",
+			durableMessages: true,
 			messages: this.cachedMessages,
 			state: this.rentedState,
 			status: this.buildStatus(),
@@ -4184,6 +4186,7 @@ export class SessionController implements vscode.Disposable {
 			if (!this.isCurrentAttachment(attached)) return false;
 			this.broadcast({
 				type: "snapshot",
+				durableMessages: true,
 				messages: this.cachedMessages,
 				state: this.rentedState,
 				status: this.buildStatus(),
@@ -4228,6 +4231,7 @@ export class SessionController implements vscode.Disposable {
 				.get<"steer" | "followUp">("defaultStreamingBehavior", "steer");
 			this.broadcast({
 				type: "snapshot",
+				durableMessages: true,
 				messages: this.cachedMessages,
 				state: this.state,
 				status: this.buildStatus(stats),

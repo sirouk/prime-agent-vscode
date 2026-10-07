@@ -936,7 +936,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			if (!preserveScroll) pendingPrompts.clear();
 			spawnSeenBaseline = false;
 			resetSubagentActivityBaseline();
-			transcript.renderSnapshot(message.messages ?? [], preserveScroll, message.status.streaming);
+			transcript.renderSnapshot(message.messages ?? [], preserveScroll, message.status.streaming, message.durableMessages === true);
 			renderedTranscriptSessionId = message.status.sessionId;
 			// Up/Down recall has to survive a reload or a resume, so it is seeded
 			// from the thread itself rather than only from what this panel sent.

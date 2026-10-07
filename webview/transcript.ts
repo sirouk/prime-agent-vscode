@@ -603,7 +603,7 @@ export class Transcript {
 	// Snapshot rebuild
 	// ---------------------------------------------------------------
 
-	renderSnapshot(messages: AgentMessage[], preserveScroll = false, streaming = false): void {
+	renderSnapshot(messages: AgentMessage[], preserveScroll = false, streaming = false, durableMessages = false): void {
 		if (preserveScroll) this.captureScrollFollow();
 		const following = this.stickToBottom;
 		const savedTop = this.scroller.scrollTop;
@@ -619,7 +619,7 @@ export class Transcript {
 			? Math.min(this.olderMessages.length, Math.max(0, messages.length - INITIAL_RENDER))
 			: Math.max(0, messages.length - INITIAL_RENDER);
 		if (preserveScroll) {
-			this.rehydrateSnapshot(messages, renderStart, streaming);
+			this.rehydrateSnapshot(messages, renderStart, streaming, durableMessages);
 			if (following) {
 				this.pruneOldRows();
 				this.followScrollToBottom();
@@ -689,7 +689,7 @@ export class Transcript {
 		// all of it. The rest stays in memory as data and renders on demand.
 		this.olderMessages = messages.slice(0, renderStart);
 		for (const message of messages.slice(renderStart)) {
-			this.renderMessage(message, false);
+			this.renderMessage(message, false, durableMessages);
 		}
 		this.renderEarlierBar();
 		if (!this.hasContent) this.showWelcome();
@@ -717,12 +717,12 @@ export class Transcript {
 	}
 
 	/** Update an existing session without disconnecting its unchanged rows or tool cards. */
-	private rehydrateSnapshot(messages: AgentMessage[], renderStart: number, streaming: boolean): void {
+	private rehydrateSnapshot(messages: AgentMessage[], renderStart: number, streaming: boolean, durableMessages: boolean): void {
+		this.streaming = streaming;
 		this.renderChangedFiles([]);
 		const existing = Array.from(this.scroller.children) as HTMLElement[];
 		const rows = new Map(existing.filter((row) => row.dataset.messageKey).map((row) => [row.dataset.messageKey!, row]));
 		const live = this.streamingBubble;
-		const liveMessage = live ? this.assistantMessages.get(live) : undefined;
 		const signature = this.snapshotCompactionSignature(messages);
 		const compacted = signature !== this.compactionSignature;
 		this.compactionSignature = signature;
@@ -748,7 +748,7 @@ export class Transcript {
 		this.snapshotTarget = [];
 		let desired: HTMLElement[];
 		try {
-			for (const message of messages.slice(renderStart)) this.renderMessage(message, false);
+			for (const message of messages.slice(renderStart)) this.renderMessage(message, false, durableMessages);
 			desired = this.snapshotTarget;
 		} finally {
 			this.rehydratingRows = null;
@@ -801,7 +801,8 @@ export class Transcript {
 		if (messages.length === 0 || compacted) this.spawnCardIds.clear();
 		this.streaming = streaming;
 		this.streamingBubble = live?.isConnected && live.dataset.settled !== "true" ? live : null;
-		if (this.streamingBubble && liveMessage) this.registerAssistant(this.streamingBubble, liveMessage);
+		// Keep the message registered by the accepted snapshot. Re-registering
+		// the pre-snapshot live message would lower the partial-update watermark.
 		this.hasContent = desired.some((row) => this.rowMessages.has(row) || row.classList.contains("row"));
 		if (this.hasContent) this.dismissWelcome();
 		else this.showWelcome();
@@ -1032,6 +1033,35 @@ export class Transcript {
 		return !previous || JSON.stringify(previous.content) === JSON.stringify(message.content);
 	}
 
+	private olderAssistantPartial(row: HTMLElement, message: AssistantMessage, completedIndex?: number): boolean {
+		if (row.dataset.settled === "true") return true;
+		const previous = this.assistantMessages.get(row);
+		if (!previous) return false;
+		// New parts can arrive before an existing tool slot. Match the prior
+		// parts in order instead of requiring identical indexes, but never let
+		// an older partial remove a known part or make its content shorter.
+		let nextIndex = 0;
+		for (const [index, part] of previous.content.entries()) {
+			const completed = completedIndex === index ? message.content[index] : undefined;
+			if (completed?.type === part.type && (part.type !== "toolCall" || completed.type === "toolCall" && completed.id === part.id)) {
+				nextIndex = index + 1;
+				continue;
+			}
+			let found = false;
+			while (nextIndex < message.content.length) {
+				const next = message.content[nextIndex++];
+				if (part.type === "text" && next.type === "text" && next.text.length >= part.text.length
+					|| part.type === "thinking" && next.type === "thinking" && next.thinking.length >= part.thinking.length
+					|| part.type === "toolCall" && next.type === "toolCall" && part.id === next.id) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) return true;
+		}
+		return false;
+	}
+
 	private settledAssistantRow(message: AssistantMessage): HTMLElement | undefined {
 		for (const key of this.assistantKeys(message)) {
 			if (this.ambiguousAssistantKeys.has(key)) continue;
@@ -1041,7 +1071,7 @@ export class Transcript {
 		return undefined;
 	}
 
-	private registerAssistant(row: HTMLElement, message: AssistantMessage): void {
+	private registerAssistant(row: HTMLElement, message: AssistantMessage, settled: boolean): void {
 		const keys = this.assistantKeys(message);
 		for (const key of keys) {
 			const previous = this.assistantRows.get(key);
@@ -1054,7 +1084,7 @@ export class Transcript {
 			row.dataset.messageKey = this.renderingKey ?? this.nextAnchorKey(keys[0]);
 		}
 		this.assistantMessages.set(row, message);
-		if (message.stopReason || message.errorMessage) row.dataset.settled = "true";
+		if (settled) row.dataset.settled = "true";
 	}
 
 	/** Empty message_start frames are not a row: wait for the first visible part. */
@@ -1066,12 +1096,24 @@ export class Transcript {
 		this.hasContent = true;
 	}
 
-	/** Create the live bubble for a turn whose message_start we never received. */
-	private adoptStreamingBubble(message: AssistantMessage): void {
-		if (this.streamingBubble) return;
+	/** Resolve this event's row without letting an older reply take over the live one. */
+	private adoptStreamingBubble(message: AssistantMessage): HTMLElement | undefined {
+		const existing = this.assistantRow(message);
+		if (existing) {
+			if (!this.streamingBubble) this.streamingBubble = existing;
+			return existing;
+		}
+		if (this.streamingBubble) {
+			const previous = this.assistantMessages.get(this.streamingBubble);
+			const previousResponse = previous && this.assistantKeys(previous).find((key) => key.startsWith("response:"));
+			const incomingResponse = this.assistantKeys(message).find((key) => key.startsWith("response:"));
+			if (previousResponse && incomingResponse && previousResponse !== incomingResponse) return undefined;
+			return this.streamingBubble;
+		}
 		this.dismissWelcome();
-		this.streamingBubble = this.assistantRow(message) ?? this.buildAssistantRow(message, true);
+		this.streamingBubble = this.buildAssistantRow(message, true);
 		this.showStreamingBubble();
+		return this.streamingBubble;
 	}
 
 	handleEvent(event: AgentEvent): void {
@@ -1093,6 +1135,7 @@ export class Transcript {
 				if (message.role === "assistant") {
 					if (this.settledAssistantRow(message as AssistantMessage)) break;
 					const existing = this.assistantRow(message as AssistantMessage);
+					if (existing && this.streamingBubble && existing !== this.streamingBubble) break;
 					this.streamingBubble = existing ?? this.buildAssistantRow(message as AssistantMessage, true);
 					this.showStreamingBubble();
 				} else {
@@ -1109,9 +1152,12 @@ export class Transcript {
 				// An update with no bubble means we joined the turn after its
 				// message_start (attach mid-flight, or a catch-up after a resync).
 				// Dropping it froze the transcript for the rest of the turn.
-				this.adoptStreamingBubble(message);
-				if (this.streamingBubble) {
-					this.fillAssistantRow(this.streamingBubble, message, true);
+				const row = this.adoptStreamingBubble(message);
+				if (row) {
+					const blockEvent = event.assistantMessageEvent as { type?: string; contentIndex?: number } | undefined;
+					const completedBlock = blockEvent?.type === "text_end" || blockEvent?.type === "thinking_end" || blockEvent?.type === "toolcall_end";
+					const completedIndex = completedBlock ? blockEvent?.contentIndex : undefined;
+					if (!this.olderAssistantPartial(row, message, completedIndex)) this.fillAssistantRow(row, message, true);
 					this.showStreamingBubble();
 				}
 				break;
@@ -1125,17 +1171,19 @@ export class Transcript {
 						// a different live reply. The settled receipt is already complete.
 						break;
 					}
-					this.adoptStreamingBubble(message as AssistantMessage);
-					if (this.streamingBubble) {
-						this.fillAssistantRow(this.streamingBubble, message as AssistantMessage, false);
+					const row = this.adoptStreamingBubble(message as AssistantMessage);
+					if (row) {
+						this.fillAssistantRow(row, message as AssistantMessage, false);
 						this.showStreamingBubble();
-						this.streamingBubble = null;
+						if (row === this.streamingBubble) this.streamingBubble = null;
 					}
 				}
 				if (this.streaming) this.startWorking();
 				break;
 			}
 			case "tool_execution_start": {
+				const completed = this.toolBlocks.get(event.toolCallId);
+				if (completed && completed.state !== "running") break;
 				this.stopWorking();
 				const block = this.ensureToolBlock(event.toolCallId, event.toolName, event.args ?? {});
 				if (!block.root.isConnected) {
@@ -1149,6 +1197,8 @@ export class Transcript {
 				this.updateToolPartial(event.toolCallId, event.partialResult);
 				break;
 			case "tool_execution_end": {
+				const completed = this.toolBlocks.get(event.toolCallId);
+				if (completed && completed.state !== "running") break;
 				const text = extractPartialText(event.result);
 				if (text) this.attachToolResultText(event.toolCallId, text, event.isError ?? false);
 				else this.setToolState(event.toolCallId, event.isError ? "error" : "done");
@@ -1320,7 +1370,7 @@ export class Transcript {
 		return undefined;
 	}
 
-	private renderMessage(message: AgentMessage, isPartial: boolean): void {
+	private renderMessage(message: AgentMessage, isPartial: boolean, authoritative = false): void {
 		const previousKey = this.renderingKey;
 		const previousMessage = this.renderedMessage;
 		const base = this.messageAnchorBase(message);
@@ -1332,11 +1382,19 @@ export class Transcript {
 					?? (message.role === "assistant" ? this.assistantRow(message as AssistantMessage) : undefined)
 				: undefined;
 			if (existing && message.role === "assistant") {
-				const previous = this.assistantMessages.get(existing);
-				const settled = Boolean((message as AssistantMessage).stopReason || (message as AssistantMessage).errorMessage);
-				// A stale partial cannot erase a settled receipt or roll back live args.
-				const older = previous && !settled && (existing.dataset.settled === "true" || JSON.stringify(message.content).length < JSON.stringify(previous.content).length);
-				if (!older) this.fillAssistantRow(existing, message as AssistantMessage, isPartial);
+				const assistant = message as AssistantMessage;
+				const settled = Boolean(assistant.errorMessage)
+					|| Boolean(assistant.stopReason && assistant.stopReason !== "stop")
+					|| assistant.content.some((part) => {
+						const block = part.type === "toolCall" ? this.toolBlocks.get(part.id) : undefined;
+						return block != null && block.state !== "running";
+					});
+				const live = !authoritative && this.streaming && existing === this.streamingBubble && existing.dataset.settled !== "true" && !settled;
+				const partial = !authoritative && (live || !assistant.stopReason && !assistant.errorMessage);
+				const staleSettled = !authoritative && this.streaming && existing.dataset.settled === "true" && partial;
+				// A known live snapshot shares the partial watermark. Idle/durable
+				// snapshots are authoritative, including old records with no stopReason.
+				if (!staleSettled && (!live || !this.olderAssistantPartial(existing, assistant))) this.fillAssistantRow(existing, assistant, partial);
 				this.place(existing);
 			} else if (existing && message.role === "user") {
 				const previous = this.rowMessages.get(existing);
@@ -1357,7 +1415,7 @@ export class Transcript {
 				if (body) body.textContent = (message as unknown as CustomDisplayMessage).content ?? "";
 				this.place(existing);
 			} else {
-				this.renderMessageContent(message, isPartial);
+				this.renderMessageContent(message, isPartial, authoritative);
 			}
 		} finally {
 			this.renderingKey = previousKey;
@@ -1365,7 +1423,7 @@ export class Transcript {
 		}
 	}
 
-	private renderMessageContent(message: AgentMessage, isPartial: boolean): void {
+	private renderMessageContent(message: AgentMessage, isPartial: boolean, authoritative = false): void {
 		const role = message.role;
 		if (role === "user") {
 			const userMessage = message as UserMessage;
@@ -1383,7 +1441,7 @@ export class Transcript {
 			}
 			this.place(this.buildUserRow(userMessage, ordinal));
 		} else if (role === "assistant") {
-			this.place(this.buildAssistantRow(message as AssistantMessage, isPartial));
+			this.place(this.buildAssistantRow(message as AssistantMessage, isPartial, authoritative));
 		} else if (role === "toolResult") {
 			this.renderToolResult(message as ToolResultMessage);
 		} else if (role === ("bashExecution" as string)) {
@@ -1682,9 +1740,10 @@ export class Transcript {
 		footer.querySelector(".uf-tokens")?.after(costEl);
 	}
 
-	private buildAssistantRow(message: AssistantMessage, isPartial: boolean): HTMLElement {
+	private buildAssistantRow(message: AssistantMessage, isPartial: boolean, authoritative = false): HTMLElement {
 		const row = el("div", "row row-assistant");
-		this.fillAssistantRow(row, message, isPartial);
+		const partial = !authoritative && (isPartial || !message.stopReason && !message.errorMessage);
+		this.fillAssistantRow(row, message, partial);
 		this.markRowTimestamp(row, this.messageTimestamp(message));
 		return row;
 	}
@@ -1790,21 +1849,16 @@ export class Transcript {
 				}
 				desired.push(node);
 			} else if (part.type === "toolCall") {
-				const block = this.ensureToolBlock(part.id, part.name, part.arguments ?? {}, Boolean(message.stopReason || message.errorMessage));
+				const block = this.ensureToolBlock(part.id, part.name, part.arguments ?? {}, !isPartial);
 				block.root.dataset.part = `tool-${part.id}`;
 				desired.push(block.root);
 			}
 		}
-		// The usage line belongs to a FINISHED message, and "not partial" is not the
-		// same claim. A snapshot repaint mid-turn re-renders the live message as
-		// non-partial, so the line was appearing under a reply that was still being
-		// written and vanishing again on its next delta — a row growing and
-		// shrinking under the operator many times a second, which reads as the
-		// whole transcript juddering. A message the agent has finished always
-		// carries a stopReason (or an errorMessage); one still being written never
-		// does, and that is the only honest signal for "the numbers are final".
-		const settled = Boolean(message.stopReason) || Boolean(message.errorMessage);
-		if (!isPartial && settled) {
+		// Providers initialize stopReason to "stop" even on live partials. Only
+		// message_end or an authoritative durable snapshot can settle this row;
+		// a partial/start must not freeze later deltas or show a final usage line.
+		const settled = !isPartial;
+		if (settled) {
 			this.priceUserTurn(message.usage);
 			const meta = this.usageLine(message as AssistantMessage, keyed("usage"));
 			if (meta) {
@@ -1817,7 +1871,7 @@ export class Transcript {
 			}
 		}
 		this.reconcileChildren(body, desired);
-		this.registerAssistant(row, message);
+		this.registerAssistant(row, message, settled);
 	}
 
 	private buildThinking(thinking: string, isPartial: boolean): HTMLElement {
