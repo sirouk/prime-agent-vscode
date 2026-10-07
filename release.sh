@@ -301,6 +301,10 @@ gate_tests() {
     run_gate "live scroll resync" "node test/scroll-resync.test.mjs" || failures=$((failures+1))
     run_gate "live tool replay scroll" "node test/scroll-tool-replay.test.mjs" || failures=$((failures+1))
     run_gate "live scroll identities" "node test/scroll-identity.test.mjs" || failures=$((failures+1))
+    run_gate "stable tool mounts" "node test/scroll-mount.test.mjs" || failures=$((failures+1))
+    run_gate "stable rehydrate state" "node test/stable-rehydrate-state.test.mjs" || failures=$((failures+1))
+    run_gate "stable rehydrate owners" "node test/stable-rehydrate-final.test.mjs" || failures=$((failures+1))
+    run_gate "trusted-wheel tool streaming" "node test/scroll-stream-stress.test.mjs" || failures=$((failures+1))
     run_gate "preview screenshot matrix" "node test/preview-shot.mjs" || failures=$((failures+1))
     if [ "$failures" != "0" ]; then
         fail "$failures verification layer(s) failed — fix them before publishing"

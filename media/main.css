@@ -461,20 +461,40 @@ textarea::-webkit-scrollbar {
 
 /* ---------- working indicator ---------- */
 
-.working-row {
-	position: absolute;
-	bottom: 10px;
-	left: 12px;
-	z-index: 4;
-	pointer-events: none;
-	border-radius: 4px;
-	background: var(--pa-surface);
+.chat-activity {
+	flex: 0 0 30px;
+	min-height: 30px;
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	padding: 2px 12px;
+}
+
+.working-row {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	padding: 4px 10px;
+	min-height: 22px;
+	border-radius: 12px;
+	border: 1px solid var(--pa-border);
+	background: var(--pa-surface);
 	color: var(--pa-dim);
 	font-size: 11px;
-	padding: 2px 2px 0;
+	font-variant-numeric: tabular-nums;
+	visibility: hidden;
+}
+
+.working-row.active {
+	visibility: visible;
+}
+
+.working-label {
+	min-width: 82px;
+	white-space: nowrap;
+}
+
+.working-row:not(.active) .working-mark {
+	animation-play-state: paused;
 }
 
 .working-mark {
@@ -1824,7 +1844,7 @@ body.vscode-light pre.term {
 
 .jump-to-latest {
 	position: absolute;
-	bottom: 10px;
+	bottom: 40px;
 	right: 10px;
 	display: none;
 	align-items: center;

@@ -933,7 +933,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 		case "snapshot": {
 			const preserveScroll = Boolean(message.status.sessionId && message.status.sessionId === renderedTranscriptSessionId);
 			adoptAuthoritativeSession(message.status.sessionId);
-			pendingPrompts.clear();
+			if (!preserveScroll) pendingPrompts.clear();
 			spawnSeenBaseline = false;
 			resetSubagentActivityBaseline();
 			transcript.renderSnapshot(message.messages ?? [], preserveScroll, message.status.streaming);

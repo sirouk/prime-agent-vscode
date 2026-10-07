@@ -94,8 +94,9 @@ check("the bar says the thread loads itself as you scroll",
 		return rendered() === n;
 	})());
 
-	// Put the fixture back: draining the window above is exactly what the
-	// trimming checks below must NOT start from.
+	// Reopen as a new transcript identity: a same-session resync deliberately
+	// retains the history already loaded and must not tear down its rows.
+	status.sessionId = "s1-reopened";
 	hostMessage({ type: "snapshot", messages: snapshot, state: null, status });
 	check("re-opening the thread restores the windowed view",
 		(document.querySelector(".earlier-load")?.textContent ?? "").includes("250"),

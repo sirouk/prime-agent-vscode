@@ -212,7 +212,9 @@ async function verifyCodeStream(page, out = []) {
 	const toggle = '[data-part="tool-code-tool"] .tool-toggle';
 	await page.evaluate((sel) => document.querySelector(sel)?.click(), toggle);
 	await page.waitForTimeout(60);
-	await page.$eval(".messages", (e) => { e.scrollTop = e.scrollHeight; });
+	// Collapsing can clamp a detached transcript to its physical bottom. That
+	// layout change is not intent to follow; explicitly use the way back.
+	await page.click(".jump-to-latest.visible");
 	await page.waitForTimeout(80);
 	n += 40;
 	await page.evaluate(({ at, sel }) => {

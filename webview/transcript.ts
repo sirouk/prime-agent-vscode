@@ -207,6 +207,13 @@ export class Transcript {
 	private renderingKey: string | undefined;
 	private anchorCounts = new Map<string, number>();
 	private snapshotKeys = new WeakMap<object, string>();
+	private rehydratingRows: Map<string, HTMLElement> | null = null;
+	private snapshotTarget: HTMLElement[] | null = null;
+	private rowMessages = new WeakMap<HTMLElement, AgentMessage>();
+	private toolResultTimestamps = new Map<string, number>();
+	private paneScrollTops = new WeakMap<HTMLElement, number>();
+	private renderedMessage: AgentMessage | null = null;
+	private compactionSignature: string | undefined;
 	/** Pending optimistic rows, keyed by the webview request that created them. */
 	private optimisticRows = new Map<string, OptimisticUserRow>();
 	/** Ordinal of each durable user message within the complete session history. */
@@ -214,6 +221,7 @@ export class Transcript {
 	private nextUserOrdinal = 0;
 	private retryRow: HTMLElement | null = null;
 	private workingRow: HTMLElement | null = null;
+	private activitySlot: HTMLElement;
 	private workingStartedAt = 0;
 	private workingTimer: number | undefined;
 	private streaming = false;
@@ -249,6 +257,7 @@ export class Transcript {
 		const card = el("div", "spawned-card");
 		if (this.spawnCardIds.has(options.id)) return;
 		this.captureScrollFollow();
+		const readingAnchor = this.readingAnchor();
 		this.spawnCardIds.add(options.id);
 		const dot = el("span", "spawned-dot");
 		card.appendChild(dot);
@@ -279,6 +288,7 @@ export class Transcript {
 			event.stopPropagation();
 			if (options.browseRef) this.deps.onSpawnedCardClick(options.browseRef);
 		});
+		this.restoreReadingAnchor(readingAnchor);
 		this.followScrollToBottom();
 	}
 
@@ -400,6 +410,9 @@ export class Transcript {
 		private readonly deps: TranscriptDeps,
 	) {
 		this.changedFilesBar = changedFilesBar;
+		this.activitySlot = el("div", "chat-activity");
+		this.activitySlot.setAttribute("aria-label", "Agent activity");
+		this.scroller.parentElement?.appendChild(this.activitySlot);
 		this.links = {
 			external: (href) => deps.onOpenLink(href),
 			file: (path, startLine, endLine) => deps.onOpenLinkedFile(path, startLine, endLine),
@@ -414,14 +427,26 @@ export class Transcript {
 		this.wireSelectionPreserve();
 		this.scroller.addEventListener("wheel", (event) => {
 			const delta = (event as WheelEvent).deltaY;
+			this.snapshotScrollRemainder = 0;
 			if (delta < 0) this.setStick(false);
-			else if (delta > 0 && this.atBottom()) this.setStick(true);
+			else if (delta > 0 && this.atBottom()) {
+				// A downward wheel inside code/output is not an outer return to
+				// latest, even when the transcript itself is still at the bottom.
+				let target = event.target instanceof HTMLElement ? event.target : null;
+				while (target && target !== this.scroller) {
+					if (target.scrollHeight > target.clientHeight + 4 && /auto|scroll/.test(window.getComputedStyle(target).overflowY)) return;
+					target = target.parentElement;
+				}
+				this.setStick(true);
+			}
 		}, { passive: true });
 		this.scroller.addEventListener("touchmove", () => {
+			this.snapshotScrollRemainder = 0;
 			if (!this.atBottom()) this.setStick(false);
 		}, { passive: true });
 		this.scroller.addEventListener("scroll", () => {
 			const top = this.scroller.scrollTop;
+			if (Math.abs(top - this.lastScrollTop) > 1) this.snapshotScrollRemainder = 0;
 			// A delayed event for our own snap may arrive after content grows.
 			// Keep following only if the position is still the one WE wrote.
 			// Growth must never hide a real scrollbar/keyboard/touch move.
@@ -457,6 +482,7 @@ export class Transcript {
 	private viewportObserver: ResizeObserver | null = null;
 	private lastScrollTop = 0;
 	private lastScrollHeight = 0;
+	private snapshotScrollRemainder = 0;
 	/** The reader's position is checked BEFORE a render grows the content. */
 	private captureScrollFollow(): void {
 		if (!this.stickToBottom) return;
@@ -472,6 +498,23 @@ export class Transcript {
 		const unchanged = Math.abs(this.scroller.scrollTop - this.lastScrollTop) <= 1;
 		const grew = this.lastScrollHeight > 0 && this.scroller.scrollHeight > this.lastScrollHeight;
 		if (!unchanged || !grew) this.setStick(false);
+	}
+
+	/** Capture the visible row before a live mutation while the reader is detached. */
+	private readingAnchor(): { row: HTMLElement; offset: number } | null {
+		if (this.stickToBottom) return null;
+		const top = this.scroller.getBoundingClientRect().top;
+		const row = Array.from(this.scroller.children).find((node) =>
+			node !== this.earlierBar && node !== this.prunedNotice && node.getBoundingClientRect().bottom > top) as HTMLElement | undefined;
+		return row ? { row, offset: row.getBoundingClientRect().top - top } : null;
+	}
+
+	private restoreReadingAnchor(anchor: { row: HTMLElement; offset: number } | null): void {
+		if (!anchor?.row.isConnected || this.stickToBottom) return;
+		const delta = anchor.row.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top - anchor.offset;
+		if (Math.abs(delta) > 0.01) this.scroller.scrollTop += delta;
+		this.lastScrollTop = this.scroller.scrollTop;
+		this.lastScrollHeight = this.scroller.scrollHeight;
 	}
 
 	private atBottom(): boolean {
@@ -572,10 +615,34 @@ export class Transcript {
 		const anchorKey = (anchor as HTMLElement | undefined)?.dataset.messageKey;
 		const anchorOffset = anchor ? anchor.getBoundingClientRect().top - viewportTop : 0;
 		// Keep history that the reader already loaded; a resync is not navigation.
-		const renderStart = preserveScroll && !following && this.scroller.querySelector(".row, .custom-note, .compaction-summary")
+		const renderStart = preserveScroll && (this.olderMessages.length > 0 || this.scroller.querySelectorAll(":scope > .row").length >= INITIAL_RENDER)
 			? Math.min(this.olderMessages.length, Math.max(0, messages.length - INITIAL_RENDER))
 			: Math.max(0, messages.length - INITIAL_RENDER);
+		if (preserveScroll) {
+			this.rehydrateSnapshot(messages, renderStart, streaming);
+			if (following) {
+				this.pruneOldRows();
+				this.followScrollToBottom();
+			} else {
+				const restored = anchorKey ? Array.from(this.scroller.children).find((node) =>
+					(node as HTMLElement).dataset.messageKey === anchorKey) : undefined;
+				const target = restored
+					? this.scroller.scrollTop + restored.getBoundingClientRect().top - viewportTop - anchorOffset + this.snapshotScrollRemainder
+					: savedTop;
+				this.scroller.scrollTop = target;
+				const remainder = target - this.scroller.scrollTop;
+				// Carry subpixel rounding only, never a clamped-away tail offset.
+				this.snapshotScrollRemainder = restored && Math.abs(remainder) <= 1 ? remainder : 0;
+				this.stickToBottom = false;
+				this.lastScrollTop = this.scroller.scrollTop;
+				this.lastScrollHeight = this.scroller.scrollHeight;
+				this.updateJumpButton();
+			}
+			return;
+		}
 		this.scroller.textContent = "";
+		this.snapshotScrollRemainder = 0;
+		this.compactionSignature = this.snapshotCompactionSignature(messages);
 		this.spawnCardIds.clear();
 		this.assistantRows.clear();
 		this.ambiguousAssistantKeys.clear();
@@ -585,7 +652,9 @@ export class Transcript {
 			const base = this.messageAnchorBase(message) ?? `index:${index}`;
 			this.snapshotKeys.set(message, this.nextAnchorKey(base));
 		});
+		for (const block of this.toolBlocks.values()) window.clearTimeout(block.summaryTimer);
 		this.toolBlocks.clear();
+		this.toolResultTimestamps.clear();
 		this.streamingBubble = null;
 		this.welcome = null;
 		// Both point at nodes in the scroller we just emptied.
@@ -595,7 +664,7 @@ export class Transcript {
 		// brand-new session as "running" with a Stop button no agent_end can clear,
 		// and stopWorking() also kills the 1s timer whose row we just deleted.
 		this.streaming = streaming;
-		this.stopWorking();
+		this.resetWorking();
 		this.optimisticRows.clear();
 		this.userOrdinals = new WeakMap<object, number>();
 		this.nextUserOrdinal = 0;
@@ -642,12 +711,124 @@ export class Transcript {
 		}
 	}
 
+	private snapshotCompactionSignature(messages: AgentMessage[]): string | undefined {
+		const marker = messages.find((message) => message.role === "compactionSummary");
+		return marker ? JSON.stringify(marker) : undefined;
+	}
+
+	/** Update an existing session without disconnecting its unchanged rows or tool cards. */
+	private rehydrateSnapshot(messages: AgentMessage[], renderStart: number, streaming: boolean): void {
+		this.renderChangedFiles([]);
+		const existing = Array.from(this.scroller.children) as HTMLElement[];
+		const rows = new Map(existing.filter((row) => row.dataset.messageKey).map((row) => [row.dataset.messageKey!, row]));
+		const live = this.streamingBubble;
+		const liveMessage = live ? this.assistantMessages.get(live) : undefined;
+		const signature = this.snapshotCompactionSignature(messages);
+		const compacted = signature !== this.compactionSignature;
+		this.compactionSignature = signature;
+		this.snapshotKeys = new WeakMap<object, string>();
+		this.anchorCounts.clear();
+		messages.forEach((message, index) => {
+			this.snapshotKeys.set(message, this.nextAnchorKey(this.messageAnchorBase(message) ?? `index:${index}`));
+		});
+		if (this.prunedCount > 0 && !compacted) {
+			const first = existing.find((row) => row.dataset.messageKey);
+			const index = first ? messages.findIndex((message) => this.snapshotKeys.get(message) === first.dataset.messageKey) : -1;
+			if (index >= 0) renderStart = Math.max(renderStart, index);
+		}
+		this.userOrdinals = new WeakMap<object, number>();
+		this.nextUserOrdinal = 0;
+		for (const message of messages) {
+			if (message.role === "user") this.userOrdinals.set(message, this.nextUserOrdinal++);
+		}
+		this.olderMessages = messages.slice(0, this.prunedCount > 0 && !compacted ? this.olderMessages.length : renderStart);
+		const pendingFooter = this.pendingUserFooter;
+		this.pendingUserFooter = null;
+		this.rehydratingRows = rows;
+		this.snapshotTarget = [];
+		let desired: HTMLElement[];
+		try {
+			for (const message of messages.slice(renderStart)) this.renderMessage(message, false);
+			desired = this.snapshotTarget;
+		} finally {
+			this.rehydratingRows = null;
+			this.snapshotTarget = null;
+		}
+		// Attach snapshots omit the in-flight reply. Keep its mounted slot until
+		// the replay/deltas arrive; never erase it for a frame and then recreate it.
+		if (streaming && !compacted && live && !desired.includes(live) && live.isConnected) desired.push(live);
+
+		for (const pending of this.optimisticRows.values()) {
+			if (pending.row.isConnected && !desired.includes(pending.row)) desired.push(pending.row);
+		}
+		// Historical paint must not steal an omitted optimistic prompt's price.
+		// But a removed prompt, or one before a newer durable user, no longer owns it.
+		if (pendingFooter && !pendingFooter.querySelector(".uf-cost")) {
+			const priorIndex = desired.findIndex((row) => row.contains(pendingFooter));
+			const nextIndex = this.pendingUserFooter
+				? desired.findIndex((row) => row.contains(this.pendingUserFooter)) : -1;
+			if (priorIndex >= 0 && priorIndex >= nextIndex) this.pendingUserFooter = pendingFooter;
+		}
+		// Keep chrome that is not part of the authoritative message list.
+		for (const [index, row] of existing.entries()) {
+			if (row === this.earlierBar || row === this.prunedNotice || row.classList.contains("spawned-card")) {
+				if (!compacted && (messages.length > 0 || row === this.earlierBar || row === this.prunedNotice)) {
+					const next = existing.slice(index + 1).find((node) => desired.includes(node));
+					if (next) desired.splice(desired.indexOf(next), 0, row);
+					else desired.push(row);
+				}
+			}
+		}
+		// Reconcile relative order, not absolute indexes: removing an obsolete row
+		// first must not cause every surviving card to be detached and reinserted.
+		const keep = new Set(desired);
+		for (const row of existing) if (!keep.has(row)) row.remove();
+		let cursor = this.scroller.firstElementChild;
+		for (const row of desired) {
+			if (row === this.earlierBar || row === this.prunedNotice) continue;
+			while (cursor && (cursor === this.earlierBar || cursor === this.prunedNotice)) cursor = cursor.nextElementSibling;
+			if (cursor === row) cursor = cursor.nextElementSibling;
+			else this.scroller.insertBefore(row, cursor);
+		}
+		for (const [id, block] of this.toolBlocks) {
+			if (!block.root.isConnected) {
+				window.clearTimeout(block.summaryTimer);
+				this.toolBlocks.delete(id);
+				this.toolResultTimestamps.delete(id);
+			}
+		}
+		for (const [key, row] of this.assistantRows) if (!row.isConnected && row !== live) this.assistantRows.delete(key);
+		if (messages.length === 0 || compacted) this.spawnCardIds.clear();
+		this.streaming = streaming;
+		this.streamingBubble = live?.isConnected && live.dataset.settled !== "true" ? live : null;
+		if (this.streamingBubble && liveMessage) this.registerAssistant(this.streamingBubble, liveMessage);
+		this.hasContent = desired.some((row) => this.rowMessages.has(row) || row.classList.contains("row"));
+		if (this.hasContent) this.dismissWelcome();
+		else this.showWelcome();
+		this.renderEarlierBar();
+		if (compacted) {
+			this.prunedCount = 0;
+			this.prunedNotice?.remove();
+			this.prunedNotice = null;
+		}
+		if (streaming && !this.streamingBubble) this.startWorking();
+		else this.stopWorking();
+	}
+
 	/**
 	 * The "N earlier messages" affordance. Always states the true remaining count:
 	 * a transcript that silently starts part-way through is the kind of thing that
 	 * makes an operator distrust everything else on screen.
 	 */
 	private renderEarlierBar(): void {
+		if (this.earlierBar?.isConnected && this.olderMessages.length > 0) {
+			const remaining = this.olderMessages.length;
+			const button = this.earlierBar.querySelector(".earlier-load") as HTMLElement;
+			button.textContent = `${remaining} earlier message${remaining === 1 ? "" : "s"}`;
+			button.title = `Keep scrolling up to load them, or click to bring in ${Math.min(LOAD_BATCH, remaining)} now`;
+			this.renderPrunedNotice();
+			return;
+		}
 		this.earlierBar?.remove();
 		this.earlierBar = null;
 		if (this.olderMessages.length === 0) {
@@ -725,7 +906,15 @@ export class Transcript {
 	 * without every call site knowing about it.
 	 */
 	private place(node: Node): void {
-		if (node instanceof HTMLElement && this.renderingKey) node.dataset.messageKey = this.renderingKey;
+		if (node instanceof HTMLElement) {
+			if (this.renderingKey) node.dataset.messageKey = this.renderingKey;
+			if (this.renderedMessage) this.rowMessages.set(node, this.renderedMessage);
+			if (this.snapshotTarget) {
+				if (!this.snapshotTarget.includes(node)) this.snapshotTarget.push(node);
+				return;
+			}
+		}
+		if (node.parentNode === this.scroller && !this.insertAnchor) return;
 		if (this.insertAnchor) this.scroller.insertBefore(node, this.insertAnchor);
 		else this.scroller.appendChild(node);
 	}
@@ -753,7 +942,11 @@ export class Transcript {
 			if (node === this.earlierBar || node === this.jumpBtn || node === this.prunedNotice) continue;
 			if (node.contains(this.streamingBubble) || node === this.streamingBubble) break;
 			for (const [id, block] of this.toolBlocks) {
-				if (node.contains(block.root)) this.toolBlocks.delete(id);
+				if (node.contains(block.root)) {
+					window.clearTimeout(block.summaryTimer);
+					this.toolBlocks.delete(id);
+					this.toolResultTimestamps.delete(id);
+				}
 			}
 			for (const [key, row] of this.assistantRows) {
 				if (row === node || node.contains(row)) this.assistantRows.delete(key);
@@ -806,6 +999,7 @@ export class Transcript {
 
 	private messageAnchorBase(message: AgentMessage): string | undefined {
 		if (message.role === "assistant") return this.assistantKeys(message as AssistantMessage)[0];
+		if (message.role === "toolResult") return `result:${(message as ToolResultMessage).toolCallId}`;
 		const timestamp = this.messageTimestamp(message);
 		return timestamp != null ? `${message.role}:${timestamp}` : undefined;
 	}
@@ -882,11 +1076,11 @@ export class Transcript {
 
 	handleEvent(event: AgentEvent): void {
 		this.captureScrollFollow();
+		const readingAnchor = this.readingAnchor();
 		switch (event.type) {
 			case "agent_start":
 				this.dismissWelcome();
 				this.streaming = true;
-				this.stopWorking();
 				this.startWorking();
 				break;
 			case "agent_end":
@@ -980,6 +1174,7 @@ export class Transcript {
 			default:
 				break;
 		}
+		this.restoreReadingAnchor(readingAnchor);
 		this.pruneOldRows();
 		this.followScrollToBottom();
 	}
@@ -1024,27 +1219,39 @@ export class Transcript {
 	// ---------------------------------------------------------------
 
 	private startWorking(): void {
-		if (this.workingRow) return;
+		if (!this.workingRow) {
+			const row = el("div", "working-row");
+			row.append(butterfly(13, "working-mark"), el("span", "working-label", "Working · 0s"));
+			this.activitySlot.appendChild(row);
+			this.workingRow = row;
+		}
+		this.workingRow.classList.add("active");
+		this.workingRow.setAttribute("aria-hidden", "false");
+		if (this.workingTimer !== undefined) return;
 		this.workingStartedAt = Date.now();
-		const row = el("div", "working-row");
-		const mark = butterfly(15, "working-mark");
-		row.appendChild(mark);
-		row.appendChild(el("span", "working-label", "Working"));
-		// Transient activity is an overlay, not transcript content. Removing it
-		// must not shrink scrollHeight and pull completed replies up and down.
-		this.scroller.parentElement?.appendChild(row);
-		this.workingRow = row;
-		const label = row.querySelector(".working-label");
-		window.clearInterval(this.workingTimer);
+		const label = this.workingRow.querySelector(".working-label");
+		if (label) label.textContent = "Working · 0s";
 		this.workingTimer = window.setInterval(() => {
-			if (!this.workingRow) return;
-			const seconds = Math.max(1, Math.round((Date.now() - this.workingStartedAt) / 1000));
-			if (label) label.textContent = `Working · ${seconds}s`;
+			const seconds = Math.max(0, Math.round((Date.now() - this.workingStartedAt) / 1000));
+			const text = `Working · ${seconds}s`;
+			if (label && label.textContent !== text) label.textContent = text;
 		}, 1000);
 	}
 
 	private stopWorking(): void {
+		// During a run the pill remains in its reserved slot, including streaming
+		// text and tool transitions. Only the completed/aborted run retires it.
+		if (this.streaming) return;
 		window.clearInterval(this.workingTimer);
+		this.workingTimer = undefined;
+		this.workingRow?.classList.remove("active");
+		this.workingRow?.setAttribute("aria-hidden", "true");
+	}
+
+	private resetWorking(): void {
+		window.clearInterval(this.workingTimer);
+		this.workingTimer = undefined;
+		this.workingStartedAt = 0;
 		this.workingRow?.remove();
 		this.workingRow = null;
 	}
@@ -1115,12 +1322,46 @@ export class Transcript {
 
 	private renderMessage(message: AgentMessage, isPartial: boolean): void {
 		const previousKey = this.renderingKey;
+		const previousMessage = this.renderedMessage;
 		const base = this.messageAnchorBase(message);
 		this.renderingKey = this.snapshotKeys.get(message) ?? (base ? this.nextAnchorKey(base) : undefined);
+		this.renderedMessage = message;
 		try {
-			this.renderMessageContent(message, isPartial);
+			const existing = this.rehydratingRows
+				? (this.renderingKey ? this.rehydratingRows.get(this.renderingKey) : undefined)
+					?? (message.role === "assistant" ? this.assistantRow(message as AssistantMessage) : undefined)
+				: undefined;
+			if (existing && message.role === "assistant") {
+				const previous = this.assistantMessages.get(existing);
+				const settled = Boolean((message as AssistantMessage).stopReason || (message as AssistantMessage).errorMessage);
+				// A stale partial cannot erase a settled receipt or roll back live args.
+				const older = previous && !settled && (existing.dataset.settled === "true" || JSON.stringify(message.content).length < JSON.stringify(previous.content).length);
+				if (!older) this.fillAssistantRow(existing, message as AssistantMessage, isPartial);
+				this.place(existing);
+			} else if (existing && message.role === "user") {
+				const previous = this.rowMessages.get(existing);
+				const user = message as UserMessage;
+				existing.dataset.userOrdinal = String(this.userMessageOrdinal(user));
+				if (JSON.stringify(previous?.content) !== JSON.stringify(message.content)) {
+					const fresh = this.buildUserRow(user, this.userMessageOrdinal(user));
+					const bubble = existing.querySelector(".bubble-user");
+					const next = fresh.querySelector(".bubble-user");
+					if (bubble && next) bubble.replaceChildren(...Array.from(next.childNodes));
+				}
+				this.pendingUserFooter = existing.querySelector(".user-footer") as HTMLElement | null;
+				this.place(existing);
+			} else if (existing && JSON.stringify(this.rowMessages.get(existing)) === JSON.stringify(message)) {
+				this.place(existing);
+			} else if (existing?.classList.contains("custom-note") && message.role === "custom") {
+				const body = existing.querySelector(".custom-note-body");
+				if (body) body.textContent = (message as unknown as CustomDisplayMessage).content ?? "";
+				this.place(existing);
+			} else {
+				this.renderMessageContent(message, isPartial);
+			}
 		} finally {
 			this.renderingKey = previousKey;
+			this.renderedMessage = previousMessage;
 		}
 	}
 
@@ -1136,6 +1377,7 @@ export class Transcript {
 				if (pending.row.isConnected) {
 					pending.row.dataset.userOrdinal = String(ordinal);
 					this.markRowTimestamp(pending.row, this.messageTimestamp(userMessage));
+					if (this.snapshotTarget) this.place(pending.row);
 					return; // already rendered optimistically
 				}
 			}
@@ -1548,7 +1790,7 @@ export class Transcript {
 				}
 				desired.push(node);
 			} else if (part.type === "toolCall") {
-				const block = this.ensureToolBlock(part.id, part.name, part.arguments ?? {}, !isPartial);
+				const block = this.ensureToolBlock(part.id, part.name, part.arguments ?? {}, Boolean(message.stopReason || message.errorMessage));
 				block.root.dataset.part = `tool-${part.id}`;
 				desired.push(block.root);
 			}
@@ -1595,6 +1837,7 @@ export class Transcript {
 		summary.appendChild(copyBtn);
 		const body = el("div", "thinking-body");
 		body.textContent = thinking;
+		this.trackTailFollow(body);
 		details.append(summary, body);
 		return details;
 	}
@@ -1621,10 +1864,14 @@ export class Transcript {
 	 */
 	private preservingScroll(anchor: HTMLElement, stopClass: string, mutate: () => void): void {
 		const pane = this.scrollPaneFor(anchor, stopClass);
-		const wasAtBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 4;
 		const previousTop = pane.scrollTop;
+		const previousRecordedTop = this.paneScrollTops.get(pane);
+		const atBottom = pane.scrollHeight - previousTop - pane.clientHeight <= 4;
+		if (atBottom && previousRecordedTop != null && previousTop > previousRecordedTop + 1) pane.dataset.follow = "on";
+		const wasAtBottom = pane.dataset.follow !== "off" && atBottom;
 		mutate();
 		pane.scrollTop = wasAtBottom ? pane.scrollHeight : previousTop;
+		this.paneScrollTops.set(pane, pane.scrollTop);
 	}
 
 	/** Grow an existing thinking block in place, leaving its open/closed state alone. */
@@ -1644,6 +1891,10 @@ export class Transcript {
 	 * panes the operator is trying to read while the reply streams.
 	 */
 	private reconcileChildren(parent: HTMLElement, desired: HTMLElement[]): void {
+		// Remove obsolete siblings before ordering survivors. Otherwise a card
+		// gets reinserted just to step over prose that is about to disappear.
+		const keep = new Set<Node>(desired);
+		for (const node of Array.from(parent.childNodes)) if (!keep.has(node)) node.remove();
 		for (const [index, node] of desired.entries()) {
 			if (parent.childNodes[index] !== node) {
 				parent.insertBefore(node, parent.childNodes[index] ?? null);
@@ -1815,11 +2066,20 @@ export class Transcript {
 	 * hidden (card collapsed) when its text arrived still pins once it is opened.
 	 */
 	private trackTailFollow(pane: HTMLElement): void {
+		this.paneScrollTops.set(pane, pane.scrollTop);
 		pane.addEventListener("wheel", (event) => {
-			if ((event as WheelEvent).deltaY < 0) pane.dataset.follow = "off";
+			const delta = (event as WheelEvent).deltaY;
+			if (delta < 0) pane.dataset.follow = "off";
+			else if (delta > 0 && pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 4) pane.dataset.follow = "on";
+			this.paneScrollTops.set(pane, pane.scrollTop);
 		}, { passive: true });
 		pane.addEventListener("scroll", () => {
-			pane.dataset.follow = pane.scrollHeight - pane.scrollTop - pane.clientHeight <= 4 ? "on" : "off";
+			const top = pane.scrollTop;
+			const atBottom = pane.scrollHeight - top - pane.clientHeight <= 4;
+			const previous = this.paneScrollTops.get(pane) ?? top;
+			if (!atBottom) pane.dataset.follow = "off";
+			else if (pane.dataset.follow !== "off" || top > previous + 1) pane.dataset.follow = "on";
+			this.paneScrollTops.set(pane, top);
 		}, { passive: true });
 	}
 
@@ -1904,7 +2164,7 @@ export class Transcript {
 		// no new text came with it: the frames before it were summarised from
 		// complete lines only.
 		if (settled) this.paintSummary(block, this.toolSummary(name, args), true);
-		if (view.input.length <= block.renderedInputLen) return;
+		if (view.input === block.inputText || (!settled && view.input.length <= block.renderedInputLen)) return;
 		block.renderedInputLen = view.input.length;
 		if (!settled) {
 			const calm = this.streamingSummary(name, args);
@@ -1931,6 +2191,7 @@ export class Transcript {
 			this.fillInputPre(pre, view);
 			block.inputText = view.input;
 			pre.scrollTop = follow ? pre.scrollHeight : top;
+			this.paneScrollTops.set(pre, pre.scrollTop);
 			return;
 		}
 		this.preservingScroll(block.inputSection, "tool", () => {
@@ -2115,6 +2376,7 @@ export class Transcript {
 		section.appendChild(el("div", "tool-section-label", label));
 		const pre = el("pre");
 		if (block.root.dataset.toolKind === "shell") pre.className = "term";
+		this.trackTailFollow(pre);
 		section.appendChild(pre);
 		block.body.appendChild(section);
 		block.resultSection = section;
@@ -2135,12 +2397,13 @@ export class Transcript {
 		});
 	}
 
-	private attachToolResultText(id: string, text: string, isError: boolean): void {
+	private attachToolResultText(id: string, text: string, isError: boolean, newerSnapshot = false): void {
 		const block = this.toolBlocks.get(id);
 		if (!block) return;
 		const section = this.ensureResultSection(block, isError ? "error" : "output", isError);
 		const pre = section.querySelector("pre");
-		if (pre) this.setPaneText(pre as HTMLElement, text || (isError ? "(error)" : ""));
+		const olderSnapshot = this.snapshotTarget && !newerSnapshot && block.state !== "running" && pre && text.length < (pre.textContent?.length ?? 0);
+		if (pre && !olderSnapshot) this.setPaneText(pre as HTMLElement, text || (isError ? "(error)" : ""));
 		this.setToolState(id, isError ? "error" : "done");
 	}
 
@@ -2156,18 +2419,23 @@ export class Transcript {
 	}
 
 	private renderToolResult(message: ToolResultMessage): void {
+		const timestamp = this.messageTimestamp(message);
+		const previousTimestamp = this.toolResultTimestamps.get(message.toolCallId);
+		const newer = timestamp != null && previousTimestamp != null && timestamp > previousTimestamp;
+		if (timestamp != null && (previousTimestamp == null || timestamp > previousTimestamp)) this.toolResultTimestamps.set(message.toolCallId, timestamp);
 		const text = (message.content ?? [])
 			.filter((p) => p.type === "text")
 			.map((p) => (p as { text: string }).text)
 			.join("\n");
 		const block = this.toolBlocks.get(message.toolCallId);
 		if (block) {
-			this.attachToolResultText(message.toolCallId, text, message.isError ?? false);
+			if (this.snapshotTarget && !this.snapshotTarget.some((row) => row.contains(block.root))) this.place(block.root);
+			this.attachToolResultText(message.toolCallId, text, message.isError ?? false, newer);
 			return;
 		}
 		const orphan = this.ensureToolBlock(message.toolCallId, message.toolName ?? "tool", {});
 		this.place(orphan.root);
-		this.attachToolResultText(message.toolCallId, text, message.isError ?? false);
+		this.attachToolResultText(message.toolCallId, text, message.isError ?? false, newer);
 	}
 
 	// ---------------------------------------------------------------
@@ -2243,6 +2511,7 @@ export class Transcript {
 
 	/** Unconditional snap — own sends or explicit user jumps. */
 	forceScrollToBottom(): void {
+		this.snapshotScrollRemainder = 0;
 		this.stickToBottom = true;
 		this.scroller.scrollTop = this.scroller.scrollHeight;
 		this.lastScrollTop = this.scroller.scrollTop;
