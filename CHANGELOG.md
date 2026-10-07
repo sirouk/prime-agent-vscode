@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.50]
+
 - **Keep floating-control checks portable across platforms.** The UI is unchanged from v1.0.49. Tests now distinguish extension-side input handling from the browser's native scroll or zoom behavior, while still checking that pinch, modified-wheel and horizontal gestures are not consumed or mistaken for reading direction.
 
 ## [1.0.49]
@@ -394,7 +396,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.49...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.50...HEAD
+[1.0.50]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.49...v1.0.50
 [1.0.49]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.48...v1.0.49
 [1.0.48]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.47...v1.0.48
 [1.0.47]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.46...v1.0.47
