@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.52]
+
 - **Show subagents in a compact, responsive grid.** Wide panels use two columns; narrow sidebars keep one. Names, identity colors and status labels share each clickable row. Parent, Siblings and Historical keep full-width headings, and one bounded vertical scrollbar leaves room for the transcript.
 - **Keep the subagent roster steady while it updates.** Existing rows and controls stay mounted, so status changes and refreshed stream links preserve roster scroll and keyboard focus. Long names remain available through hover text and accessible labels; the repeated “view” suffix is removed.
 
@@ -405,7 +407,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.51...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.52...HEAD
+[1.0.52]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.51...v1.0.52
 [1.0.51]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.50...v1.0.51
 [1.0.50]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.49...v1.0.50
 [1.0.49]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.48...v1.0.49
