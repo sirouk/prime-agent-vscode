@@ -311,6 +311,7 @@ gate_tests() {
     run_gate "activity rail layout" "node test/activity-layout.test.mjs" || failures=$((failures+1))
     run_gate "floating activity controls" "node test/activity-floating-controls.test.mjs" || failures=$((failures+1))
     run_gate "subagent identity and navigation" "node test/subagent-correlation.test.mjs" || failures=$((failures+1))
+    run_gate "responsive subagent grid" "node test/subagent-grid.test.mjs" || failures=$((failures+1))
     run_gate "retained webview build revision" "node test/webview-revision.test.mjs" || failures=$((failures+1))
     run_gate "preview screenshot matrix" "node test/preview-shot.mjs" || failures=$((failures+1))
     if [ "$failures" != "0" ]; then

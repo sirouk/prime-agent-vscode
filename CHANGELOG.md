@@ -13,6 +13,9 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- **Show subagents in a compact, responsive grid.** Wide panels use two columns; narrow sidebars keep one. Names, identity colors and status labels share each clickable row. Parent, Siblings and Historical keep full-width headings, and one bounded vertical scrollbar leaves room for the transcript.
+- **Keep the subagent roster steady while it updates.** Existing rows and controls stay mounted, so status changes and refreshed stream links preserve roster scroll and keyboard focus. Long names remain available through hover text and accessible labels; the repeated “view” suffix is removed.
+
 ## [1.0.51]
 
 - **Open a spawned subagent from its whole transcript card.** Mouse and keyboard activation expand the matching subagent branch, including Historical when needed, then attach to the current host-approved stream. Mounted cards refresh their names and browse references from each roster; unavailable agents cannot reuse old links.

@@ -350,6 +350,105 @@ const subagentsStrip = el("div", "subagents-strip") as HTMLElement;
 let subagentsExpanded = false;
 let sessionChildren: SessionChild[] = [];
 
+interface SubagentRowEntry {
+	row: HTMLButtonElement;
+	identity: HTMLElement;
+	name: HTMLElement;
+	dot: HTMLElement;
+	badge: HTMLElement;
+	child: SessionChild;
+}
+
+const subagentRows = new Map<string, SubagentRowEntry>();
+const subagentLists = new Map<string, HTMLElement>();
+let subagentsHeader: HTMLButtonElement | null = null;
+let subagentsHeaderCaret: HTMLElement;
+let subagentsHeaderCount: HTMLElement;
+let subagentsBackRow: HTMLButtonElement | null = null;
+let subagentsBackName: HTMLElement;
+let subagentsBackIdentity: HTMLElement;
+let subagentsSiblingHeader: HTMLElement | null = null;
+let subagentsHistoricalHeader: HTMLButtonElement | null = null;
+let subagentsHistoricalCaret: HTMLElement;
+let subagentsHistoricalCount: HTMLElement;
+
+/** Keep unchanged nodes mounted, so a roster refresh cannot steal keyboard focus. */
+function reconcileSubagentNodes(parent: HTMLElement, desired: readonly HTMLElement[]): void {
+	const keep = new Set(desired);
+	for (const node of Array.from(parent.children)) if (!keep.has(node as HTMLElement)) node.remove();
+	let cursor = parent.firstElementChild;
+	for (const node of desired) {
+		if (node === cursor) cursor = cursor.nextElementSibling;
+		else parent.insertBefore(node, cursor);
+	}
+}
+
+function subagentList(group: string, children: readonly SessionChild[], isSibling = false): HTMLElement {
+	let list = subagentLists.get(group);
+	if (!list) {
+		list = el("div", `subagents-list${group === "children" ? "" : ` ${group}`}`);
+		subagentLists.set(group, list);
+	}
+	reconcileSubagentNodes(list, children.map((child) => renderSubagentRow(child, isSibling)));
+	return list;
+}
+
+function renderSubagentRow(child: SessionChild, isSibling: boolean): HTMLElement {
+	const key = agentIdentityKey(child);
+	let entry = subagentRows.get(key);
+	if (!entry) {
+		const row = el("button", "subagent-row") as HTMLButtonElement;
+		row.type = "button";
+		const identity = el("span", "subagent-identity");
+		identity.setAttribute("aria-hidden", "true");
+		const name = el("span", "subagent-name");
+		const dot = el("span", "subagent-dot");
+		dot.setAttribute("aria-hidden", "true");
+		const badge = el("span", "subagent-badge");
+		row.append(identity, name, dot, badge);
+		entry = { row, identity, name, dot, badge, child };
+		subagentRows.set(key, entry);
+		const current = entry;
+		row.addEventListener("click", (event) => {
+			event.stopPropagation();
+			const target = current.child;
+			if (!row.disabled && sessionViewedId !== target.activeSessionId && target.browseRef) browseSubagent(target.browseRef);
+		});
+	}
+	entry.child = child;
+	const { row, name, dot, badge } = entry;
+	const viewing = sessionViewedId === child.activeSessionId;
+	const status = childStatus(child);
+	row.classList.toggle("sibling", isSibling);
+	row.classList.toggle("viewing", viewing);
+	applyAgentIdentity(row, child);
+	dot.className = `subagent-dot ${status === "running" ? "active" : status === "idle" ? "idle" : "done"}`;
+	dot.title = child.statusLabel != null
+		? `${child.statusLabel} — flagged by the daemon: ${
+			child.statusLabel === "queued" ? "spawn accepted, worker not started yet"
+				: child.statusLabel === "recovering" ? "worker went quiet past the staleness threshold and is being recovered"
+					: child.statusLabel === "failed" ? "worker failed; waiting for a client with fresh runtime context"
+						: "an exceptional state this build does not know by name"}`
+		: status === "running" ? child.isStreaming ? "running (responding)" : "running (working)"
+			: status === "idle" ? "idle — resident, waiting for work" : "finished — no worker behind it";
+	const label = child.name?.trim() || child.id;
+	if (name.textContent !== label) name.textContent = label;
+	name.title = label;
+	const badgeText = child.statusLabel ?? (status === "inactive" ? "finished" : status);
+	badge.className = `subagent-badge${status !== "running" || child.statusLabel ? " idle" : ""}${child.statusLabel ? " labeled" : ""}`;
+	if (badge.textContent !== badgeText) badge.textContent = badgeText;
+	badge.title = dot.title;
+	row.disabled = !viewing && !child.browseRef;
+	const action = viewing ? "Currently viewing" : row.disabled ? "Unavailable" : "Open subagent stream";
+	const kind = child.runtimeKind === "subagent"
+		? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : child.runtimeKind ?? "session";
+	row.title = `${label} — ${badgeText} · ${action} · ${kind}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
+	row.setAttribute("aria-label", `${label}, ${badgeText}, ${action}`);
+	if (viewing) row.setAttribute("aria-current", "true");
+	else row.removeAttribute("aria-current");
+	return row;
+}
+
 /** Explicit navigation expands the matching branch, even after a manual fold. */
 function browseSubagent(browseRef: string): void {
 	const child = [...sessionChildren, ...sessionSiblings].find((candidate) => candidate.browseRef === browseRef);
@@ -460,161 +559,119 @@ function byNewest(a: SessionChild, b: SessionChild): number {
 }
 
 function renderSubagentsStrip(): void {
-	subagentsStrip.textContent = "";
+	const savedTop = subagentsStrip.scrollTop;
+	const focused = subagentsStrip.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+	const viewportTop = subagentsStrip.getBoundingClientRect().top;
+	const anchor = Array.from(subagentsStrip.querySelectorAll<HTMLElement>(".subagent-row")).find((row) =>
+		row.getBoundingClientRect().bottom > viewportTop);
+	const anchorOffset = anchor ? anchor.getBoundingClientRect().top - viewportTop : 0;
 	const parent = sessionParent;
 	const viewedId = sessionViewedId;
 	const siblings = sessionSiblings;
-	const viewed = sessionViewedAgent ?? [...sessionChildren, ...siblings].find((child) => child.activeSessionId === viewedId);
+	const all = [...sessionChildren, ...siblings];
+	const keys = new Set(all.map(agentIdentityKey));
+	for (const key of subagentRows.keys()) if (!keys.has(key)) subagentRows.delete(key);
+	const viewed = sessionViewedAgent ?? all.find((child) => child.activeSessionId === viewedId);
 	if (viewed?.runtimeKind && viewed.runtimeKind !== "root") applyAgentIdentity(sessionTitleWrap, viewed);
 	else clearAgentIdentity(sessionTitleWrap);
-	const nothingToShow = !parent && sessionChildren.length === 0 && siblings.length === 0;
-	if (nothingToShow) {
+	if (!parent && all.length === 0) {
+		reconcileSubagentNodes(subagentsStrip, []);
+		subagentLists.clear();
 		subagentsStrip.classList.remove("visible");
 		return;
 	}
 	subagentsStrip.classList.add("visible");
-
-	// Finished subagents keep their own collapsed group: they are real work the
-	// operator can go back and read, but counting them as live is the drift that
-	// made the strip disagree with what is actually running.
-	// Newest-first inside every group: a fan-out that prints twelve subagents
-	// buries the two that just spawned (the ones that are live right now and
-	// matter) under ten finished receipts, and the FINISHED group has exactly
-	// the same trap — the world's least important receipt on top, the newest
-	// answer at the bottom of a folded scroll.
 	const live = (child: SessionChild): boolean => childStatus(child) !== "inactive";
 	const liveChildren = sessionChildren.filter(live).sort(byNewest);
 	const liveSiblings = siblings.filter(live).sort(byNewest);
-	const historical = [...sessionChildren, ...siblings].filter((child) => !live(child)).sort(byNewest);
-	const liveCount = liveChildren.length + liveSiblings.length;
+	const historical = all.filter((child) => !live(child)).sort(byNewest);
+	const desired: HTMLElement[] = [];
 
-	// Back row (separate, never part of the toggle) — always reliable.
 	if (parent) {
-		const back = el("button", "subagents-back-row") as HTMLButtonElement;
-		if (parent.runtimeKind && parent.runtimeKind !== "root") {
-			applyAgentIdentity(back, parent);
-			const identity = el("span", "subagent-identity");
-			identity.setAttribute("aria-hidden", "true");
-			back.appendChild(identity);
+		if (!subagentsBackRow) {
+			subagentsBackRow = el("button", "subagents-back-row") as HTMLButtonElement;
+			subagentsBackIdentity = el("span", "subagent-identity");
+			subagentsBackIdentity.setAttribute("aria-hidden", "true");
+			subagentsBackName = el("span", "subagents-back-name");
+			subagentsBackRow.append(subagentsBackIdentity, el("span", "subagents-back", "‹ parent"), subagentsBackName);
+			subagentsBackRow.title = "Return to the parent agent";
+			subagentsBackRow.addEventListener("click", () => post({ type: "backToParent" }));
 		}
-		back.append(el("span", "subagents-back", "‹ parent"), el("span", "subagents-back-name", parent.name ?? parent.id));
-		back.title = "Return to the parent agent";
-		back.addEventListener("click", () => post({ type: "backToParent" }));
-		subagentsStrip.appendChild(back);
+		const accented = !!parent.runtimeKind && parent.runtimeKind !== "root";
+		if (accented) applyAgentIdentity(subagentsBackRow, parent);
+		else clearAgentIdentity(subagentsBackRow);
+		subagentsBackIdentity.hidden = !accented;
+		subagentsBackName.textContent = parent.name?.trim() || parent.id;
+		subagentsBackName.title = subagentsBackName.textContent;
+		subagentsBackRow.setAttribute("aria-label", `Return to parent ${subagentsBackName.textContent}`);
+		desired.push(subagentsBackRow);
 	}
 
-	// Collapsible header (always a toggle). It reports the SAME three states the
-	// rows below it use — the daemon's roster has exactly running, idle and
-	// inactive (classifySessionRosterStatus), so folding running and idle into one
-	// "live" number made the header disagree with the dots it was summarising.
-	// Zero buckets are dropped rather than printed, so a quiet strip stays quiet.
-	const header = el("button", "subagents-header") as HTMLButtonElement;
-	const tally = { running: 0, idle: 0, inactive: 0 };
-	for (const child of [...sessionChildren, ...siblings]) tally[childStatus(child)] += 1;
-	const countParts: string[] = [];
-	if (tally.running > 0) countParts.push(`${tally.running} running`);
-	if (tally.idle > 0) countParts.push(`${tally.idle} idle`);
-	if (tally.inactive > 0) countParts.push(`${tally.inactive} finished`);
-	const countLabel = countParts.join(" · ") || "0";
-	header.append(el("span", "subagents-caret", subagentsExpanded ? "▾" : "▸"), `Subagents (${countLabel})`);
-	header.title =
-		`${tally.running} running · ${tally.idle} idle · ${tally.inactive} finished — ` +
-		"click to expand, browse one to look inside";
-	header.addEventListener("click", () => {
-		subagentsExpanded = !subagentsExpanded;
-		// Collapsing by hand means "keep it shut"; opening by hand takes it back.
-		subagentsAutoExpandSuppressed = !subagentsExpanded;
-		renderSubagentsStrip();
-	});
-	subagentsStrip.appendChild(header);
-
-	if (!subagentsExpanded) return;
-
-	const buildRow = (child: SessionChild, isSibling: boolean): HTMLElement => {
-		const row = el("button", `subagent-row${isSibling ? " sibling" : ""}`) as HTMLButtonElement;
-		applyAgentIdentity(row, child);
-		const identity = el("span", "subagent-identity");
-		identity.setAttribute("aria-hidden", "true");
-		const viewing = viewedId === child.activeSessionId;
-		const status = childStatus(child);
-		// One vocabulary for the whole strip: the header counts "running · idle ·
-		// finished", so a row must not call the same state something else. The dot
-		// keeps its existing class names, which the stylesheet is written against.
-		const dotClass = status === "running" ? "active" : status === "idle" ? "idle" : "done";
-		const dot = el("span", `subagent-dot ${dotClass}`);
-		dot.title =
-			child.statusLabel != null
-				? `${child.statusLabel} — flagged by the daemon: ${
-						child.statusLabel === "queued"
-							? "spawn accepted, worker not started yet"
-							: child.statusLabel === "recovering"
-								? "worker went quiet past the staleness threshold and is being recovered"
-								: child.statusLabel === "failed"
-									? "worker failed; waiting for a client with fresh runtime context"
-									: "an exceptional state this build does not know by name"
-					}`
-				: status === "running"
-					? child.isStreaming
-						? "running (responding)"
-						: "running (working)"
-					: status === "idle"
-						? "idle — resident, waiting for work"
-						: "finished — no worker behind it";
-		const name = el("span", "subagent-name", child.name ?? child.id);
-		// An off-nominal daemon label (queued/recovering/failed) means exactly what
-		// it says and outranks the coarse running/idle/finished bucket. It is the
-		// same label the CLI's agents view prints, so the strip stops soft
-		// describing a stuck worker as merely "idle".
-		const badgeText = child.statusLabel ?? (status === "running" ? "running" : status === "idle" ? "idle" : "finished");
-		const badge =
-			status === "running" && !child.statusLabel
-				? el("span", "subagent-badge", badgeText)
-				: el("span", `subagent-badge idle${child.statusLabel ? " labeled" : ""}`, badgeText);
-		const suffix = el("span", "subagent-go", viewing ? "" : "view ›");
-		row.title = `${child.runtimeKind === "subagent" ? `subagent${child.rlmDepth ? ` · depth ${child.rlmDepth}` : ""}` : (child.runtimeKind ?? "session")}${child.attachedClients ? ` · ${child.attachedClients} attached client(s)` : ""}`;
-		if (viewing) {
-			row.classList.add("viewing");
-			row.title = "Currently viewing — this transcript shows this subagent";
-		}
-		row.append(identity, name, dot, badge, suffix);
-		row.disabled = !viewing && !child.browseRef;
-		row.addEventListener("click", (event) => {
-			event.stopPropagation();
-			if (!viewing && child.browseRef) browseSubagent(child.browseRef);
-		});
-		return row;
-	};
-
-	if (liveChildren.length > 0) {
-		const list = el("div", "subagents-list");
-		for (const child of liveChildren) list.appendChild(buildRow(child, false));
-		subagentsStrip.appendChild(list);
-	}
-	if (liveSiblings.length > 0) {
-		// The viewed subagent rides in this group too, so name it after the parent
-		// it hangs off rather than calling a session its own sibling.
-		const siblingHeader = el("div", "subagents-sibling-header", parent ? `Under ${parent.name ?? parent.id}` : "Siblings");
-		const list = el("div", "subagents-list siblings");
-		for (const sib of liveSiblings) list.appendChild(buildRow(sib, true));
-		subagentsStrip.append(siblingHeader, list);
-	}
-	if (historical.length > 0) {
-		const histHeader = el("button", "subagents-subhead") as HTMLButtonElement;
-		histHeader.append(
-			el("span", "subagents-caret", historicalExpanded ? "▾" : "▸"),
-			`Historical (${historical.length})`,
-		);
-		histHeader.title = "Subagents that already finished — open one to read what it did";
-		histHeader.addEventListener("click", (event) => {
-			event.stopPropagation();
-			historicalExpanded = !historicalExpanded;
+	if (!subagentsHeader) {
+		subagentsHeader = el("button", "subagents-header") as HTMLButtonElement;
+		subagentsHeaderCaret = el("span", "subagents-caret");
+		subagentsHeaderCount = el("span");
+		subagentsHeader.append(subagentsHeaderCaret, subagentsHeaderCount);
+		subagentsHeader.addEventListener("click", () => {
+			subagentsExpanded = !subagentsExpanded;
+			subagentsAutoExpandSuppressed = !subagentsExpanded;
 			renderSubagentsStrip();
 		});
-		subagentsStrip.appendChild(histHeader);
-		if (historicalExpanded) {
-			const list = el("div", "subagents-list historical");
-			for (const child of historical) list.appendChild(buildRow(child, false));
-			subagentsStrip.appendChild(list);
+	}
+	const tally = { running: 0, idle: 0, inactive: 0 };
+	for (const child of all) tally[childStatus(child)] += 1;
+	const parts: string[] = [];
+	if (tally.running) parts.push(`${tally.running} running`);
+	if (tally.idle) parts.push(`${tally.idle} idle`);
+	if (tally.inactive) parts.push(`${tally.inactive} finished`);
+	subagentsHeaderCaret.textContent = subagentsExpanded ? "▾" : "▸";
+	subagentsHeaderCount.textContent = `Subagents (${parts.join(" · ") || "0"})`;
+	subagentsHeader.title = `${tally.running} running · ${tally.idle} idle · ${tally.inactive} finished — click to expand, browse one to look inside`;
+	subagentsHeader.setAttribute("aria-expanded", String(subagentsExpanded));
+	desired.push(subagentsHeader);
+
+	if (subagentsExpanded) {
+		if (liveChildren.length > 0) desired.push(subagentList("children", liveChildren));
+		if (liveSiblings.length > 0) {
+			if (!subagentsSiblingHeader) subagentsSiblingHeader = el("div", "subagents-sibling-header");
+			subagentsSiblingHeader.textContent = parent ? `Under ${parent.name?.trim() || parent.id}` : "Siblings";
+			subagentsSiblingHeader.title = subagentsSiblingHeader.textContent;
+			desired.push(subagentsSiblingHeader, subagentList("siblings", liveSiblings, true));
+		}
+		if (historical.length > 0) {
+			if (!subagentsHistoricalHeader) {
+				subagentsHistoricalHeader = el("button", "subagents-subhead") as HTMLButtonElement;
+				subagentsHistoricalCaret = el("span", "subagents-caret");
+				subagentsHistoricalCount = el("span");
+				subagentsHistoricalHeader.append(subagentsHistoricalCaret, subagentsHistoricalCount);
+				subagentsHistoricalHeader.title = "Subagents that already finished — open one to read what it did";
+				subagentsHistoricalHeader.addEventListener("click", (event) => {
+					event.stopPropagation();
+					historicalExpanded = !historicalExpanded;
+					renderSubagentsStrip();
+				});
+			}
+			subagentsHistoricalCaret.textContent = historicalExpanded ? "▾" : "▸";
+			subagentsHistoricalCount.textContent = `Historical (${historical.length})`;
+			subagentsHistoricalHeader.setAttribute("aria-expanded", String(historicalExpanded));
+			desired.push(subagentsHistoricalHeader);
+			if (historicalExpanded) desired.push(subagentList("historical", historical));
+		}
+	}
+	reconcileSubagentNodes(subagentsStrip, desired);
+	// Keep the held roster row in place when a registration or status change
+	// inserts rows above it. This never scrolls the transcript or resumes follow.
+	const anchorVisible = anchor?.isConnected && anchor.getClientRects().length > 0;
+	subagentsStrip.scrollTop = anchorVisible
+		? subagentsStrip.scrollTop + anchor!.getBoundingClientRect().top - subagentsStrip.getBoundingClientRect().top - anchorOffset
+		: savedTop;
+	if (focused && document.activeElement !== focused) {
+		if (focused.isConnected && focused.getClientRects().length > 0 && !(focused instanceof HTMLButtonElement && focused.disabled)) {
+			focused.focus({ preventScroll: true });
+		} else {
+			// An agent that finished may now be in the folded Historical group.
+			const fallback = historical.length && subagentsHistoricalHeader?.isConnected ? subagentsHistoricalHeader : subagentsHeader;
+			fallback.focus({ preventScroll: true });
 		}
 	}
 }

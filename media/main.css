@@ -2127,11 +2127,32 @@ body.vscode-light pre.term {
 	border-bottom: 1px solid var(--pa-border-faint);
 	background: color-mix(in srgb, transparent 60%, var(--pa-raised) 40%);
 	max-height: 180px;
+	min-width: 0;
+	container: subagents / inline-size;
+	overflow-x: hidden;
 	overflow-y: auto;
 }
 
 .subagents-strip.visible {
 	display: flex;
+}
+
+.subagents-header,
+.subagents-back-row,
+.subagents-sibling-header,
+.subagents-subhead {
+	flex-shrink: 0;
+	min-width: 0;
+	width: 100%;
+}
+
+.subagents-strip::-webkit-scrollbar {
+	width: 8px;
+}
+
+.subagents-strip::-webkit-scrollbar-thumb {
+	background: var(--pa-border-strong);
+	border-radius: 4px;
 }
 
 .subagents-header {
@@ -2165,18 +2186,31 @@ body.vscode-light pre.term {
 }
 
 .subagents-list {
-	display: flex;
-	flex-direction: column;
-	padding: 0 4px 4px;
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 2px 12px;
+	padding: 0 8px 4px 4px;
+	flex: 0 0 auto;
+	min-width: 0;
+}
+
+/* Use the panel's width, not the editor window's. Two readable columns are
+   enough even in a wide editor panel; a sidebar remains a single-column list. */
+@container subagents (min-width: 560px) {
+	.subagents-list {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
 }
 
 .subagent-row {
 	display: flex;
 	align-items: center;
 	gap: 7px;
+	min-height: 24px;
 	padding: 3px 8px;
 	border-radius: 6px;
-	font-size: 10.5px;
+	font-size: calc(var(--vscode-font-size, 13px) * 0.846);
+	line-height: 1.45;
 	text-align: left;
 }
 
@@ -2205,20 +2239,12 @@ body.vscode-light pre.term {
 }
 
 .subagent-badge {
-	font-size: 8.5px;
-	color: var(--pa-accent);
+	font-size: calc(var(--vscode-font-size, 13px) * 0.692);
+	white-space: nowrap;
+	color: var(--pa-text);
 	border: 1px solid var(--pa-accent-dim);
 	border-radius: 7px;
 	padding: 0 5px;
-}
-
-.subagent-go {
-	font-size: 9px;
-	color: var(--pa-faint);
-}
-
-.subagent-row:hover .subagent-go {
-	color: var(--pa-accent);
 }
 
 /* ---------- tool pills + distinct shell/iPython cards ---------- */
@@ -2467,13 +2493,8 @@ body.vscode-light pre.term {
 }
 
 .subagent-badge.idle {
-	color: var(--pa-faint);
+	color: var(--pa-text);
 	border-color: transparent;
-	font-size: 8.5px;
-}
-
-.subagent-badge {
-	font-size: 8.5px;
 }
 
 .subagents-sibling-header {
@@ -2482,6 +2503,9 @@ body.vscode-light pre.term {
 	letter-spacing: 0.07em;
 	color: var(--pa-faint);
 	padding: 2px 12px 2px 16px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 .subagents-list.siblings .subagent-name {
@@ -2882,8 +2906,7 @@ body.vscode-high-contrast-light .agent-identity {
 	min-width: 0;
 }
 
-.subagent-row .subagent-badge,
-.subagent-row .subagent-go {
+.subagent-row .subagent-badge {
 	flex-shrink: 0;
 }
 
