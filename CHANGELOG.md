@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.54]
+
 - **Compact elapsed-time indicator in the bottom status strip.** The animated butterfly and seconds now sit beside tokens and the agent state, without the “Working” word or pill chrome. The timer stays continuous through text, tool and snapshot updates and does not move the composer when it starts, ticks or stops. New messages remains the floating, keyboard-accessible return control while reading older content. Narrow strips keep tokens, copy and elapsed time visible; long state text ellipsizes with a full tooltip. Reduced-motion disables the status butterfly and busy-dot pulse.
 
 ## [1.0.53]
@@ -414,7 +416,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.53...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.54...HEAD
+[1.0.54]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.53...v1.0.54
 [1.0.53]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.52...v1.0.53
 [1.0.52]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.51...v1.0.52
 [1.0.51]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.50...v1.0.51
