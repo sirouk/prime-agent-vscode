@@ -156,6 +156,7 @@ async function seed(page, { theme = "vscode-dark", streaming = true, open = fals
    const rect = fixture.rect;
    const scroller = document.querySelector(".messages"), chat = document.querySelector(".chat-view");
    const rail = document.querySelector(".chat-activity"), working = document.querySelector(".working-row"), jump = document.querySelector(".jump-to-latest");
+   const status = document.querySelector(".status-strip");
    const railCSS = getComputedStyle(rail), jumpCSS = jump && getComputedStyle(jump), workCSS = working && getComputedStyle(working);
    const clip = (a, b) => {
     if (!a || !b) return null;
@@ -167,7 +168,7 @@ async function seed(page, { theme = "vscode-dark", streaming = true, open = fals
    const jumpVisible = !!jump && jump.classList.contains("visible") && jumpCSS.display !== "none";
    const workingVisible = !!working && workCSS.visibility === "visible";
    const paintJump = jumpVisible ? clip(rect(jump), visibleChat) : null;
-   const paintWorking = workingVisible ? clip(rect(working), visibleChat) : null;
+   const paintWorking = workingVisible ? clip(rect(working), clip(rect(status), viewport)) : null;
    const middle = box => box && ({ x: box.left + box.width / 2, y: box.top + box.height / 2 });
    const hit = point => {
     const node = point && document.elementFromPoint(point.x, point.y);
@@ -193,8 +194,8 @@ async function seed(page, { theme = "vscode-dark", streaming = true, open = fals
      focused: document.activeElement === jump, focusVisible: jump.matches(":focus-visible"), outlineStyle: jumpCSS.outlineStyle, outlineWidth: jumpCSS.outlineWidth,
      same: !fixture.jump || fixture.jump === jump } : null,
     count: document.querySelectorAll(".jump-to-latest").length,
-    shared: !!jump && jump.parentElement === rail && (!working || working.parentElement === rail),
-    workingFirst: !working || (working.parentElement === rail && rail.firstElementChild === working),
+    shared: !!jump && jump.parentElement === rail,
+    workingInStatus: !working || (status.contains(working) && !rail.contains(working)),
     paintJump, paintWorking, visibleChat, jumpHit: hit(middle(paintJump)), workingHit: hit(middle(paintWorking)),
     rawJumpHit: rawJump && rawJump.top >= 0 && rawJump.bottom <= innerHeight ? hit(middle(rawJump)) : null,
     rootOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -283,8 +284,8 @@ function overlap(a, b) {
 }
 function floating(g, label, { working = true, clipped = false } = {}) {
  assert.equal(g.count, 1, `${label}: exactly one persistent New messages button`);
- assert.equal(g.shared, true, `${label}: New messages and Working share .chat-activity`);
- assert.equal(g.workingFirst, true, `${label}: Working stays left, including idle-before-start order`);
+ assert.equal(g.shared, true, `${label}: New messages stays in .chat-activity`);
+ assert.equal(g.workingInStatus, true, `${label}: elapsed timer stays in bottom status, not floating chat`);
  assert.equal(g.rail.position, "absolute", `${label}: activity floats without an extra layout row`);
  assert.equal(g.rail.pointerEvents, "none", `${label}: rail does not intercept transcript clicks`);
  assert.equal(g.jump.position, "static", `${label}: jump flows within the shared floating row`);
@@ -298,22 +299,22 @@ function floating(g, label, { working = true, clipped = false } = {}) {
  assert.equal(g.chat.overflowY, "hidden", `${label}: clipped vertical activity paint`);
  if (working) {
   assert.ok(g.working, `${label}: Working exists`);
-  assert.equal(g.working.position, "static", `${label}: Working flows in the same rail`);
+  assert.equal(g.working.position, "static", `${label}: timer flows in the status strip`);
   assert.equal(g.working.pointerEvents, "none", `${label}: Working allows inspection underneath`);
   assert.equal(g.working.same, true, `${label}: preserve the exact Working node`);
-  assert.ok(Math.abs((g.working.top + g.working.bottom) / 2 - (g.jump.top + g.jump.bottom) / 2) <= 1, `${label}: same Working/jump centerline`);
-  assert.ok(g.working.right + 1 <= g.jump.left, `${label}: labels do not collide`);
+  fits(g.working, g.status, `${label}: full compact timer fits status`);
+  assert.equal(overlap(g.working, g.jump), 0, `${label}: timer and jump cannot collide`);
   assert.equal(g.working.whiteSpace, "nowrap", `${label}: Working never wraps`);
  }
  assert.equal(g.jump.whiteSpace, "nowrap", `${label}: New messages never wraps`);
- for (const paint of [g.paintJump, g.paintWorking]) {
+ for (const paint of [g.paintJump]) {
   fits(paint, g.chat, `${label}: painted controls stay inside chat`);
   assert.equal(overlap(paint, g.composer), 0, `${label}: paint does not cover composer`);
   assert.equal(overlap(paint, g.roster), 0, `${label}: paint does not cover roster`);
  }
  if (!clipped) {
   fits(g.jump, g.chat, `${label}: full jump fits available chat`);
-  if (working) fits(g.working, g.chat, `${label}: full Working fits available chat`);
+  if (working) fits(g.working, g.status, `${label}: full timer fits status`);
   assert.ok(overlap(g.rail, g.messages) > 0, `${label}: rail floats inside the transcript viewport`);
   assert.equal(g.messages.clientHeight, g.chat.clientHeight, `${label}: no 30px activity row consumes viewport`);
   assert.ok(Math.abs(g.messages.bottom - g.chat.bottom) <= 1, `${label}: transcript viewport reaches chat bottom`);
@@ -441,10 +442,10 @@ try {
   await page.evaluate(() => { const f = window.__floating; f.jump = document.querySelector(".jump-to-latest"); f.working = document.querySelector(".working-row"); });
   await faded(page);
   g = await geometry(page); await withoutRail(page, g, "active detached overlay");
-  // Only the jump is allowed to take clicks. Working and empty rail space
-  // must leave the underlying transcript/tool available for inspection.
-  const point = g.workingHit?.point;
-  assert.ok(point, "Working has a real in-chat paint sample");
+  // Only the jump is allowed to take clicks. Empty floating rail space must
+  // still leave the underlying transcript/tool available for inspection.
+  const point = { x: g.rail.left + 4, y: Math.max(g.chat.top + 2, g.rail.top + 5) };
+  assert.ok(point.x < g.jump.left, "click-through probe is in empty floating space");
   await page.mouse.click(point.x, point.y);
   const click = await page.evaluate(() => window.__floating.clicks.at(-1));
   assert.equal(click.trusted, true, "click-through probe uses real Chromium pointer input");
@@ -691,7 +692,8 @@ try {
    g = await geometry(page); floating(g, "240px pane with large composer and roster", { clipped: true });
    assert.ok(g.chat.height < 36, "short fixture leaves too little chat height for full floating rail");
    assert.ok(!g.paintJump || g.paintJump.height < g.jump.height, "short chat clips jump rather than covering composer");
-   assert.ok(!g.paintWorking || g.paintWorking.height < g.working.height, "short chat clips Working rather than covering roster");
+   fits(g.working, g.status, "short chat leaves elapsed timer in the bottom status strip");
+   assert.equal(overlap(g.working, g.roster), 0, "bottom timer never covers compressed roster");
    if (g.rawJumpHit && !g.paintJump) assert.equal(g.rawJumpHit.inJump, false, "clipped raw jump bounds cannot intercept outside chat");
    await withoutRail(page, g, "tiny-pane clipping");
    await sample(page, "tiny-pane-clipped");

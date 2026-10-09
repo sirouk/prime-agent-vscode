@@ -462,7 +462,7 @@ textarea::-webkit-scrollbar {
 	background: color-mix(in srgb, transparent 82%, var(--pa-error) 18%);
 }
 
-/* ---------- working indicator ---------- */
+/* ---------- floating return control and compact status timer ---------- */
 
 .chat-activity {
 	position: absolute;
@@ -490,19 +490,24 @@ textarea::-webkit-scrollbar {
 	.chat-activity { transition: none; }
 }
 
+.status-working {
+	display: inline-flex;
+	flex: 0 0 auto;
+	width: calc(13px + 4px + 6ch);
+	min-height: 13px;
+	pointer-events: none;
+	font-variant-numeric: tabular-nums;
+}
+
 .working-row {
 	display: inline-flex;
 	flex: 0 0 auto;
 	pointer-events: none;
 	align-items: center;
-	gap: 7px;
-	padding: 4px 10px;
-	min-height: 22px;
-	border-radius: 12px;
-	border: 1px solid var(--pa-border);
-	background: var(--pa-surface);
+	gap: 4px;
+	min-height: 13px;
 	color: var(--pa-dim);
-	font-size: 11px;
+	font-size: inherit;
 	font-variant-numeric: tabular-nums;
 	visibility: hidden;
 }
@@ -512,7 +517,11 @@ textarea::-webkit-scrollbar {
 }
 
 .working-label {
-	min-width: 82px;
+	width: 6ch;
+	min-width: 6ch;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	text-align: left;
 	white-space: nowrap;
 }
 
@@ -521,8 +530,14 @@ textarea::-webkit-scrollbar {
 }
 
 .working-mark {
+	flex: 0 0 auto;
 	color: var(--pa-accent);
 	animation: pa-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.status-working .working-mark,
+	.status-strip > .conn-dot.busy { animation: none; }
 }
 
 @keyframes pa-pulse {
@@ -1383,11 +1398,26 @@ details.thinking .thinking-body {
 .status-strip {
 	display: flex;
 	align-items: center;
-	gap: 7px;
+	gap: clamp(3px, 1.5vw, 7px);
 	padding: 3px 11px 5px;
 	font-size: 10px;
 	color: var(--pa-dim);
 	flex-shrink: 0;
+	min-width: 0;
+	overflow: hidden;
+	container: agent-status / inline-size;
+}
+
+.status-strip > .spacer { min-width: 0; }
+.status-strip > .strip-icon { flex: 0 0 auto; }
+
+@container agent-status (max-width: 420px) {
+	.status-strip > .session-id { display: none; }
+}
+
+@container agent-status (max-width: 240px) {
+	.status-strip .stats-cost { display: none; }
+	.status-strip > .spacer { display: none; }
 }
 
 /* Connection state belongs in the bottom-right corner. Ordering it here rather
@@ -1416,6 +1446,9 @@ details.thinking .thinking-body {
 }
 
 .live-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
@@ -1430,6 +1463,7 @@ details.thinking .thinking-body {
 }
 
 .stats-label {
+	flex: 0 0 auto;
 	white-space: nowrap;
 }
 

@@ -312,6 +312,10 @@ const composerDeps = {
 };
 const composer = new Composer(composerDeps);
 
+// Reserve the compact timer's place before any run starts. Its lifecycle stays
+// with Transcript, but its paint belongs beside the bottom token/state labels.
+const statusWorking = el("span", "status-working");
+
 const transcript = new Transcript(scroller, changedFilesBar, {
 	onOpenLink: (href) => post({ type: "openExternal", url: href }),
 	onOpenFile: (path, startLine, endLine) => post({ type: "openFile", path, startLine, endLine }),
@@ -327,6 +331,7 @@ const transcript = new Transcript(scroller, changedFilesBar, {
 	},
 	onFocusComposer: () => composer.focus(),
 	onOptimisticConfirmed: (clientRequestId) => pendingPrompts.delete(clientRequestId),
+	workingHost: statusWorking,
 });
 
 const historyView = new HistoryView({
@@ -364,6 +369,9 @@ const connDot = el("span", "conn-dot");
 const liveLabel = el("span", "live-label", "connecting");
 const sessionIdLabel = el("span", "session-id", "");
 const statsLabel = el("span", "stats-label", "");
+const statsTokens = el("span", "stats-tokens");
+const statsCost = el("span", "stats-cost");
+statsLabel.append(statsTokens, statsCost);
 const convCopy = el("button", "strip-icon") as HTMLButtonElement;
 convCopy.title = "Copy the whole conversation (Markdown with summarized tool calls)";
 convCopy.appendChild(icon("copy", 11));
@@ -371,7 +379,7 @@ convCopy.addEventListener("click", (event) => {
 	event.stopPropagation();
 	post({ type: "copyConversation" });
 });
-statusStrip.append(connDot, liveLabel, sessionIdLabel, el("span", "spacer"), statsLabel, convCopy);
+statusStrip.append(connDot, liveLabel, sessionIdLabel, el("span", "spacer"), statsLabel, convCopy, statusWorking);
 
 // Background processes the agent started; mounted above the subagents strip.
 const processesPanel = new ProcessesPanel({
@@ -956,10 +964,9 @@ function applyStatus(incomingStatus: StatusSnapshot): void {
 	sessionIdLabel.textContent = status.sessionId ? `#${status.sessionId.slice(0, 8)}` : "";
 	sessionIdLabel.title = status.sessionFile ?? "";
 
-	const statsBits: string[] = [];
-	if (status.usageTotal != null) statsBits.push(`${formatNumber(status.usageTotal)} tok`);
-	if (status.costUsd != null && status.costUsd > 0) statsBits.push(`$${status.costUsd.toFixed(4)}`);
-	statsLabel.textContent = statsBits.join(" · ");
+	statsTokens.textContent = status.usageTotal != null ? `${formatNumber(status.usageTotal)} tok` : "";
+	statsCost.textContent = status.costUsd != null && status.costUsd > 0 ? `${statsTokens.textContent ? " · " : ""}$${status.costUsd.toFixed(4)}` : "";
+	statsLabel.title = statsTokens.textContent + statsCost.textContent;
 
 	composer.setModel(status.modelLabel, status.modelProvider, status.modelId);
 	composer.setThinking(status.thinkingLevel, status.availableThinkingLevels ?? null);
@@ -1011,6 +1018,7 @@ function renderLiveLabel(status: StatusSnapshot): void {
 		lanes.push(`${runningProcessCount} process${runningProcessCount === 1 ? "" : "es"} running`);
 	}
 	liveLabel.textContent = lanes.length > 0 ? `${text} · ${lanes.join(" · ")}` : text;
+	liveLabel.title = liveLabel.textContent;
 	liveLabel.className = `live-label${status.connected ? " on" : ""}`;
 	connDot.className = `conn-dot${status.connected ? (busy ? " busy" : " live") : ""}`;
 }
@@ -1240,7 +1248,10 @@ function dispatchHostMessage(message: HostToWebview): void {
 			} else if (!currentStatus) {
 				// An agent can set its title before the first state snapshot arrives.
 				// Paint that useful state now instead of silently dropping it.
-				if (message.statusText !== undefined) liveLabel.textContent = message.statusText;
+				if (message.statusText !== undefined) {
+					liveLabel.textContent = message.statusText;
+					liveLabel.title = message.statusText;
+				}
 				if (message.title !== undefined && !titleEditing) {
 					sessionTitle.textContent = message.title;
 					sessionTitleWrap.style.display = message.title ? "" : "none";

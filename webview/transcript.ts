@@ -107,6 +107,8 @@ export interface TranscriptDeps {
 	onShowHistory: () => void;
 	onFocusComposer: () => void;
 	onOptimisticConfirmed?: (clientRequestId: string) => void;
+	/** Fixed bottom-status slot. It never participates in transcript layout. */
+	workingHost: HTMLElement;
 }
 
 interface SpawnCardOptions {
@@ -651,7 +653,7 @@ export class Transcript {
 			this.jumpBtn.addEventListener("click", () => {
 				this.forceScrollToBottom();
 			});
-			// Share Working's floating strip, outside the scrolling content.
+			// Only the return control floats; elapsed time lives in the status strip.
 			// Showing the control must not resize the transcript.
 			this.activitySlot.appendChild(this.jumpBtn);
 		}
@@ -1379,11 +1381,14 @@ export class Transcript {
 
 	private startWorking(): void {
 		if (!this.workingRow) {
-			const row = el("div", "working-row");
-			row.append(butterfly(13, "working-mark"), el("span", "working-label", "Working · 0s"));
-			// A detached idle view can create the jump control before a run.
-			// Always keep Working first so the control stays on the right.
-			this.activitySlot.prepend(row);
+			const row = el("span", "working-row");
+			row.setAttribute("role", "timer");
+			row.setAttribute("aria-label", "Agent working elapsed time");
+			row.setAttribute("aria-live", "off");
+			const mark = butterfly(13, "working-mark");
+			mark.setAttribute("aria-hidden", "true");
+			row.append(mark, el("span", "working-label", "0s"));
+			this.deps.workingHost.appendChild(row);
 			this.workingRow = row;
 		}
 		this.workingRow.classList.add("active");
@@ -1391,16 +1396,18 @@ export class Transcript {
 		if (this.workingTimer !== undefined) return;
 		this.workingStartedAt = Date.now();
 		const label = this.workingRow.querySelector(".working-label");
-		if (label) label.textContent = "Working · 0s";
+		if (label) label.textContent = "0s";
+		this.workingRow.title = "Agent working · 0s";
 		this.workingTimer = window.setInterval(() => {
 			const seconds = Math.max(0, Math.round((Date.now() - this.workingStartedAt) / 1000));
-			const text = `Working · ${seconds}s`;
+			const text = `${seconds}s`;
 			if (label && label.textContent !== text) label.textContent = text;
+			if (this.workingRow) this.workingRow.title = `Agent working · ${text}`;
 		}, 1000);
 	}
 
 	private stopWorking(): void {
-		// During a run the pill remains in its reserved slot, including streaming
+		// During a run the timer remains in its reserved status slot, including
 		// text and tool transitions. Only the completed/aborted run retires it.
 		if (this.streaming) return;
 		window.clearInterval(this.workingTimer);

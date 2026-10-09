@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- **Compact elapsed-time indicator in the bottom status strip.** The animated butterfly and seconds now sit beside tokens and the agent state, without the “Working” word or pill chrome. The timer stays continuous through text, tool and snapshot updates and does not move the composer when it starts, ticks or stops. New messages remains the floating, keyboard-accessible return control while reading older content. Narrow strips keep tokens, copy and elapsed time visible; long state text ellipsizes with a full tooltip. Reduced-motion disables the status butterfly and busy-dot pulse.
+
 ## [1.0.53]
 
 - **Send large pasted text without losing the thread.** Pastes of 32,000 characters or more become visible local UTF-8 text-file attachments. Add short instructions beside them, wait for the chip to be ready, and send. Small acknowledged upload chunks avoid giant webview messages; up to four text files share an 8 MiB limit. The agent receives file references and can read them in sections, instead of forcing the whole body into one prompt.

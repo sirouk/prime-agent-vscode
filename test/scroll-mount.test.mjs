@@ -222,14 +222,14 @@ const seconds=text=>Number(text.match(/(\d+)s/)?.[1]??0);
 async function activity(page) {
  return page.evaluate(()=>{
   const row=document.querySelector(".working-row"),label=row?.querySelector(".working-label");
-  const activity=document.querySelector(".chat-activity"),messages=document.querySelector(".messages");
+  const activity=document.querySelector(".chat-activity"),messages=document.querySelector(".messages"),status=document.querySelector(".status-strip");
   const rect=e=>{const b=e?.getBoundingClientRect();return b?{top:b.top,bottom:b.bottom,height:b.height}:null;};
   const style=row?getComputedStyle(row):null;
   const visible=!!row&&style.display!=="none"&&style.visibility!=="hidden"&&Number(style.opacity)!==0&&row.getBoundingClientRect().height>0;
-  return {present:visible,mounted:!!row,label:label?.textContent,slot:rect(activity),row:rect(row),messages:rect(messages),
+  return {present:visible,mounted:!!row,label:label?.textContent,slot:rect(activity),row:rect(row),messages:rect(messages),status:rect(status),
    chat:rect(messages.parentElement),slotPosition:getComputedStyle(activity).position,pointerEvents:style?.pointerEvents,
    sibling:!!activity&&activity.parentElement===messages.parentElement,
-   contained:!!activity&&activity.contains(row),position:row?getComputedStyle(row).position:null,
+   contained:!!status&&status.contains(row),floating:!!activity&&activity.contains(row),position:row?getComputedStyle(row).position:null,
    same:row===window.__workingRef,sameLabel:label===window.__workingLabelRef,changes:window.__workingChanges??[]};
  });
 }
@@ -307,18 +307,19 @@ try {
   assert.equal(await page.locator('[data-part="tool-settled-tool"] .tool-result pre').textContent(),OUTPUT);
   assert.ok((await page.locator('[data-part="usage"]').textContent()).includes("150 tokens"));
  });
- await run("working indicator floats without resizing transcript or intercepting tools",async page=>{
+ await run("compact status timer leaves transcript geometry and tool input unchanged",async page=>{
   await seed(page);
   const got=await activity(page);
   assert.equal(got.present,true,"streaming snapshot shows Working");
   assert.equal(got.sibling,true,".chat-activity is a sibling of .messages");
-  assert.equal(got.contained,true,"working row belongs to the shared activity strip");
+  assert.equal(got.contained,true,"elapsed timer belongs to the bottom status strip");
+  assert.equal(got.floating,false,"only New messages floats over the transcript");
   assert.equal(got.slotPosition,"absolute","activity strip reserves no separate row");
   assert.ok(got.slot.height>0,"floating strip has usable bounds");
   assert.ok(Math.abs(got.messages.bottom-got.chat.bottom)<=1,"transcript reaches the chat bottom behind controls");
   assert.ok(Math.abs(got.messages.height-got.chat.height)<=1,"controls consume no transcript viewport height");
-  assert.ok(got.row.top>=got.slot.top-1&&got.row.bottom<=got.slot.bottom+1,"Working stays within floating strip");
-  assert.notEqual(got.position,"absolute","Working flows within the shared floating strip");
+  assert.ok(got.row.top>=got.status.top-1&&got.row.bottom<=got.status.bottom+1,"timer fits the bottom status strip");
+  assert.notEqual(got.position,"absolute","timer flows within its reserved status slot");
   assert.equal(got.pointerEvents,"none","Working cannot intercept underlying tool input");
   const hidden=await page.evaluate(()=>{
    const activity=document.querySelector(".chat-activity"),messages=document.querySelector(".messages");

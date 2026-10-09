@@ -102,8 +102,9 @@ async function geometry(page) {
   const css = working ? getComputedStyle(working) : null, chatCSS = getComputedStyle(chat);
   const clipsChat = chatCSS.overflowX === "hidden" && chatCSS.overflowY === "hidden";
   const messagePaint = clip(clipsChat ? clip(m, c) : m, viewport);
-  const workingPaint = css?.visibility === "visible" ? clip(clipsChat ? clip(w, c) : w, viewport) : null;
-  const labelPaint = css?.visibility === "visible" ? clip(clipsChat ? clip(l, c) : l, viewport) : null;
+  const status = document.querySelector(".status-strip"), statusRect = rect(status);
+  const workingPaint = css?.visibility === "visible" ? clip(clip(w, statusRect), viewport) : null;
+  const labelPaint = css?.visibility === "visible" ? clip(clip(l, statusRect), viewport) : null;
   const toolPaint = clip(clip(t, messagePaint), viewport);
   const hitInfo = point => {
    const hit = point ? document.elementFromPoint(point.x, point.y) : null;
@@ -116,7 +117,7 @@ async function geometry(page) {
   return { viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
    bodyFont: getComputedStyle(document.body).fontSize, messages: { ...m, clientHeight: messages.clientHeight },
    slot: rect(slot), chat: c, composer: cb, subagents: sa, topbar: rect(document.querySelector(".topbar")), status: rect(document.querySelector(".status-strip")), install: rect(document.querySelector(".install-banner")), working: w, label: l, tool: t, header: rect(header),
-   sibling: slot?.parentElement === messages.parentElement, contained: !!slot?.contains(working),
+   sibling: slot?.parentElement === messages.parentElement, contained: !!status?.contains(working), floatingWorking: !!slot?.contains(working),
    position: css?.position, slotPosition: getComputedStyle(slot).position, slotPointerEvents: getComputedStyle(slot).pointerEvents,
    workingPointerEvents: css?.pointerEvents, visibility: css?.visibility, border: css?.borderTopWidth, chatOverflowX: chatCSS.overflowX, chatOverflowY: chatCSS.overflowY,
    transcriptOverlap: intersection(w, m), visibleToolOverlap: intersection(w, clip(t, m)), labelHeaderOverlap: intersection(l, rect(header)),
@@ -131,28 +132,29 @@ function fits(inner, outer, label) {
 }
 function noOverlay(g, label) {
  assert.equal(g.sibling, true, `${label}: floating activity is a messages sibling`);
- assert.equal(g.contained, true, `${label}: Working belongs to the activity strip`);
+ assert.equal(g.contained, true, `${label}: elapsed timer belongs to the bottom status strip`);
+ assert.equal(g.floatingWorking, false, `${label}: no elapsed timer floats over the transcript`);
  assert.equal(g.slotPosition, "absolute", `${label}: activity reserves no separate row`);
  assert.equal(g.slotPointerEvents, "none", `${label}: strip background passes input through`);
  assert.equal(g.workingPointerEvents, "none", `${label}: Working cannot intercept tool interactions`);
- assert.equal(g.position, "static", `${label}: Working stays in its shared strip`);
+ assert.equal(g.position, "static", `${label}: timer flows in its reserved status slot`);
  assert.equal(g.visibility, "visible", `${label}: run activity has visible styling`);
  assert.equal(g.chatOverflowX, "hidden", `${label}: chat clips horizontal overflow`);
  assert.equal(g.chatOverflowY, "hidden", `${label}: chat clips vertical overflow`);
- assert.ok(g.working.top >= g.slot.top - 1 && g.working.bottom <= g.slot.bottom + 1, `${label}: Working fits in the strip`);
+ fits(g.working, g.status, `${label}: compact timer fits in the status strip`);
  assert.equal(g.paintedComposerOverlap, 0, `${label}: painted Working does not overlap composer`);
  assert.equal(g.paintedSubagentOverlap, 0, `${label}: painted Working does not overlap subagents`);
- fits(g.workingPaint, g.chat, `${label}: all painted Working pixels are inside chat`);
+ fits(g.workingPaint, g.status, `${label}: all painted timer pixels are inside status`);
+ assert.equal(g.paintedTranscriptOverlap, 0, `${label}: timer never paints over transcript`);
  fits(g.messagePaint, g.chat, `${label}: all painted transcript pixels are inside chat`);
  if (g.chat.height >= 54 - 0.01) {
   assert.equal(g.paintedToolOverlap, 0, `${label}: tail clearance keeps Working off the latest tool when space is available`);
   assert.ok(g.slot.top >= g.chat.top - 1 && g.slot.bottom <= g.chat.bottom + 1, `${label}: full activity fits in chat when space is available`);
   assert.ok(g.messages.bottom >= g.chat.bottom - 1, `${label}: transcript uses the space behind floating controls`);
-  assert.ok(g.working.bottom <= g.composer.top + 1, `${label}: full Working stays before composer`);
-  if (g.subagents.height > 0) assert.ok(g.working.bottom <= g.subagents.top + 1, `${label}: full Working stays before subagents`);
- } else {
-  assert.equal(g.clippedWorking, true, `${label}: undersized chat clips overflowing activity`);
  }
+ // A short or zero-height chat clips only New messages; the timer stays in the
+ // same bottom status strip instead of leaking through the composer stack.
+ assert.equal(g.clippedWorking, false, `${label}: timer remains fully readable outside a compressed chat`);
  // Intentional floating paint is not an input obstruction: every visible
  // Working point must reach the transcript underneath, never the status pill.
  if (g.hit) assert.equal(g.hit.inWorking, false, `${label}: label point passes input through`);

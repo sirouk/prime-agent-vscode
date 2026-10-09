@@ -310,6 +310,7 @@ gate_tests() {
     run_gate "captured provider stream lifecycle" "node test/provider-stream-lifecycle.test.mjs" || failures=$((failures+1))
     run_gate "activity rail layout" "node test/activity-layout.test.mjs" || failures=$((failures+1))
     run_gate "floating activity controls" "node test/activity-floating-controls.test.mjs" || failures=$((failures+1))
+    run_gate "compact bottom status timer" "node test/working-status.test.mjs" || failures=$((failures+1))
     run_gate "subagent identity and navigation" "node test/subagent-correlation.test.mjs" || failures=$((failures+1))
     run_gate "responsive subagent grid" "node test/subagent-grid.test.mjs" || failures=$((failures+1))
     run_gate "large text host recovery" "node test/large-paste-host.test.mjs" || failures=$((failures+1))

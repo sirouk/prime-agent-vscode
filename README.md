@@ -106,6 +106,10 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
   panel says out loud.
 - **Steer while working**: send messages while the agent runs; the *steer/queue* pill in the
   composer rail chooses mid-turn steering or end-of-run delivery. Stop button aborts the run.
+- **Compact run timer**: an animated butterfly and elapsed seconds sit in the bottom status
+  strip beside tokens and the agent state. The count stays continuous across text and tool
+  updates. While reading older messages, **New messages** remains a floating return button.
+  The timer never floats over the transcript and stops animating with reduced-motion enabled.
 - **Editor context**: `+` attach menu — mention files and **folders** (`@` with indexed
   autocomplete; folders carry a trailing `/`), attach the active file or the current selection,
   or attach images on vision-capable models. Image paste and drag-drop work too, and are
