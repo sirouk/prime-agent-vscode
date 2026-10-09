@@ -32,6 +32,7 @@ import type {
 	SessionChild,
 	SessionProcess,
 	StatusSnapshot,
+	TextFileAttachment,
 } from "./protocol.js";
 import { DebugFileLog } from "./debug-log.js";
 import { buildMarkdownExport } from "./markdown-export.js";
@@ -41,6 +42,7 @@ import { ProcessTracker, tailFile } from "./process-tracker.js";
 import { ThreadDiffTracker } from "./thread-diffs.js";
 import { archiveSessionFile, deleteSession, isSessionActive, renameSessionOffline } from "./session-actions.js";
 import { RpcClient } from "./rpc-client.js";
+import { appendTextFileReferences, MAX_TEXT_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENTS, hasUnpairedSurrogate, TEXT_ATTACHMENT_CHUNK_CHARS, utf8ByteLength } from "./prompt-input.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -213,6 +215,14 @@ export class SessionController implements vscode.Disposable {
 	private browseRefByActiveId = new Map<string, string>();
 	/** Invalidates child capabilities only when the displayed session actually changes. */
 	private childrenContext = 0;
+	/** File authority belongs to one document and one exact view, never a display path. */
+	private textAttachments = new Map<string, { attachment: TextFileAttachment; source: object; sessionId: string; epoch: number }>();
+	private textAttachmentGenerations = new WeakMap<object, number>();
+	private textAttachmentDocumentScopes = new WeakMap<object, string>();
+	private textAttachmentWriteTail: Promise<void> = Promise.resolve();
+	private textAttachmentWrites = new Map<object, Map<number, { cancelled: boolean }>>();
+	private textAttachmentReservations = new Map<object, { count: number; bytes: number }>();
+	private textUploads = new Map<object, Map<number, { chunks: string[]; name: string; sessionId: string; epoch: number; totalChunks: number; bytes: number; timer: ReturnType<typeof setTimeout> }>>();
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -563,6 +573,8 @@ export class SessionController implements vscode.Disposable {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		for (const [source, uploads] of this.textUploads) for (const requestId of uploads.keys()) this.cancelTextAttachment(requestId, source);
+		this.textAttachments.clear();
 		this.stop();
 		// Drop the attach intent before tearing the socket down, or the close
 		// handler restarts the re-attach backoff against a dead controller.
@@ -851,6 +863,7 @@ export class SessionController implements vscode.Disposable {
 	/** Claim a new displayed-session intent before any validation or startup await. */
 	private beginNavigation(): number {
 		const epoch = ++this.viewEpoch;
+		for (const [source, uploads] of this.textUploads) for (const requestId of uploads.keys()) this.cancelTextAttachment(requestId, source);
 		// A socket-drop reconnect belongs to the view that dropped. Once the user
 		// chooses another view, it must never resurrect the old one underneath it.
 		this.attachAttempt = null;
@@ -993,9 +1006,173 @@ export class SessionController implements vscode.Disposable {
 		reply({ type: "promptRejected", error, clientRequestId: payload.clientRequestId });
 	}
 
-	async prompt(payload: PromptPayload, reply: (message: HostToWebview) => void = (message) => this.broadcast(message)): Promise<void> {
+	/** A new webview document cannot inherit capabilities from its predecessor. */
+	resetTextAttachments(source: object, clientScope?: string): void {
+		if (clientScope && this.textAttachmentDocumentScopes.get(source) === clientScope) return;
+		if (clientScope) this.textAttachmentDocumentScopes.set(source, clientScope);
+		for (const requestId of this.textUploads.get(source)?.keys() ?? []) this.cancelTextAttachment(requestId, source);
+		for (const write of this.textAttachmentWrites.get(source)?.values() ?? []) write.cancelled = true;
+		this.textAttachmentGenerations.set(source, (this.textAttachmentGenerations.get(source) ?? 0) + 1);
+		for (const [ref, entry] of this.textAttachments) if (entry.source === source) this.textAttachments.delete(ref);
+	}
+
+	releaseTextAttachment(ref: string, reply: (message: HostToWebview) => void, source: object = reply): void {
+		if (this.textAttachments.get(ref)?.source === source) this.textAttachments.delete(ref);
+		// Files are retained: a delivered transcript may still refer to one.
+	}
+
+	async openTextAttachment(ref: string, reply: (message: HostToWebview) => void, source: object = reply): Promise<void> {
+		const entry = this.textAttachments.get(ref);
+		if (!entry || entry.source !== source || entry.sessionId !== this.sessionKey() || this.readOnlyReason("opening a text attachment") || this.isReattaching()) return;
+		entry.epoch = this.viewEpoch;
+		await this.showUri(vscode.Uri.file(entry.attachment.path));
+	}
+
+	cancelTextAttachment(requestId: number, source: object): void {
+		const write = this.textAttachmentWrites.get(source)?.get(requestId);
+		if (write) write.cancelled = true;
+		const uploads = this.textUploads.get(source);
+		const upload = uploads?.get(requestId);
+		if (!upload) return;
+		clearTimeout(upload.timer);
+		const reserved = this.textAttachmentReservations.get(source);
+		if (reserved) { reserved.count -= 1; reserved.bytes -= upload.bytes; if (!reserved.count) this.textAttachmentReservations.delete(source); }
+		uploads!.delete(requestId);
+		if (!uploads!.size) this.textUploads.delete(source);
+	}
+
+	async stageTextAttachmentChunk(text: string, name: string, requestId: number, sessionId: string, index: number, totalChunks: number, reply: (message: HostToWebview) => void, source: object = reply): Promise<void> {
+		const fail = (error: string): void => { this.cancelTextAttachment(requestId, source); reply({ type: "textAttachmentStaged", requestId, error }); };
+		if (this.disposed || name.length > 256 || !name.trim() || name.includes("\0") || this.isReattaching() || this.readOnlyReason("attaching pasted text") || sessionId !== this.sessionKey() || !sessionId || sessionId === "none") { fail("The session changed or is read-only. Nothing was sent."); return; }
+		if (!text || text.length > TEXT_ATTACHMENT_CHUNK_CHARS || hasUnpairedSurrogate(text) || !Number.isSafeInteger(index) || !Number.isSafeInteger(totalChunks) || totalChunks < 1 || totalChunks > 256 || index < 0 || index >= totalChunks) { fail("Invalid text upload chunk. Your text was not sent."); return; }
+		let uploads = this.textUploads.get(source);
+		let upload = uploads?.get(requestId);
+		const reserved = this.textAttachmentReservations.get(source) ?? { count: 0, bytes: 0 };
+		const held = [...this.textAttachments.values()].filter((entry) => entry.source === source && entry.sessionId === sessionId);
+		if (!upload) {
+			const globalReserved = [...this.textAttachmentReservations.values()].reduce((sum, item) => sum + item.count, 0);
+			if (globalReserved >= 16) { fail("Too many text uploads are preparing. Wait, then retry."); return; }
+			if (index !== 0 || held.length + reserved.count >= MAX_TEXT_ATTACHMENTS) { fail("Text uploads must start at chunk zero; maximum 4 text files."); return; }
+			uploads ??= new Map();
+			const timer = setTimeout(() => { fail("Text upload timed out. Your text is retained; retry the attachment."); }, 30_000);
+			timer.unref();
+			upload = { chunks: [], name, sessionId, epoch: this.viewEpoch, totalChunks, bytes: 0, timer };
+			uploads.set(requestId, upload);
+			this.textUploads.set(source, uploads);
+			reserved.count += 1;
+			this.textAttachmentReservations.set(source, reserved);
+		}
+		if (upload.epoch !== this.viewEpoch || upload.sessionId !== sessionId || upload.name !== name || upload.totalChunks !== totalChunks || upload.chunks.length !== index) { fail("The upload changed or arrived out of order. Nothing was sent."); return; }
+		const bytes = utf8ByteLength(text);
+		if ([...this.textAttachmentReservations.values()].reduce((sum, item) => sum + item.bytes, 0) + bytes > 32 * 1024 * 1024) { fail("Too much text is preparing across panels. Wait, then retry."); return; }
+		if (held.reduce((sum, entry) => sum + entry.attachment.byteLength, 0) + reserved.bytes + bytes > MAX_TEXT_ATTACHMENT_BYTES) { fail("Text files exceed the 8 MiB UTF-8 total. Your text was not sent."); return; }
+		upload.chunks.push(text);
+		upload.bytes += bytes;
+		reserved.bytes += bytes;
+		if (index + 1 < totalChunks) { reply({ type: "textAttachmentChunkAccepted", requestId, index }); return; }
+		const body = upload.chunks.join("");
+		this.cancelTextAttachment(requestId, source);
+		await this.stageTextAttachment(body, name, requestId, sessionId, reply, source);
+	}
+
+	async stageTextAttachment(text: string, name: string, requestId: number, sessionId: string, reply: (message: HostToWebview) => void, source: object = reply): Promise<void> {
+		const fail = (error: string): void => reply({ type: "textAttachmentStaged", requestId, error });
+		const readOnly = this.isReattaching() ? "The live session is reconnecting. Retry after it re-attaches." : this.readOnlyReason("attaching pasted text");
+		if (readOnly || sessionId !== this.sessionKey() || !sessionId || sessionId === "none") {
+			fail(readOnly ?? "The session changed. Paste this text again in the intended thread.");
+			return;
+		}
+		if (!text || text.length > MAX_TEXT_ATTACHMENT_BYTES || hasUnpairedSurrogate(text) || name.length > 256 || !name.trim() || name.includes("\0")) {
+			fail("Text attachment is invalid or exceeds the 8 MiB UTF-8 limit.");
+			return;
+		}
+		const bytes = utf8ByteLength(text, MAX_TEXT_ATTACHMENT_BYTES);
+		const globalReservations = [...this.textAttachmentReservations.values()];
+		if (globalReservations.reduce((sum, item) => sum + item.count, 0) >= 16 || globalReservations.reduce((sum, item) => sum + item.bytes, 0) + bytes > 32 * 1024 * 1024) { fail("Too much text is preparing across panels. Wait, then retry."); return; }
+		const reserved = this.textAttachmentReservations.get(source) ?? { count: 0, bytes: 0 };
+		const held = [...this.textAttachments.values()].filter((entry) => entry.source === source && entry.sessionId === sessionId);
+		if (bytes > MAX_TEXT_ATTACHMENT_BYTES || held.length + reserved.count >= MAX_TEXT_ATTACHMENTS || held.reduce((total, entry) => total + entry.attachment.byteLength, 0) + reserved.bytes + bytes > MAX_TEXT_ATTACHMENT_BYTES) {
+			fail("Maximum 4 text files and 8 MiB of UTF-8 text per message. Your text was not sent.");
+			return;
+		}
+		const writes = this.textAttachmentWrites.get(source) ?? new Map<number, { cancelled: boolean }>();
+		if (writes.has(requestId)) { fail("This text file is already preparing. Wait for its result."); return; }
+		const write = { cancelled: false };
+		writes.set(requestId, write);
+		this.textAttachmentWrites.set(source, writes);
+		const epoch = this.viewEpoch;
+		const generation = this.textAttachmentGenerations.get(source) ?? 0;
+		const attached = this.attached;
+		const current = (): boolean => !write.cancelled && !this.disposed && epoch === this.viewEpoch && attached === this.attached && sessionId === this.sessionKey() && generation === (this.textAttachmentGenerations.get(source) ?? 0) && !this.isReattaching() && !this.readOnlyReason("attaching pasted text");
+		reserved.count += 1;
+		reserved.bytes += bytes;
+		this.textAttachmentReservations.set(source, reserved);
+		const previousWrite = this.textAttachmentWriteTail;
+		let finishWrite!: () => void;
+		this.textAttachmentWriteTail = new Promise<void>((resolve) => { finishWrite = resolve; });
+		try {
+			await previousWrite;
+			if (!current()) { fail("The session or document changed while preparing the file. Nothing was sent."); return; }
+			const storage = this.context.globalStorageUri;
+			if (!storage || storage.scheme !== "file") throw new Error("Local extension storage is unavailable.");
+			const directory = path.join(storage.fsPath, "pasted-text");
+			await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+			if (!current()) { fail("The session or document changed while preparing the file. Nothing was sent."); return; }
+			const folder = await fs.lstat(directory);
+			if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error("Text attachment storage is not a private directory.");
+			if (process.platform !== "win32" && (folder.mode & 0o077) !== 0) await fs.chmod(directory, 0o700);
+			// Retain delivered files without allowing repeated uploads to fill the disk.
+			const names = await fs.readdir(directory);
+			if (names.length >= 512) throw new Error("Text attachment storage is full. Save this text to a workspace file instead.");
+			let storedBytes = 0;
+			for (const file of names) if (/^[a-f0-9-]{36}\.txt$/.test(file)) storedBytes += (await fs.lstat(path.join(directory, file))).size;
+			if (storedBytes + bytes > 256 * 1024 * 1024) throw new Error("Text attachment storage has reached 256 MiB. Save this text to a workspace file instead.");
+			if (!current()) { fail("The session or document changed while preparing the file. Nothing was sent."); return; }
+			const ref = randomUUID();
+			const filename = path.join(directory, `${randomUUID()}.txt`);
+			await fs.writeFile(filename, text, { encoding: "utf8", flag: "wx", mode: 0o600 });
+			if (!current()) { fail("The session or document changed while preparing the file. Nothing was sent."); return; }
+			const attachment: TextFileAttachment = { ref, name: name.trim(), byteLength: bytes, path: filename };
+			this.textAttachments.set(ref, { attachment, source, sessionId, epoch });
+			reply({ type: "textAttachmentStaged", requestId, attachment: { ...attachment } });
+		} catch (err) {
+			fail(`Could not prepare the text file: ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			finishWrite();
+			writes.delete(requestId);
+			if (!writes.size) this.textAttachmentWrites.delete(source);
+			reserved.count -= 1;
+			reserved.bytes -= bytes;
+			if (reserved.count === 0) this.textAttachmentReservations.delete(source);
+		}
+	}
+
+	private resolveTextAttachments(payload: PromptPayload, source: object): TextFileAttachment[] | null {
+		const refs = payload.textFiles ?? [];
+		if (refs.length > MAX_TEXT_ATTACHMENTS || new Set(refs).size !== refs.length) return null;
+		const files: TextFileAttachment[] = [];
+		for (const ref of refs) {
+			const entry = this.textAttachments.get(ref);
+			if (!entry || entry.source !== source || entry.sessionId !== payload.sessionId || entry.sessionId !== this.sessionKey()) return null;
+			entry.epoch = this.viewEpoch;
+			files.push(entry.attachment);
+		}
+		return files.reduce((total, file) => total + file.byteLength, 0) <= MAX_TEXT_ATTACHMENT_BYTES ? files : null;
+	}
+
+	private acceptPrompt(payload: PromptPayload, kind: "prompt" | "steer" | "followUp", reply: (message: HostToWebview) => void): void {
+		for (const ref of payload.textFiles ?? []) this.textAttachments.delete(ref);
+		// The file remains readable after the capability is consumed.
+		reply({ type: "promptAccepted", kind, ...(payload.clientRequestId ? { clientRequestId: payload.clientRequestId } : {}) });
+	}
+
+	async prompt(payload: PromptPayload, reply: (message: HostToWebview) => void = (message) => this.broadcast(message), source: object = reply): Promise<void> {
 		if (this.guardObservedReadOnly("sending a prompt")) {
 			this.rejectPrompt(payload, "The observed session is read-only in this window.", reply);
+			return;
+		}
+		if (!this.resolveTextAttachments(payload, source)) {
+			this.rejectPrompt(payload, "A text attachment is expired or belongs to a different document or session. Nothing was sent.", reply);
 			return;
 		}
 		const attached = this.attached;
@@ -1013,14 +1190,16 @@ export class SessionController implements vscode.Disposable {
 			try {
 				sidecar = await this.ensureSidecar();
 			} catch (err) {
-				if (this.isCurrentAttachment(attached)) this.rejectPrompt(payload, err instanceof Error ? err.message : "daemon prompt failed", reply);
+				this.rejectPrompt(payload, err instanceof Error ? err.message : "daemon prompt failed", reply);
 				return;
 			}
 			if (!this.isCurrentAttachment(attached)) {
 				this.rejectPrompt(payload, "The viewed session changed before the prompt could be sent.", reply);
 				return;
 			}
-			const text = this.composeMessageText(payload);
+			const textFiles = this.resolveTextAttachments(payload, source);
+			if (!textFiles) { this.rejectPrompt(payload, "A text attachment is expired or belongs to a different document or session. Nothing was sent.", reply); return; }
+			const text = this.composeMessageText(payload, textFiles);
 			const images = payload.images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 			// Attaching mid-turn never delivers agent_start, so `this.streaming`
 			// alone would silently downgrade a queued follow-up into a steer.
@@ -1028,10 +1207,10 @@ export class SessionController implements vscode.Disposable {
 			try {
 				await sidecar.prompt(attached.activeSessionId, text, behavior, images);
 				if (!this.isCurrentAttachment(attached)) return;
-				this.broadcast({ type: "promptAccepted", kind: "prompt" });
+				this.acceptPrompt(payload, "prompt", reply);
 				this.refreshModelsAfterCommand(payload);
 			} catch (err) {
-				if (this.isCurrentAttachment(attached)) this.rejectPrompt(payload, err instanceof Error ? err.message : "daemon prompt failed", reply);
+				this.rejectPrompt(payload, err instanceof Error ? err.message : "daemon prompt failed", reply);
 			}
 			return;
 		}
@@ -1054,7 +1233,7 @@ export class SessionController implements vscode.Disposable {
 			let liveId: string | undefined;
 			try {
 				const liveRes = await client.request({ type: "get_state" }, 30_000);
-				if (!this.isCurrentRpcView(client, epoch)) return;
+				if (!this.isCurrentRpcView(client, epoch)) { this.rejectPrompt(payload, "The viewed session changed before the prompt could be sent.", reply); return; }
 				if (liveRes.success) {
 					const live = liveRes.data as RpcSessionState;
 					this.state = live;
@@ -1063,16 +1242,23 @@ export class SessionController implements vscode.Disposable {
 			} catch {
 				// An unanswerable child fails the send below on its own terms.
 			}
+			if (payload.textFiles?.length && !liveId) {
+				this.rejectPrompt(payload, "Could not verify the live session for this text attachment. Nothing was sent; retry after the agent reconnects.", reply);
+				return;
+			}
 			if (liveId && liveId !== payload.sessionId) {
 				this.rejectPrompt(payload, "This was typed in a different session than this window now holds — nothing was sent. The view has been resynced; send it again to post it here.", reply);
 				void this.refreshSnapshot({});
 				return;
 			}
 		}
+		if (!this.isCurrentRpcView(client, epoch)) { this.rejectPrompt(payload, "The viewed session changed before the prompt could be sent.", reply); return; }
 		this.output.appendLine(`[prime-agent] prompt: session=${payload.sessionId ?? this.state?.sessionId ?? "?"} streaming=${this.streaming} behavior=${payload.streamingBehavior}`);
 		this.debugLog.append(`prompt entered: streaming=${this.streaming} behavior=${payload.streamingBehavior}`);
 
-		const text = this.composeMessageText(payload);
+		const textFiles = this.resolveTextAttachments(payload, source);
+		if (!textFiles) { this.rejectPrompt(payload, "A text attachment is expired or belongs to a different document or session. Nothing was sent.", reply); return; }
+		const text = this.composeMessageText(payload, textFiles);
 		const images = payload.images.map((img) => ({ type: "image", data: img.data, mimeType: img.mimeType }));
 
 		// Always name a behavior, as the terminal and our attached path do. The
@@ -1094,7 +1280,7 @@ export class SessionController implements vscode.Disposable {
 			this.debugLog.append(`prompt response: success=${response.success}`);
 			this.output.appendLine(`[prime-agent] prompt response: success=${response.success}`);
 			if (response.success) {
-				this.broadcast({ type: "promptAccepted", kind });
+				this.acceptPrompt(payload, kind, reply);
 				this.refreshModelsAfterCommand(payload);
 			} else {
 				this.rejectPrompt(payload, response.error ?? "prompt rejected", reply);
@@ -1120,7 +1306,7 @@ export class SessionController implements vscode.Disposable {
 		});
 	}
 
-	private composeMessageText(payload: PromptPayload): string {
+	private composeMessageText(payload: PromptPayload, textFiles: readonly TextFileAttachment[] = []): string {
 		let text = payload.text;
 		const includeSnippets = vscode.workspace.getConfiguration("primeAgent").get<boolean>("sendSelectionSnippet", true);
 		for (const sel of payload.selections) {
@@ -1130,7 +1316,7 @@ export class SessionController implements vscode.Disposable {
 				text += ` (${sel.path} lines ${sel.startLine}-${sel.endLine})`;
 			}
 		}
-		return text;
+		return appendTextFileReferences(text, textFiles);
 	}
 
 	async abort(): Promise<void> {

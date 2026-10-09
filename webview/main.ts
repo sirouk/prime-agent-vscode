@@ -16,8 +16,10 @@ import type {
 	SelectionAttachment,
 	SessionChild,
 	StatusSnapshot,
+	TextFileAttachment,
 	WebviewToHost,
 } from "../src/protocol.js";
+import { appendTextFileReferences, MAX_PROMPT_TEXT_CHARS, splitTextAttachment } from "../src/prompt-input.js";
 
 const vscode = acquireVsCodeApi();
 
@@ -195,7 +197,21 @@ const promptClientScope =
 		? crypto.randomUUID()
 		: `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let nextPromptClientRequestId = 0;
-const pendingPrompts = new Map<string, { text: string; images: ImageAttachment[]; selections: SelectionAttachment[] }>();
+const pendingPrompts = new Map<string, { text: string; images: ImageAttachment[]; selections: SelectionAttachment[]; textFiles: TextFileAttachment[] }>();
+const textFileRequestScope = Math.floor(Math.random() * 4_000_000_000);
+let nextTextFileRequestId = 0;
+const pendingTextFileRequests = new Map<number, { composerRequestId: number; sessionId: string; chunks: string[]; name: string; index: number; timer?: number }>();
+function sendTextFileChunk(requestId: number): void {
+	const pending = pendingTextFileRequests.get(requestId);
+	if (!pending) return;
+	window.clearTimeout(pending.timer);
+	pending.timer = window.setTimeout(() => {
+		pendingTextFileRequests.delete(requestId);
+		post({ type: "cancelTextAttachment", requestId });
+		if (pending.sessionId === authoritativeSessionId) composer.onTextAttachmentStaged(pending.composerRequestId, undefined, "Text upload timed out. Your text is retained; retry the attachment.");
+	}, 20_000);
+	post({ type: "stageTextAttachmentChunk", text: pending.chunks[pending.index], name: pending.name, requestId, sessionId: pending.sessionId, index: pending.index, totalChunks: pending.chunks.length });
+}
 // Native image pickers resolve later and the controller is shared by sidebar
 // and editor panels, so replies need a per-document correlation id.
 const imageRequestScope = Math.floor(Math.random() * 4_000_000_000);
@@ -209,18 +225,36 @@ let authoritativeSessionId: string | undefined;
 /** Status can announce navigation before its snapshot; track what the transcript actually rendered. */
 let renderedTranscriptSessionId: string | undefined;
 const composerDeps = {
-	onSend: (text: string, images: import("../src/protocol.js").ImageAttachment[], selections: import("../src/protocol.js").SelectionAttachment[]) => {
+	onSend: (text: string, images: ImageAttachment[], selections: SelectionAttachment[], textFiles: TextFileAttachment[]) => {
 		const clientRequestId = `${promptClientScope}-${++nextPromptClientRequestId}`;
-		pendingPrompts.set(clientRequestId, { text, images: [...images], selections: [...selections] });
-		transcript.showOptimisticUserMessage(clientRequestId, text, images);
+		pendingPrompts.set(clientRequestId, { text, images: [...images], selections: [...selections], textFiles: [...textFiles] });
+		// The host uses the same short data-only reference text. Optimistic echoes
+		// never mount megabytes of pasted material, including file-only prompts.
+		transcript.showOptimisticUserMessage(clientRequestId, text, images, textFiles.length ? appendTextFileReferences("", textFiles) : undefined);
 		post({
 			type: "prompt",
 			// Stamp the thread this was typed in. The host refuses the send if that
 			// is no longer the thread it would deliver to, so a view that moved
 			// under the operator cannot put their words in another conversation.
-			payload: { text, images, selections, streamingBehavior: composer.streamingBehavior, clientRequestId, sessionId: authoritativeSessionId },
+			payload: { text, images, selections, ...(textFiles.length ? { textFiles: textFiles.map((file) => file.ref) } : {}), streamingBehavior: composer.streamingBehavior, clientRequestId, sessionId: authoritativeSessionId },
 		});
 	},
+	onStageTextAttachment: (text: string, name: string, composerRequestId: number): boolean => {
+		if (!authoritativeSessionId) return false;
+		const requestId = textFileRequestScope * 1_000_000 + ++nextTextFileRequestId;
+		pendingTextFileRequests.set(requestId, { composerRequestId, sessionId: authoritativeSessionId, chunks: splitTextAttachment(text), name, index: 0 });
+		sendTextFileChunk(requestId);
+		return true;
+	},
+	onCancelTextAttachment: (composerRequestId: number) => {
+		for (const [requestId, pending] of pendingTextFileRequests) if (pending.composerRequestId === composerRequestId) {
+			window.clearTimeout(pending.timer);
+			pendingTextFileRequests.delete(requestId);
+			post({ type: "cancelTextAttachment", requestId });
+		}
+	},
+	onReleaseTextAttachment: (ref: string) => post({ type: "releaseTextAttachment", ref }),
+	onOpenTextAttachment: (ref: string) => post({ type: "openTextAttachment", ref }),
 	onStop: () => post({ type: "abort" }),
 	onSearchFiles: (query: string, requestId: number) => {
 		const hostRequestId = fileSearchRequestScope * 1_000_000 + ++nextFileSearchRequestId;
@@ -228,7 +262,9 @@ const composerDeps = {
 		post({ type: "searchFiles", query, requestId: hostRequestId });
 	},
 	onDraftChanged: (text: string) => {
-		if (authoritativeSessionId) post({ type: "draftChanged", text, sessionId: authoritativeSessionId });
+		// Large/unrepresentable drafts stay local or are staged; never trip the
+		// host parser while the user is still editing. No silent transport truncation.
+		if (authoritativeSessionId && text.length <= MAX_PROMPT_TEXT_CHARS && !text.includes("\0")) post({ type: "draftChanged", text, sessionId: authoritativeSessionId });
 	},
 	onSetCompactThreshold: (percent: number | null) => post({ type: "setCompactThreshold", percent }),
 	onPickImage: () => {
@@ -991,6 +1027,7 @@ function setObserving(value: boolean): void {
 
 function addNotice(level: "info" | "warning" | "error", text: string, action?: { id: string; label: string }): void {
 	const note = el("div", `notice ${level}`);
+	if (level === "error") note.setAttribute("role", "alert");
 	note.appendChild(el("span", "", text));
 	if (action) {
 		// The id is the host's own capability token; the webview only hands it back.
@@ -1230,7 +1267,23 @@ function dispatchHostMessage(message: HostToWebview): void {
 			composer.insertMention(message.path);
 			showView("chat");
 			break;
+		case "textAttachmentChunkAccepted": {
+			const pending = pendingTextFileRequests.get(message.requestId);
+			if (!pending || pending.sessionId !== authoritativeSessionId || pending.index !== message.index || pending.index + 1 >= pending.chunks.length) break;
+			pending.index += 1;
+			sendTextFileChunk(message.requestId);
+			break;
+		}
+		case "textAttachmentStaged": {
+			const pending = pendingTextFileRequests.get(message.requestId);
+			window.clearTimeout(pending?.timer);
+			pendingTextFileRequests.delete(message.requestId);
+			const used = !!pending && pending.sessionId === authoritativeSessionId && composer.onTextAttachmentStaged(pending.composerRequestId, message.attachment, message.error);
+			if (!used && message.attachment) post({ type: "releaseTextAttachment", ref: message.attachment.ref });
+			break;
+		}
 		case "promptAccepted":
+			if (message.clientRequestId) { pendingPrompts.delete(message.clientRequestId); break; }
 			// Prompts WITH an echo are released by onOptimisticConfirmed when the
 			// agent echoes them. One without an echo (selection-only) never gets
 			// that callback, so its retained payload — images included — would sit
@@ -1257,8 +1310,8 @@ function dispatchHostMessage(message: HostToWebview): void {
 			// A selection-only prompt draws no local echo, so `removed` is false for
 			// it — gating the restore on `removed` alone silently ate the operator's
 			// attachments when the host refused the send.
-			const hadEcho = Boolean(rejected && (rejected.text.length > 0 || rejected.images.length > 0));
-			if (rejected && (removed || !hadEcho)) composer.restoreRejectedPayload(rejected.text, rejected.images, rejected.selections);
+			const hadEcho = Boolean(rejected && (rejected.text.length > 0 || rejected.images.length > 0 || rejected.textFiles.length > 0));
+			if (rejected && (removed || !hadEcho)) composer.restoreRejectedPayload(rejected.text, rejected.images, rejected.selections, rejected.textFiles);
 			addNotice("error", `Prompt rejected: ${message.error}`);
 			break;
 	}
@@ -1307,7 +1360,7 @@ if (typeof PRIME_AGENT_BUILD_REV === "string") {
 }
 
 transcript.showWelcome();
-post({ type: "ready" });
+post({ type: "ready", clientScope: promptClientScope });
 
 // ---------------------------------------------------------------------------
 // Per-thread diff panel (appended wiring only)

@@ -10,6 +10,7 @@ declare const PRIME_AGENT_BUILD_REV: string | undefined;
 const WEBVIEW_REV = typeof PRIME_AGENT_BUILD_REV === "string" ? PRIME_AGENT_BUILD_REV : "dev";
 import type { HostToWebview, ImageAttachment, PromptPayload, SelectionAttachment, WebviewToHost } from "./protocol.js";
 import type { SessionController } from "./session-controller.js";
+import { MAX_PROMPT_TEXT_CHARS, MAX_TEXT_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENTS, hasUnpairedSurrogate, TEXT_ATTACHMENT_CHUNK_CHARS, utf8ByteLength } from "./prompt-input.js";
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = "primeAgent.chat";
@@ -52,6 +53,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 		view.onDidDispose(() => {
 			if (this.view !== view) return;
 			for (const d of this.receiveDisposables.splice(0)) d.dispose();
+			this.controller.resetTextAttachments?.(view.webview);
 			this.view = null;
 		}, null, this.viewDisposables);
 	}
@@ -59,6 +61,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 	private wire(): void {
 		const view = this.view;
 		if (!view) return;
+		if (this.textAttachmentRecipient && this.textAttachmentRecipient !== view.webview) this.controller.resetTextAttachments?.(this.textAttachmentRecipient);
+		this.textAttachmentRecipient = view.webview;
 		// Targeted responses (file searches, native pickers, optimistic verdicts)
 		// belong to the document that sent the request. Broadcasting is still
 		// dynamic, but a reply must not jump into a reloaded sidebar document.
@@ -85,7 +89,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 		for (const d of this.receiveDisposables.splice(0)) d.dispose();
 		recipient.onDidReceiveMessage(
 		(message: unknown) => {
-			dispatchMessage(message, this.controller, reply);
+			dispatchMessage(message, this.controller, reply, recipient);
 			},
 			undefined,
 			this.receiveDisposables,
@@ -95,6 +99,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
+	private textAttachmentRecipient: vscode.Webview | null = null;
 	private viewDisposables: vscode.Disposable[] = [];
 	private receiveDisposables: vscode.Disposable[] = [];
 
@@ -111,6 +116,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	dispose(): void {
+		if (this.view) this.controller.resetTextAttachments?.(this.view.webview);
 		for (const d of this.viewDisposables.splice(0)) d.dispose();
 		for (const d of this.receiveDisposables.splice(0)) d.dispose();
 		this.sinkAttachment?.dispose();
@@ -169,18 +175,18 @@ function wireWebview(webview: vscode.Webview, controller: SessionController): vs
 					// ignore
 				}
 			}
-			dispatchMessage(message, controller, sink.post);
+			dispatchMessage(message, controller, sink.post, webview);
 		},
 		undefined,
 		[],
 	);
 	return new vscode.Disposable(() => {
 		receiver.dispose();
+		controller.resetTextAttachments?.(webview);
 		attachment.dispose();
 	});
 }
 
-const MAX_PROMPT_TEXT_CHARS = 200_000;
 // Keep this transport envelope aligned with the image picker and composer.
 const MAX_PROMPT_IMAGES = 8;
 // Matches webview/image-fit.ts MAX_DECODED_IMAGE_BYTES: 7 MiB decodes to
@@ -280,11 +286,21 @@ function parsePromptPayload(value: unknown): PromptPayload | undefined {
 		});
 	}
 
-	if (value.text.length === 0 && images.length === 0 && selections.length === 0) return undefined;
+	const textFiles: string[] = [];
+	if (value.textFiles !== undefined) {
+		if (!Array.isArray(value.textFiles) || value.textFiles.length > MAX_TEXT_ATTACHMENTS) return undefined;
+		for (const ref of value.textFiles) {
+			if (!isIdentifier(ref) || textFiles.includes(ref)) return undefined;
+			textFiles.push(ref);
+		}
+	}
+	if (textFiles.length > 0 && !isIdentifier(value.sessionId)) return undefined;
+	if (value.text.length === 0 && images.length === 0 && selections.length === 0 && textFiles.length === 0) return undefined;
 	if (value.clientRequestId !== undefined && !isIdentifier(value.clientRequestId)) return undefined;
 	if (value.sessionId !== undefined && !isIdentifier(value.sessionId)) return undefined;
 	return {
 		text: value.text,
+		...(value.textFiles === undefined ? {} : { textFiles }),
 		images,
 		selections,
 		streamingBehavior: value.streamingBehavior,
@@ -303,6 +319,8 @@ export function parseWebviewMessage(value: unknown): WebviewToHost | undefined {
 
 	switch (value.type) {
 		case "ready":
+			if (value.clientScope !== undefined && !isIdentifier(value.clientScope)) return undefined;
+			return { type: "ready", ...(value.clientScope === undefined ? {} : { clientScope: value.clientScope }) };
 		case "abort":
 		case "newSession":
 		case "exportHtml":
@@ -396,6 +414,21 @@ export function parseWebviewMessage(value: unknown): WebviewToHost | undefined {
 		}
 		case "openDiff":
 			return isPath(value.path) ? { type: "openDiff", path: value.path } : undefined;
+		case "stageTextAttachment":
+			if (!isRequestId(value.requestId) || !isIdentifier(value.sessionId) || !isBoundedString(value.name, MAX_NAME_CHARS)) return undefined;
+			// NUL is valid file content. Bytes, not JS character count, bound this upload.
+			if (typeof value.text !== "string" || value.text.length === 0 || value.text.length > MAX_TEXT_ATTACHMENT_BYTES || utf8ByteLength(value.text, MAX_TEXT_ATTACHMENT_BYTES) > MAX_TEXT_ATTACHMENT_BYTES || hasUnpairedSurrogate(value.text)) return undefined;
+			return { type: "stageTextAttachment", text: value.text, name: value.name, requestId: value.requestId, sessionId: value.sessionId };
+		case "stageTextAttachmentChunk":
+			if (!isRequestId(value.requestId) || !isIdentifier(value.sessionId) || !isBoundedString(value.name, MAX_NAME_CHARS)) return undefined;
+			if (typeof value.text !== "string" || !value.text || value.text.length > TEXT_ATTACHMENT_CHUNK_CHARS || hasUnpairedSurrogate(value.text)) return undefined;
+			if (!isRequestId(value.index) || !isRequestId(value.totalChunks) || value.totalChunks < 1 || value.totalChunks > 256 || value.index >= value.totalChunks) return undefined;
+			return { type: "stageTextAttachmentChunk", text: value.text, name: value.name, requestId: value.requestId, sessionId: value.sessionId, index: value.index, totalChunks: value.totalChunks };
+		case "cancelTextAttachment":
+			return isRequestId(value.requestId) ? { type: "cancelTextAttachment", requestId: value.requestId } : undefined;
+		case "releaseTextAttachment":
+		case "openTextAttachment":
+			return isIdentifier(value.ref) ? { type: value.type, ref: value.ref } : undefined;
 		case "pickImage":
 			return isRequestId(value.requestId) ? { type: "pickImage", requestId: value.requestId } : undefined;
 		case "toggleFavoriteModel":
@@ -409,20 +442,32 @@ export function parseWebviewMessage(value: unknown): WebviewToHost | undefined {
 	}
 }
 
-function dispatchMessage(message: unknown, controller: SessionController, reply: (message: HostToWebview) => void): void {
+function dispatchMessage(message: unknown, controller: SessionController, reply: (message: HostToWebview) => void, source: object): void {
 	const parsed = parseWebviewMessage(message);
 	if (!parsed) {
-		controller.showErrorNotice("Ignored an invalid webview message.");
+		// Even an invalid prompt must settle its local echo. Trust only a bounded
+		// correlation id, never the rest of the rejected untrusted payload.
+		if (isRecord(message) && message.type === "prompt") {
+			const requestId = isRecord(message.payload) && isIdentifier(message.payload.clientRequestId) ? message.payload.clientRequestId : undefined;
+			const oversized = isRecord(message.payload) && typeof message.payload.text === "string" && message.payload.text.length > MAX_PROMPT_TEXT_CHARS;
+			reply({ type: "promptRejected", ...(requestId ? { clientRequestId: requestId } : {}), error: oversized ? "Text exceeds the 200,000-character inline limit. Attach it as a text file; nothing was sent." : "The prompt or its attachments are invalid. Nothing was sent." });
+		} else if (isRecord(message) && (message.type === "stageTextAttachment" || message.type === "stageTextAttachmentChunk") && isRequestId(message.requestId)) {
+			controller.cancelTextAttachment(message.requestId, source);
+			reply({ type: "textAttachmentStaged", requestId: message.requestId, error: "Text attachment is invalid or exceeds the 8 MiB UTF-8 limit or has an incomplete Unicode character. Your text was not sent." });
+		} else {
+			controller.showErrorNotice("Ignored an invalid webview message.");
+		}
 		return;
 	}
-	void handleMessage(parsed, controller, reply).catch((err) => {
+	void handleMessage(parsed, controller, reply, source).catch((err) => {
 		controller.showErrorNotice(`Operation failed: ${err instanceof Error ? err.message : String(err)}`);
 	});
 }
 
-async function handleMessage(message: WebviewToHost, controller: SessionController, reply: (message: HostToWebview) => void): Promise<void> {
+async function handleMessage(message: WebviewToHost, controller: SessionController, reply: (message: HostToWebview) => void, source: object): Promise<void> {
 	switch (message.type) {
 		case "ready":
+			controller.resetTextAttachments(source, message.clientScope);
 			await controller.ensureStarted();
 			await controller.refreshSnapshot();
 			await controller.listModels();
@@ -431,10 +476,25 @@ async function handleMessage(message: WebviewToHost, controller: SessionControll
 			return;
 		case "prompt":
 			try {
-				await controller.prompt(message.payload, reply);
+				await controller.prompt(message.payload, reply, source);
 			} catch (err) {
-				controller.showErrorNotice(`Prompt failed: ${err instanceof Error ? err.message : String(err)}`);
+				reply({ type: "promptRejected", clientRequestId: message.payload.clientRequestId, error: `Prompt failed: ${err instanceof Error ? err.message : String(err)}` });
 			}
+			return;
+		case "stageTextAttachment":
+			await controller.stageTextAttachment(message.text, message.name, message.requestId, message.sessionId, reply, source);
+			return;
+		case "stageTextAttachmentChunk":
+			await controller.stageTextAttachmentChunk(message.text, message.name, message.requestId, message.sessionId, message.index, message.totalChunks, reply, source);
+			return;
+		case "cancelTextAttachment":
+			controller.cancelTextAttachment(message.requestId, source);
+			return;
+		case "releaseTextAttachment":
+			controller.releaseTextAttachment(message.ref, reply, source);
+			return;
+		case "openTextAttachment":
+			await controller.openTextAttachment(message.ref, reply, source);
 			return;
 		case "abort":
 			await controller.abort();

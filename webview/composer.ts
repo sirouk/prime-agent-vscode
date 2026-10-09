@@ -6,7 +6,8 @@
 import { Dropdown, type DropdownItem } from "./dropdown.js";
 import { fitImageDataUrl, MAX_DECODED_IMAGE_BYTES, planImageFit } from "./image-fit.js";
 import { el, icon, iconButton, svgIcon } from "./dom.js";
-import type { ImageAttachment, ModelRef, RpcModel, RpcSlashCommand, SelectionAttachment } from "../src/protocol.js";
+import type { ImageAttachment, ModelRef, RpcModel, RpcSlashCommand, SelectionAttachment, TextFileAttachment } from "../src/protocol.js";
+import { formatTextFileSize, MAX_PROMPT_TEXT_CHARS, MAX_TEXT_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENTS, hasUnpairedSurrogate, shouldAttachPastedText, utf8ByteLength } from "../src/prompt-input.js";
 import { type NativeAction, resolveNativeAction, visibleNativeCommands } from "./native-commands.js";
 
 /** Keys that move the caret without producing an input event. */
@@ -33,7 +34,11 @@ function base64Bytes(value: string): number {
 }
 
 export interface ComposerDeps {
-	onSend: (text: string, images: ImageAttachment[], selections: SelectionAttachment[]) => void;
+	onSend: (text: string, images: ImageAttachment[], selections: SelectionAttachment[], textFiles: TextFileAttachment[]) => void;
+	onStageTextAttachment: (text: string, name: string, requestId: number) => boolean;
+	onReleaseTextAttachment: (ref: string) => void;
+	onCancelTextAttachment: (requestId: number) => void;
+	onOpenTextAttachment: (ref: string) => void;
 	onStop: () => void;
 	onSearchFiles: (query: string, requestId: number) => void;
 	onPickImage: () => void;
@@ -48,6 +53,16 @@ export interface ComposerDeps {
 	onSetCompactThreshold: (percent: number | null) => void;
 	/** Run a native slash command the panel performs itself instead of sending it as a prompt. */
 	onNativeCommand: (action: NativeAction, args: string) => void;
+}
+
+interface ComposerTextFile {
+	requestId: number;
+	name: string;
+	byteLength: number;
+	/** Retained only until the host has made a durable file, including errors. */
+	text?: string;
+	attachment?: TextFileAttachment;
+	error?: string;
 }
 
 export class Composer {
@@ -74,6 +89,9 @@ export class Composer {
 
 	private images: ImageAttachment[] = [];
 	private selections: SelectionAttachment[] = [];
+	private textFiles: ComposerTextFile[] = [];
+	private nextTextFileRequestId = 0;
+	private nextTextFileName = 0;
 	private commands: RpcSlashCommand[] = [];
 	private streaming = false;
 	/** Starts false: until a status says the agent answers, we cannot take a prompt. */
@@ -185,6 +203,11 @@ export class Composer {
 			// Real typing ends history browsing: from here the text is the
 			// operator's, so Up must go back to moving the caret.
 			this.historyIndex = null;
+			// Avoid mirroring megabytes into a second DOM text layer or emitting an
+			// invalid draft. Typed/programmatic oversized input uses the same file path.
+			if (this.textarea.value.length > MAX_PROMPT_TEXT_CHARS || this.textarea.value.includes("\0")) {
+				this.attachCurrentText();
+			}
 			this.autoGrow();
 			this.updateAutocomplete();
 			window.clearTimeout(this.draftDebounce);
@@ -332,6 +355,8 @@ export class Composer {
 	private showHint(text: string): void {
 		if (!this.hintEl) {
 			this.hintEl = el("div", "composer-hint");
+			this.hintEl.setAttribute("role", "status");
+			this.hintEl.setAttribute("aria-live", "polite");
 			this.root.appendChild(this.hintEl);
 		}
 		this.hintEl.textContent = text;
@@ -705,12 +730,13 @@ export class Composer {
 	}
 
 	/** Restore one rejected send without overwriting an intervening draft. */
-	restoreRejectedPayload(text: string, images: ImageAttachment[], selections: SelectionAttachment[]): boolean {
-		if (this.textarea.value.trim() || this.images.length > 0 || this.selections.length > 0) return false;
+	restoreRejectedPayload(text: string, images: ImageAttachment[], selections: SelectionAttachment[], textFiles: TextFileAttachment[] = []): boolean {
+		if (this.textarea.value.trim() || this.images.length > 0 || this.selections.length > 0 || this.textFiles.length > 0) return false;
 		this.historyIndex = null;
 		this.textarea.value = text;
 		this.images = [...images];
 		this.selections = [...selections];
+		this.textFiles = textFiles.map((attachment) => ({ requestId: ++this.nextTextFileRequestId, name: attachment.name, byteLength: attachment.byteLength, attachment: { ...attachment } }));
 		this.renderChips();
 		this.autoGrow();
 		this.deps.onDraftChanged(text);
@@ -761,6 +787,11 @@ export class Composer {
 		this.textarea.title = "";
 		this.images = [];
 		this.selections = [];
+		for (const file of this.textFiles) {
+			if (file.attachment) this.deps.onReleaseTextAttachment(file.attachment.ref);
+			else this.deps.onCancelTextAttachment(file.requestId);
+		}
+		this.textFiles = [];
 		this.accepted.clear();
 		// History belongs to the thread that just left; the incoming snapshot
 		// seeds the new one.
@@ -814,8 +845,16 @@ export class Composer {
 	send(): void {
 		// Keyboard paths (Enter) bypass the disabled button, so the gate lives here too.
 		if (!this.canSend()) return;
+		if (this.textarea.value.length > MAX_PROMPT_TEXT_CHARS || this.textarea.value.includes("\0")) {
+			this.attachCurrentText();
+			return; // Prepare first; a second explicit Enter sends the ready file.
+		}
+		if (this.textFiles.some((file) => !file.attachment)) {
+			this.showHint(this.textFiles.some((file) => file.error) ? "Retry or remove the failed text attachment before sending. Your text is still here." : "Preparing your text file. Wait for it to be ready, then send.");
+			return;
+		}
 		const text = this.textarea.value.trim();
-		if (!text && this.images.length === 0 && this.selections.length === 0) return;
+		if (!text && this.images.length === 0 && this.selections.length === 0 && this.textFiles.length === 0) return;
 		if (this.images.length > 0 && !this.vision) {
 			this.showHint("Dropped images: current model is text-only. Switch to a vision model or remove the chips.");
 			this.images = [];
@@ -823,11 +862,11 @@ export class Composer {
 		}
 		// A text-only model can strip the sole content of a message. Do not turn
 		// that into an empty RPC prompt after accurately warning the operator.
-		if (!text && this.images.length === 0 && this.selections.length === 0) {
+		if (!text && this.images.length === 0 && this.selections.length === 0 && this.textFiles.length === 0) {
 			this.closeAutocomplete();
 			return;
 		}
-		const native = this.images.length === 0 && this.selections.length === 0 ? resolveNativeAction(text, this.catalogNames()) : null;
+		const native = this.images.length === 0 && this.selections.length === 0 && this.textFiles.length === 0 ? resolveNativeAction(text, this.catalogNames()) : null;
 		if (native?.action === "name" && !native.args) {
 			// Keep the text: the operator is one word away from a valid command.
 			this.showHint("Usage: /name <session name>");
@@ -836,10 +875,11 @@ export class Composer {
 		}
 		this.rememberPrompt(text);
 		if (native) this.deps.onNativeCommand(native.action, native.args);
-		else this.deps.onSend(text, this.images, this.selections);
+		else this.deps.onSend(text, this.images, this.selections, this.textFiles.map((file) => file.attachment!));
 		this.textarea.value = "";
 		this.images = [];
 		this.selections = [];
+		this.textFiles = [];
 		this.renderChips();
 		this.autoGrow();
 		this.closeAutocomplete();
@@ -1161,6 +1201,10 @@ export class Composer {
 	private syncMirror(): void {
 		if (!this.mirror) return;
 		const text = this.textarea.value;
+		if (text.length > MAX_PROMPT_TEXT_CHARS) {
+			this.mirror.textContent = " ";
+			return;
+		}
 		// Both text and `data-path` below come from the editor / host file list.
 		// Quotes must be escaped too: this string is assigned to innerHTML, and an
 		// otherwise-valid filename can contain a quote that ends an attribute.
@@ -1200,13 +1244,50 @@ export class Composer {
 		const hasContent =
 			this.textarea.value.trim().length > 0 ||
 			this.images.length > 0 ||
-			this.selections.length > 0;
-		this.sendBtn.classList.toggle("muted", !hasContent || !this.canSend());
+			this.selections.length > 0 ||
+			this.textFiles.length > 0;
+		const preparing = this.textFiles.some((file) => !file.attachment);
+		this.sendBtn.disabled = !this.canSend() || preparing;
+		this.sendBtn.classList.toggle("muted", !hasContent || !this.canSend() || preparing);
 	}
 
 	private renderChips(): void {
 		this.updateSendState();
 		this.chipsEl.textContent = "";
+		for (const file of this.textFiles) {
+			const chip = el("div", `compose-chip text-file${file.error ? " failed" : file.attachment ? " ready" : " preparing"}`);
+			chip.dataset.requestId = String(file.requestId);
+			if (file.attachment) chip.dataset.ref = file.attachment.ref;
+			chip.title = file.error ?? `${file.name} — ${formatTextFileSize(file.byteLength)} — ${file.attachment ? "local text file, read as needed" : "preparing"}`;
+			const label = el("button", "chip-label text-file-open", file.name) as HTMLButtonElement;
+			label.type = "button";
+			label.disabled = !file.attachment;
+			label.setAttribute("aria-label", `Open ${file.name}, ${formatTextFileSize(file.byteLength)}`);
+			label.addEventListener("click", () => { if (file.attachment) this.deps.onOpenTextAttachment(file.attachment.ref); });
+			const status = el("span", "text-file-status", file.error ? "failed" : file.attachment ? formatTextFileSize(file.byteLength) : "preparing…");
+			status.setAttribute("role", "status");
+			chip.append(icon("file", 12), label, status);
+			if (file.error) {
+				const retry = el("button", "text-file-retry", "Retry") as HTMLButtonElement;
+				retry.type = "button";
+				retry.setAttribute("aria-label", `Retry ${file.name}`);
+				retry.addEventListener("click", () => this.stageTextFile(file));
+				chip.appendChild(retry);
+			}
+			const remove = el("button", "chip-remove") as HTMLButtonElement;
+			remove.type = "button";
+			remove.title = `Remove ${file.name}`;
+			remove.setAttribute("aria-label", `Remove ${file.name}`);
+			remove.appendChild(icon("close", 11));
+			remove.addEventListener("click", () => {
+				this.textFiles = this.textFiles.filter((candidate) => candidate !== file);
+				if (file.attachment) this.deps.onReleaseTextAttachment(file.attachment.ref);
+				else this.deps.onCancelTextAttachment(file.requestId);
+				this.renderChips();
+			});
+			chip.appendChild(remove);
+			this.chipsEl.appendChild(chip);
+		}
 		for (const sel of this.selections) {
 			const chip = el("div", "compose-chip");
 			chip.title = `${sel.path} lines ${sel.startLine}-${sel.endLine}`;
@@ -1246,7 +1327,66 @@ export class Composer {
 		}
 	}
 
+	private addPastedText(text: string): boolean {
+		if (text.length > MAX_TEXT_ATTACHMENT_BYTES || hasUnpairedSurrogate(text)) {
+			this.showHint(hasUnpairedSurrogate(text) ? "This text contains an incomplete Unicode character and cannot be saved exactly as UTF-8. Your clipboard and draft are unchanged." : "Text exceeds the 8 MiB UTF-8 limit. Your clipboard and draft are unchanged; save it as a file instead.");
+			return false;
+		}
+		const bytes = utf8ByteLength(text, MAX_TEXT_ATTACHMENT_BYTES);
+		if (this.textFiles.length >= MAX_TEXT_ATTACHMENTS || bytes > MAX_TEXT_ATTACHMENT_BYTES || this.textFiles.reduce((total, file) => total + file.byteLength, 0) + bytes > MAX_TEXT_ATTACHMENT_BYTES) {
+			this.showHint("Text was not attached: maximum 4 text files and 8 MiB UTF-8 total. The clipboard and your current draft are unchanged.");
+			return false;
+		}
+		const file: ComposerTextFile = { requestId: ++this.nextTextFileRequestId, name: `pasted-text-${++this.nextTextFileName}.txt`, byteLength: bytes, text };
+		this.textFiles.push(file);
+		this.stageTextFile(file);
+		this.showHint("Large paste attached as a text file. Add short instructions, then send when ready.");
+		return true;
+	}
+
+	private attachCurrentText(): void {
+		const text = this.textarea.value;
+		if (!this.addPastedText(text)) return;
+		this.textarea.value = "";
+		this.closeAutocomplete();
+		this.autoGrow();
+		this.deps.onDraftChanged("");
+	}
+
+	private stageTextFile(file: ComposerTextFile): void {
+		if (file.text === undefined) return;
+		file.error = undefined;
+		this.deps.onCancelTextAttachment(file.requestId);
+		file.requestId = ++this.nextTextFileRequestId;
+		this.renderChips();
+		if (!this.deps.onStageTextAttachment(file.text, file.name, file.requestId)) {
+			file.error = "The session is not ready. Your text is retained; retry when connected.";
+			this.renderChips();
+		}
+	}
+
+	onTextAttachmentStaged(requestId: number, attachment?: TextFileAttachment, error?: string): boolean {
+		const file = this.textFiles.find((candidate) => candidate.requestId === requestId && !candidate.attachment);
+		if (!file) return false;
+		if (attachment) {
+			file.attachment = { ...attachment };
+			file.text = undefined;
+			file.error = undefined;
+		} else {
+			file.error = error ?? "Could not prepare the text file. Your text is retained; retry or remove it.";
+			this.showHint(file.error);
+		}
+		this.renderChips();
+		return true;
+	}
+
 	private onPaste(event: ClipboardEvent): void {
+		const pastedText = event.clipboardData?.getData?.("text/plain") ?? "";
+		if (pastedText && (shouldAttachPastedText(pastedText) || this.textarea.value.length - ((this.textarea.selectionEnd ?? 0) - (this.textarea.selectionStart ?? 0)) + pastedText.length > MAX_PROMPT_TEXT_CHARS)) {
+			event.preventDefault();
+			this.addPastedText(pastedText);
+			return;
+		}
 		const files = event.clipboardData?.files;
 		if (!files || files.length === 0) return;
 		const imageFiles = Array.from(files).filter((f) => SUPPORTED_IMAGE_MIME_TYPES.has(f.type));

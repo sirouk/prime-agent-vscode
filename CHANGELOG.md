@@ -13,6 +13,9 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+- **Send large pasted text without losing the thread.** Pastes of 32,000 characters or more become visible local UTF-8 text-file attachments. Add short instructions beside them, wait for the chip to be ready, and send. Small acknowledged upload chunks avoid giant webview messages; up to four text files share an 8 MiB limit. The agent receives file references and can read them in sections, instead of forcing the whole body into one prompt.
+- **Recover safely from rejected sends and attachment failures.** Invalid prompts settle their exact local echo and restore the draft and attachments without overwriting newer typing. Preparing or failed files cannot be sent; Retry retains the original pasted text. Attachment authority stays with its document and session, and cancelled uploads and session changes cannot send into another thread.
+
 ## [1.0.52]
 
 - **Show subagents in a compact, responsive grid.** Wide panels use two columns; narrow sidebars keep one. Names, identity colors and status labels share each clickable row. Parent, Siblings and Historical keep full-width headings, and one bounded vertical scrollbar leaves room for the transcript.

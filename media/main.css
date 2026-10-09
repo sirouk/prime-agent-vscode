@@ -1091,6 +1091,17 @@ details.thinking .thinking-body {
 	display: none;
 }
 
+/* Local text files share the existing attachment rail without enlarging chat. */
+.compose-chip.text-file { max-width: 100%; min-width: 0; }
+.text-file-open { min-width: 0; padding: 0; text-align: left; }
+.text-file-status { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--pa-dim); }
+.text-file-retry { flex: none; padding: 0 3px; color: var(--pa-accent); }
+.compose-chip.text-file.failed { border-color: var(--pa-warn); }
+.compose-chip.text-file.failed .text-file-status { color: var(--pa-warn); }
+.text-file-open:focus-visible,
+.text-file-retry:focus-visible,
+.compose-chip.text-file .chip-remove:focus-visible { outline: 2px solid var(--vscode-focusBorder, var(--pa-accent)); outline-offset: 1px; }
+
 .compose-chip {
 	display: inline-flex;
 	align-items: center;

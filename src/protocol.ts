@@ -294,8 +294,18 @@ export interface SelectionAttachment {
 	languageId: string;
 }
 
+/** A host-created local text file. The ref, not the display path, authorizes use. */
+export interface TextFileAttachment {
+	ref: string;
+	name: string;
+	byteLength: number;
+	path: string;
+}
+
 export interface PromptPayload {
 	text: string;
+	/** Opaque refs staged by this document for this exact session/view. */
+	textFiles?: string[];
 	images: ImageAttachment[];
 	selections: SelectionAttachment[];
 	/** delivery behavior while the agent is streaming */
@@ -313,7 +323,7 @@ export interface PromptPayload {
 }
 
 export type WebviewToHost =
-	| { type: "ready" }
+	| { type: "ready"; clientScope?: string }
 	| { type: "prompt"; payload: PromptPayload }
 	| { type: "abort" }
 	| { type: "newSession" }
@@ -337,6 +347,11 @@ export type WebviewToHost =
 	| { type: "openLinkedFile"; path: string; startLine?: number; endLine?: number }
 	| { type: "openDiff"; path: string }
 	| { type: "pickImage"; requestId: number }
+	| { type: "stageTextAttachment"; text: string; name: string; requestId: number; sessionId: string }
+	| { type: "stageTextAttachmentChunk"; text: string; name: string; requestId: number; sessionId: string; index: number; totalChunks: number }
+	| { type: "cancelTextAttachment"; requestId: number }
+	| { type: "releaseTextAttachment"; ref: string }
+	| { type: "openTextAttachment"; ref: string }
 	| { type: "attachActiveFile" }
 	| { type: "attachSelection" }
 	| { type: "pickModel" }
@@ -445,7 +460,7 @@ export type HostToWebview =
 	| { type: "processes"; processes: SessionProcess[] }
 	| { type: "processOutput"; preview: ProcessOutputPreview }
 	| { type: "showHistory" }
-	| { type: "promptAccepted"; kind: "prompt" | "steer" | "followUp" }
+	| { type: "promptAccepted"; kind: "prompt" | "steer" | "followUp"; clientRequestId?: string }
 	| { type: "promptRejected"; error: string; clientRequestId?: string }
 	| {
 			type: "notice";
@@ -462,6 +477,8 @@ export type HostToWebview =
 	| { type: "uiState"; statusText?: string; title?: string }
 	| { type: "fileSearchResults"; requestId: number; files: FileSearchItem[] }
 	| { type: "imagePicked"; requestId: number; images: ImageAttachment[] }
+	| { type: "textAttachmentStaged"; requestId: number; attachment?: TextFileAttachment; error?: string }
+	| { type: "textAttachmentChunkAccepted"; requestId: number; index: number }
 	| { type: "insertSelection"; selection: SelectionAttachment }
 	| { type: "insertMention"; path: string }
 	| { type: "changedFiles"; files: string[] }

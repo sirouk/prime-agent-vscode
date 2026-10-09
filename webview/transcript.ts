@@ -210,6 +210,8 @@ interface ToolBlock {
 interface OptimisticUserRow {
 	clientRequestId: string;
 	text: string;
+	/** File references distinguish same-companion queued sends; bodies never enter the DOM. */
+	fileAppendix?: string;
 	/** Exact ordered image identity prevents same-text queue rows swapping on delivery. */
 	imageSignature: string;
 	row: HTMLElement;
@@ -1424,17 +1426,19 @@ export class Transcript {
 		clientRequestId: string,
 		text: string,
 		images: Array<{ data: string; mimeType: string }>,
+		fileAppendix?: string,
 	): void {
-		if (!text && images.length === 0) return;
+		if (!text && images.length === 0 && !fileAppendix) return;
 		this.dismissWelcome();
-		const content = images.length > 0 ? buildContent(text, images) : text;
+		const displayText = text + (fileAppendix ?? "");
+		const content = images.length > 0 ? buildContent(displayText, images) : displayText;
 		// This ordinal is temporary: the durable ordinal is applied when the agent
 		// echoes the message. It still makes a just-sent row fork sensibly before
 		// that echo arrives.
 		const row = this.buildUserRow({ role: "user", content } as UserMessage, this.nextUserOrdinal + this.optimisticRows.size);
 		this.place(row);
 		this.hasContent = true;
-		this.optimisticRows.set(clientRequestId, { clientRequestId, text, imageSignature: this.imageSignature(images), row });
+		this.optimisticRows.set(clientRequestId, { clientRequestId, text, fileAppendix, imageSignature: this.imageSignature(images), row });
 		// The operator just hit send — that is an explicit intent to follow along.
 		this.forceScrollToBottom();
 		this.updateJumpButton();
@@ -1468,12 +1472,14 @@ export class Transcript {
 		const imageSignature = this.userMessageImageSignature(message);
 		for (const pending of this.optimisticRows.values()) {
 			if (pending.imageSignature !== imageSignature) continue;
-			if (delivered === pending.text) return pending;
+			if (pending.fileAppendix && !delivered.endsWith(pending.fileAppendix)) continue;
+			const promptText = pending.fileAppendix ? delivered.slice(0, -pending.fileAppendix.length) : delivered;
+			if (promptText === pending.text) return pending;
 			// The host appends editor selections to the prompt (composeMessageText:
 			// `<attachment …>` blocks, or a ` (path lines a-b)` reference), so the
 			// delivered text is not byte-identical — but the typed text stays its prefix.
-			if (pending.text.length === 0 || !delivered.startsWith(pending.text)) continue;
-			const appended = delivered.slice(pending.text.length);
+			if ((!pending.text && !pending.fileAppendix) || !promptText.startsWith(pending.text)) continue;
+			const appended = promptText.slice(pending.text.length);
 			if (appended.startsWith("\n\n<attachment ") || appended.startsWith(" (")) return pending;
 		}
 		return undefined;

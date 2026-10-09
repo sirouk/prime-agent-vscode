@@ -108,9 +108,18 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
   composer rail chooses mid-turn steering or end-of-run delivery. Stop button aborts the run.
 - **Editor context**: `+` attach menu — mention files and **folders** (`@` with indexed
   autocomplete; folders carry a trailing `/`), attach the active file or the current selection,
-  or attach images on vision-capable models. Paste and drag-drop work too, and are gently
-  refused on text-only models. Mentions render inline-styled inside the composer and as
-  clickable chips in your messages; folders reveal in the Explorer.
+  or attach images on vision-capable models. Image paste and drag-drop work too, and are
+  gently refused on text-only models. Mentions render inline-styled inside the composer
+  and as clickable chips in your messages; folders reveal in the Explorer.
+- **Large pasted text**: a plain-text paste of 32,000 UTF-16 units or more becomes a local
+  UTF-8 `.txt` attachment, leaving your short instructions in the composer. Text files
+  work on text-only models too. Paste the text, wait for the file chip to be ready, add
+  instructions such as “Read this file in sections and summarize the errors,” then press
+  Send. Preparing or failed files block Send; use **Retry**, **Open**, or **Remove** on the
+  chip. A send never happens automatically. Up to four text files share an 8 MiB UTF-8
+  limit. Oversized clipboard text is refused without changing the current draft. Input
+  above the 200,000-unit inline limit, or containing NUL, uses the same preparation path;
+  press Send again after readiness. Malformed Unicode is refused rather than changed.
 - **Composer rail**: searchable model menu holds ★ favorites (persisted), reasoning and vision
   (`img`) badges, context-window sizes, and full model ids on hover. Immediately right of the
   model pill, a **brain pill** opens the thinking levels — scoped to what the selected model
@@ -280,6 +289,13 @@ agent's own runtime, governed by your `prime-agent` configuration and the provid
 there. Session history and favorites are stored locally (globalState + your
 `~/.prime/agent` directory) and never leave the machine except through the model providers
 you configured.
+
+Pasted-text attachments are stored in the extension's private local storage, not your
+workspace. The prompt contains file references and instructions for the agent to read them,
+not their full contents. Files remain readable after sending or removing a chip, so queued
+agent reads can complete. Removing a chip revokes its send reference; it does not delete the
+file. Local attachment storage is bounded to 512 files and 256 MiB and must have room before
+another file can be prepared. Unsent attachment chips are not restored after a window reload.
 
 ## License
 
