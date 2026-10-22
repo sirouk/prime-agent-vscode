@@ -1,13 +1,18 @@
 # Prime Agent for VS Code
 
 Chat with [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent) directly from VS Code.
-The extension runs the Prime Agent CLI as a headless RPC subprocess (`prime-agent --mode rpc`)
-and renders the full agent stream — assistant text, thinking, and every tool call — in a
-sidebar chat view.
+The extension drives the Prime Agent CLI and renders the full agent stream — assistant text,
+thinking, and every tool call — in a sidebar chat view.
 
-The agent keeps its own runtime: daemon-backed sessions, skills, the persistent IPython
+The agent keeps its own runtime: daemon-backed sessions, skills, the persistent Python
 kernel, subagents, schedules, and the continual harness all behave exactly as in the
-terminal client. The extension is a UI over the RPC protocol, not a reimplementation.
+terminal client. The extension is a UI over the agent's own protocols, not a reimplementation.
+
+It works with both generations of the agent. **Prime Agent 0.10 and later (the Rust build)**:
+the window's session is hosted on the agent's background service, because the build's own
+`--mode rpc` is an in-process engine that cannot spawn subagents, run schedules or heartbeats,
+message other agents, or run bash. **Prime Agent 0.9.x and earlier (the TypeScript build)**:
+`prime-agent --mode rpc`, whose RPC mode is already a client of that service.
 
 **Community project.** Built and published by [sirouk](https://github.com/sirouk); it is not an
 official Prime Intellect release and is not affiliated with them. The Prime Agent name and the
@@ -77,7 +82,7 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
   something survives a turn, names the command rather than the shell wrapper it runs inside,
   keeps a finished command as a receipt instead of letting the row vanish, and shows the last
   ~100 lines of its output on click. It has two sources, and says which one a row came from:
-  - **Jobs owned by the bundled agent extension** (see below) — real exit codes, the job's
+  - **Jobs owned by the bundled agent extension** (TypeScript agent only; see below) — real exit codes, the job's
     own stdout and stderr, and a Stop button that signals the job's process group. These are
     also the jobs that wake the agent when they finish.
   - **Anything else the agent left running**, reconstructed locally from the worker's process
@@ -86,8 +91,9 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
     Its output preview can only show a file the command redirects to: a bare `bash()` command's
     stdout is buffered inside the agent's kernel and cannot be read without taking it from the
     agent, which the panel says rather than showing an empty box. POSIX only.
-- **Background jobs agent extension**: run **Prime Agent: Install Background Jobs Agent
-  Extension…** from the command palette to copy the bundled extension into
+- **Background jobs agent extension** (Prime Agent 0.9.x and earlier only — the Rust build has no
+  extension loader, and the command says so instead of installing something inert): run **Prime
+  Agent: Install Background Jobs Agent Extension…** from the command palette to copy the bundled extension into
   `~/.prime/agent/extensions/`, then start a new session. It gives the agent a `background`
   tool for commands that outlive a turn and a `/jobs` command for you. Prime Agent's own
   `bash()` keeps a command's output inside the IPython kernel and notifies nobody when it
@@ -103,7 +109,9 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
   so resuming a thread or stepping back out of a subagent keeps the list intact. Nothing is
   inferred: a file the agent rewrote from a shell or raw Python cell publishes no diff and
   therefore appears only in the coarse changed-files strip above the transcript, which the
-  panel says out loud.
+  panel says out loud. Prime Agent 0.10.1's `python_repl` publishes no diffs at all, so there
+  the panel stays empty and the strip reads "N files changed" (not "N *other* files") — it
+  cannot tell the agent's edits from yours, and says so.
 - **Steer while working**: send messages while the agent runs; the *steer/queue* pill in the
   composer rail chooses mid-turn steering or end-of-run delivery. Stop button aborts the run.
 - **Compact run timer**: an animated butterfly and elapsed seconds sit in the bottom status
@@ -128,7 +136,8 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
   (`img`) badges, context-window sizes, and full model ids on hover. Immediately right of the
   model pill, a **brain pill** opens the thinking levels — scoped to what the selected model
   actually supports, read from the model's own level map, so it never offers a level the agent
-  would silently swap. Next to it: the steer/queue toggle (default via
+  would silently swap — taken from the agent's own `availableThinkingLevels` when it sends one
+  (the Rust build does), else derived from the model's level map. Next to it: the steer/queue toggle (default via
   `primeAgent.defaultStreamingBehavior`) and a live context meter you click to set the
   per-session **auto-compact threshold** override — the slider runs from 20% to the agent's own
   default ceiling (at least 80%, higher on a big context window) and reads out the token count
@@ -153,7 +162,8 @@ usually activates without a window reload; otherwise run *Developer: Reload Wind
 
 ## Requirements
 
-- The [`prime-agent` CLI](https://github.com/PrimeIntellect-ai/prime-agent) installed and
+- The [`prime-agent` CLI](https://github.com/PrimeIntellect-ai/prime-agent) — 0.10 or later
+  (the Rust build, recommended) or 0.9.x (the TypeScript build) — installed and
   authenticated (`/login` in the terminal client, once). Install it with Prime Intellect's
   own installer:
 
@@ -182,7 +192,8 @@ guide.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `primeAgent.command` | `prime-agent` | Command used to launch the agent. |
-| `primeAgent.args` | `[]` | Extra CLI args appended after `--mode rpc` (e.g. `["--provider", "chutes"]`). |
+| `primeAgent.transport` | `auto` | How the window's session is carried. `auto` hosts it on the background service for agents whose own `--mode rpc` has none (0.10+) and uses `--mode rpc` otherwise; `daemon` and `rpc` force one. |
+| `primeAgent.args` | `[]` | Extra CLI args (e.g. `["--provider", "chutes"]`). With `--mode rpc` they are passed through; a service-hosted session applies the ones that describe a session (`--provider`, `--model`, `--thinking`, `--system-prompt`, `--append-system-prompt`, `--skill`, `--prompt-template`, `--session-dir`, `--cwd`, `--daemon-socket`) and tells you which others it ignored. |
 | `primeAgent.model` | `""` | Model passed as `--model` on start. |
 | `primeAgent.maxFileSearchResults` | `40` | Max `@` mention search results. |
 | `primeAgent.sendSelectionSnippet` | `true` | Include the selected code when attaching a selection. |
@@ -205,26 +216,58 @@ the *⋯* menu links to [app.primeintellect.ai](https://app.primeintellect.ai).
 ## How it works
 
 ```
-VS Code extension host                Prime Agent CLI
-┌──────────────────────┐   JSONL/stdin   ┌────────────────────────┐
-│ sidebar/editor webview│───────────────▶│ prime-agent --mode rpc │
-│   (chat UI, markdown) │◀───────────────│  events: message_update │
-│ SessionController     │   events/stdout│  tool_execution_*      │
-│   RpcClient (JSONL)   │                │  extension_ui_request  │
-└──────────────────────┘                └────────────────────────┘
+VS Code extension host                        Prime Agent
+┌───────────────────────────┐                ┌────────────────────────────────┐
+│ webview (chat UI)         │                │ background service (daemon)     │
+│ SessionController         │  daemon socket │  ├─ this window's session        │
+│   DaemonRpcClient ────────┼───────────────▶│  ├─ its subagents (rlm.spawn)    │
+│   DaemonSidecar (roster,  │◀───────────────┤  └─ sessions other clients run   │
+│     history, attach)      │  session_event └────────────────────────────────┘
+│   RpcClient (0.9.x agent) ┼──▶ prime-agent --mode rpc  (a daemon client itself)
+└───────────────────────────┘
 ```
 
-- Commands/responses are correlated by `id`; framing splits on `\n` only (Unicode line
-  separators are valid inside JSON strings — see `docs/rpc.md` in prime-agent).
-- Extension UI requests (`select`, `confirm`, `input`, …) are answered with native
-  VS Code quick picks, input boxes, and notifications.
-- Session history is read from the daemon's own catalog when it answers, and from
-  `~/.prime/agent/sessions/*.jsonl` when it doesn't; both are filtered by workspace cwd and
-  resuming uses the `switch_session` command.
-- A session that is already live elsewhere is never driven over our own subprocess — RPC mode
-  owns its session and cannot attach to one. For those, the extension speaks the daemon
-  protocol itself over the daemon's socket (unix socket, named pipe on Windows), which is what
-  makes attach — rather than a second, competing session — possible.
+- **Which transport.** The extension asks the agent for its version. 0.10 and later has an
+  in-process `--mode rpc`, so the window's session is *created on the background service*
+  (client-owned: it ends with the window, like the subprocess did) and driven through
+  `DaemonRpcClient`, which exposes the same interface as `RpcClient`. Everything above that
+  line — chat, history, the strip, steering, compaction, export — is unchanged. Earlier
+  agents keep `--mode rpc`, which is itself a client of the service. If the service cannot
+  be started or reached, the window falls back to the in-process transport and says what
+  that costs.
+- **Where the service is.** The installer's launcher pins `PRIME_AGENT_DAEMON_SOCKET` for the
+  agent it starts, so the socket location is the agent's to say: `prime-agent status --json`
+  names it, `--daemon-socket` and `PRIME_AGENT_DAEMON_SOCKET` override it, and a service that
+  is not running is started the way the CLI starts it (`--mode daemon`, detached).
+- Commands/responses are correlated by `id`; subprocess framing splits on `\n` only (Unicode
+  line separators are valid inside JSON strings — see `docs/rpc.md` in prime-agent).
+- Extension UI requests (`select`, `confirm`, `input`, …) from a TypeScript agent are answered
+  with native VS Code quick picks, input boxes, and notifications.
+- Session history is read from the daemon's own catalog when it answers, and from the agent's
+  sessions directory (`PRIME_AGENT_SESSION_DIR`, else `<PRIME_AGENT_CODING_AGENT_DIR>/sessions`,
+  else `~/.prime/agent/sessions`) when it doesn't; both are filtered by workspace cwd. Opening
+  a session never disturbs the one you leave: the daemon either already has it resident
+  (attach) or resumes it under a fresh worker.
+- A session that is live in another client is followed over the daemon protocol too (attach).
+  Following another window's session promotes it first, so it does not end when that window
+  closes.
+
+## Troubleshooting
+
+- **"Failed to set up the Python kernel runtime … removing …/kernel-venv: Operation not
+  permitted".** That is the agent, not the extension: a new release (or another build sharing
+  `~/.prime/agent`) invalidated its Python environment, and deleting the old one failed — the
+  usual causes are an immutable flag (`lsattr -d ~/.prime/agent/kernel-venv`), files owned by
+  another user, or a locked-down filesystem or container. Run `prime-agent` in a terminal on
+  the same machine to confirm it reproduces there. To get going, point the agent at a
+  writable location with `PRIME_AGENT_KERNEL_VENV=/some/writable/dir` (it builds a fresh
+  environment there without deleting the old one), or at a Python that already has a current
+  `prime-agent-runtime` with `PRIME_AGENT_KERNEL_PYTHON`.
+- **The chat says the background service is unavailable.** The session then runs in-process
+  and cannot spawn subagents or run schedules. `prime-agent status` shows what is listening;
+  `prime-agent shutdown` stops a service from another build that holds the socket.
+- **A turn stops with "No API key found for …".** Run `/login` in a terminal `prime-agent`, once,
+  or choose a model whose provider you have credentials for.
 
 ## Development
 
@@ -248,11 +291,26 @@ Test layers:
 - `test/thread-diffs.test.mjs` — the "Changes" panel against real diff payloads.
 - `test/recent-sessions-tail.test.mjs` — the on-disk history fallback (renames and
   archive entries that live at the tail of a session file).
-- `test/host-e2e.mjs` — real `SessionController` + stubbed vscode vs. a real CLI.
-- `test/daemon-parity.mjs` — CLI + extension on the same resident session, both seeing
-  the same prompts and answers.
-- `test/smoke.mjs` — RPC protocol round-trip (`--session-dir` temp store). Built from
-  `test/smoke.ts` by esbuild; the bundle is generated, not committed.
+- `test/daemon-endpoint.test.mjs`, `test/session-config.test.mjs`,
+  `test/daemon-rpc-client.test.mjs` — the service-hosted transport, headless: socket discovery
+  and daemon start against fake launchers, flag-to-config translation, and the client itself
+  against a scriptable fake daemon (`test/fake-daemon.mjs`) that records every envelope —
+  reconnect as the same owner (waiting out a restarting daemon, adopting a replaced worker's
+  handle), rebinding a re-issued handle, shutdown, bounded stop-while-starting.
+- `test/controller-rust.test.mjs` — the controller's Rust-generation behaviour with no agent at
+  all: the login offer, following a re-issued handle, promotion before following another
+  window's session, and the hosted-session lifecycle edges.
+- `test/webview-rust-rows.test.mjs` — the transcript rows only the Rust agent writes, and the
+  placeholder for a record the renderer cannot read.
+- Live gates (need a configured model; each runs on a *private* daemon with a throwaway agent
+  directory, `test/private-daemon.mjs` + `test/isolated-agent.mjs`, so they never touch your
+  settings or your running service): `test/host-e2e.mjs` — real `SessionController` + stubbed
+  vscode vs. a real CLI, including a subagent reaching the strip; `test/daemon-hosted-live.mjs`
+  — the service-hosted client against a real agent (tools, subagents, queueing, abort,
+  lifecycle, promotion); `test/daemon-parity.mjs` — CLI + extension on the same resident
+  session; `test/owned-roster.mjs` — client-owned visibility and promotion, for whichever
+  daemon generation it finds; `test/smoke.mjs` — subprocess RPC round-trip, built from
+  `test/smoke.ts` by esbuild (generated, not committed). `npm run test:live` runs them all.
 - `test/preview-shot.mjs` — headless Chromium screenshots + DOM assertions.
 - `test/vscode-e2e.mjs` — **real-shell trace**: Playwright drives actual VS Code
   (minimized window, throwaway `--user-data-dir`, extension loaded from the repo via
