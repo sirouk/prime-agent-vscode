@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.55]
+
 - **Prime Agent 0.10 (the Rust build): a window's session can spawn subagents again.** 0.10 made `prime-agent --mode rpc` an in-process engine, so a session started the old way answered subagent spawns with "requires a daemon-backed session", and could not run schedules, heartbeats, agent messaging or bash. The extension now hosts the window's session on the Prime Agent background service itself — created client-owned, so it ends with the window exactly as the subprocess did — and talks to it through the same interface as before. Nothing above the transport changed: chat, history, the subagent strip, steering, compaction and export all work as they did. If the service cannot be reached the extension falls back to the in-process transport and says what that costs. `primeAgent.transport` (`auto` | `daemon` | `rpc`) overrides the choice; the TypeScript builds (0.9.x and earlier) keep their own daemon-backed RPC untouched.
 - **Find the daemon where the agent actually put it.** The installer's launcher pins the service to `<tmp>/prime-agent-rust-<uid>/daemon.sock`; the extension looked at the TypeScript-era `prime-agent-<uid>/daemon.sock`, so history navigation, the roster and subagents found nothing on every launcher install. The agent itself is now asked (`prime-agent status --json`), `--daemon-socket` and `PRIME_AGENT_DAEMON_SOCKET` are honored, and a socket owned by an incompatible build is refused by name instead of waited on.
 - **Keep sessions another window is following.** The Rust daemon shows every window's session to every client, so the old "already active, promote it" path never fired and a window closing killed a session someone else was viewing. Following another window's session now promotes it first, and a session that was promoted outlives its owner's window.
@@ -436,7 +438,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.54...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.55...HEAD
+[1.0.55]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.54...v1.0.55
 [1.0.54]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.53...v1.0.54
 [1.0.53]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.52...v1.0.53
 [1.0.52]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.51...v1.0.52
