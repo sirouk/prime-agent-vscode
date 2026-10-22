@@ -25,8 +25,9 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+
+import { agentDir } from "./agent-paths.js";
 
 /** The subset of `<agentDir>/daemon-workers/<dir>/<workerId>.json` we rely on. */
 export interface WorkerDescriptorRef {
@@ -39,6 +40,8 @@ export interface WorkerDescriptorRef {
 	 * read it to know what the agent started (see process-tracker.ts).
 	 */
 	orphanProcessJournalPath?: string;
+	/** The session file the worker was last hosting (the Rust daemon records it at the top level). */
+	sessionFile?: string;
 	ownerClientId?: string;
 	updatedAt?: string;
 	createdAt?: string;
@@ -73,9 +76,7 @@ export function agentDirForSessionFile(sessionFile: string | undefined): string 
 
 /** Last-resort location when no session file is known yet. */
 export function defaultAgentDir(): string {
-	const configured = process.env.PRIME_AGENT_DIR?.trim();
-	if (configured) return path.resolve(configured);
-	return path.join(os.homedir(), ".prime", "agent");
+	return agentDir();
 }
 
 /** A worker whose process is gone must never lend its identity to a roster read. */
@@ -189,6 +190,7 @@ function newestLiveDescriptor(
 		if (!descriptor || !accept(descriptor)) continue;
 		const matches =
 			samePath(descriptor.createCommand?.sessionPath, lookup.sessionFile) ||
+			samePath(descriptor.sessionFile, lookup.sessionFile) ||
 			(!!lookup.activeSessionId && descriptor.rootActiveSessionId === lookup.activeSessionId);
 		if (!matches) continue;
 		if (!processAlive(descriptor.pid)) continue;

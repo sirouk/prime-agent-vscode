@@ -11,10 +11,10 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { realpathSync } from "node:fs";
+import { sessionsDir } from "./agent-paths.js";
 import type { RecentSession } from "./protocol.js";
 
 /** Files whose heads we are willing to open on one refresh, newest-mtime first. */
@@ -27,10 +27,6 @@ const MAX_SCAN = 400;
  * first.
  */
 const TAIL_BYTES = 128 * 1024;
-
-function sessionsDir(): string {
-	return path.join(os.homedir(), ".prime", "agent", "sessions");
-}
 
 interface SessionHeader {
 	cwd?: string;
@@ -98,7 +94,10 @@ async function readSessionRow(filePath: string): Promise<SessionRow> {
 	const tail = await readTail(filePath);
 	return {
 		header,
-		name: tail.name ?? name,
+		// The latest title entry is authoritative, including one that CLEARS the
+		// title: only when the tail window held no title entry at all does the
+		// oldest one (read from the head) stand.
+		name: tail.nameResolved ? tail.name : name,
 		firstPrompt,
 		hasMessage: hasMessage || cappedEarly,
 		archived: tail.archived,
@@ -109,7 +108,7 @@ async function readSessionRow(filePath: string): Promise<SessionRow> {
  * Renames and lifecycle transitions append entries at the END of the file, so
  * the head scan never sees them. Read the tail and let the latest entry win.
  */
-async function readTail(filePath: string): Promise<{ name?: string; archived: boolean }> {
+async function readTail(filePath: string): Promise<{ name?: string; nameResolved: boolean; archived: boolean }> {
 	let handle: fs.promises.FileHandle | null = null;
 	try {
 		handle = await fs.promises.open(filePath, "r");
@@ -148,9 +147,9 @@ async function readTail(filePath: string): Promise<{ name?: string; archived: bo
 			}
 			if (nameResolved && archived !== undefined) break;
 		}
-		return { name, archived: archived === true };
+		return { name, nameResolved, archived: archived === true };
 	} catch {
-		return { archived: false };
+		return { nameResolved: false, archived: false };
 	} finally {
 		if (handle) await handle.close();
 	}
@@ -186,8 +185,9 @@ export interface RecentSessionsOptions {
  * applied before bucketing let 20-odd throwaway sessions from other folders
  * push this workspace's own history off the list entirely.
  *
- * Zero-message drafts and archived sessions are omitted, matching the CLI's
- * inactiveLifecycleForSession/shouldShowAgentsViewSession.
+ * Zero-message drafts are omitted (nothing to resume). Archived sessions are
+ * listed: the agent archives on any unclean worker close, so hiding them made
+ * real threads vanish.
  */
 export async function listRecentSessions(workspaceRoot: string, options: RecentSessionsOptions = {}): Promise<RecentSession[]> {
 	const workspaceLimit = options.workspaceLimit ?? 60;

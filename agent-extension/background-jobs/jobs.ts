@@ -66,7 +66,7 @@ function shortId(): string {
 
 /** Where job logs live. Under the agent dir so they are findable and prunable. */
 export function defaultLogDir(): string {
-	const configured = process.env.PRIME_AGENT_DIR?.trim();
+	const configured = process.env.PRIME_AGENT_CODING_AGENT_DIR?.trim() || process.env.PRIME_AGENT_DIR?.trim();
 	const agentDir = configured ? path.resolve(configured) : path.join(os.homedir(), ".prime", "agent");
 	return path.join(agentDir, "background-jobs");
 }

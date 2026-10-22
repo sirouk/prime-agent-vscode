@@ -29,7 +29,11 @@ function check(name, condition, detail = "") {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Mirror of prime-agent's getProcessStartId, used to write a truthful record. */
+/**
+ * Mirror of prime-agent's getProcessStartId, used to write a truthful record.
+ * The agent pins the `ps` stamp to UTC and the C locale; so must the mirror, or
+ * this suite only passes on a machine whose clock happens to be UTC.
+ */
 function processStartId(pid) {
 	try {
 		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -39,7 +43,10 @@ function processStartId(pid) {
 		// macOS/BSD: fall through to ps.
 	}
 	try {
-		const out = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+		const out = execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+			encoding: "utf8",
+			env: { ...process.env, LC_ALL: "C", LC_TIME: "C", LANG: "C", TZ: "UTC" },
+		}).trim();
 		return out ? `ps:${out}` : undefined;
 	} catch {
 		return undefined;

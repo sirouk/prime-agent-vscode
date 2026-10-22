@@ -11,10 +11,11 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFile, lstat, open, readFile, realpath, rm, unlink } from "node:fs/promises";
-import * as os from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
+
+import { agentDir, sessionsDir } from "./agent-paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -37,9 +38,16 @@ async function canonicalSessionPath(sessionPath: string): Promise<string> {
 	}
 }
 
-async function leaseLockDir(sessionPath: string): Promise<string> {
-	const key = createHash("sha256").update(await canonicalSessionPath(sessionPath)).digest("hex");
-	return join(os.homedir(), ".prime", "agent", "session-leases", `${key}.lock`);
+/**
+ * The lease directories a session file may be held under. The key is the hash of
+ * the canonical path; on Windows the Rust agent's canonical path is the
+ * extended-length `\\?\C:\...` form (std::fs::canonicalize), which Node's
+ * realpath does not produce, so a live holder is looked up under both spellings.
+ */
+async function leaseLockDirs(sessionPath: string): Promise<string[]> {
+	const canonical = await canonicalSessionPath(sessionPath);
+	const spellings = process.platform === "win32" && !canonical.startsWith("\\\\?\\") ? [canonical, `\\\\?\\${canonical}`] : [canonical];
+	return spellings.map((spelling) => join(agentDir(), "session-leases", `${createHash("sha256").update(spelling).digest("hex")}.lock`));
 }
 
 interface LeaseOwner {
@@ -62,7 +70,13 @@ async function processStartId(pid: number): Promise<string | undefined> {
 		// not Linux — fall through to ps, which is what macOS/BSD use
 	}
 	try {
-		const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "lstart="], { timeout: 1_000, maxBuffer: 8 * 1024 });
+		// Pinned to UTC and the C locale: the lease owner wrote its stamp that way
+		// (see PS_ENV in process-tracker.ts), and unpinned a live holder never matches.
+		const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "lstart="], {
+			timeout: 1_000,
+			maxBuffer: 8 * 1024,
+			env: { ...process.env, LC_ALL: "C", LC_TIME: "C", LANG: "C", TZ: "UTC" },
+		});
 		const startTime = stdout.trim();
 		return startTime ? `ps:${startTime}` : undefined;
 	} catch {
@@ -72,7 +86,13 @@ async function processStartId(pid: number): Promise<string | undefined> {
 
 /** Best-effort check whether a resident session currently holds this session. */
 export async function isSessionActive(sessionPath: string): Promise<boolean> {
-	const lockDir = await leaseLockDir(sessionPath);
+	for (const lockDir of await leaseLockDirs(sessionPath)) {
+		if (await leaseHeld(lockDir)) return true;
+	}
+	return false;
+}
+
+async function leaseHeld(lockDir: string): Promise<boolean> {
 	const ownerPath = join(lockDir, "owner.json");
 	try {
 		const owner = JSON.parse(await readFile(ownerPath, "utf8")) as LeaseOwner;
@@ -159,7 +179,9 @@ async function deleteSessionArtifacts(sessionId: string): Promise<void> {
 	if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) {
 		throw new Error("Invalid session artifact identifier");
 	}
-	const artifactDir = join(os.homedir(), ".prime", "agent", "session-artifacts", sessionId);
+	// The agent keeps artifacts beside the sessions directory (`<sessions>/../session-artifacts`),
+	// which is the state directory only until PRIME_AGENT_SESSION_DIR relocates the sessions.
+	const artifactDir = join(dirname(sessionsDir()), "session-artifacts", sessionId);
 	await rm(artifactDir, { recursive: true, force: true });
 }
 

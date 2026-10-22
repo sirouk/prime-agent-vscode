@@ -84,11 +84,28 @@ interface Tracked {
 	promoted: boolean;
 }
 
-function execFileText(file: string, args: string[]): Promise<string> {
+/**
+ * `ps` prints `lstart` in the caller's timezone and locale; the agent writes the
+ * same stamp pinned to UTC and the C locale (a `ps:` start id is compared byte
+ * for byte against what its journal recorded). Unpinned, every process of a
+ * session reads as a recycled pid anywhere but UTC and none is ever listed.
+ */
+const PS_ENV = { LC_ALL: "C", LC_TIME: "C", LANG: "C", TZ: "UTC" } as const;
+
+/**
+ * Run a helper and return its stdout, or undefined when it failed or timed out.
+ * "Could not ask" is not "nothing to report": callers keep what they knew.
+ */
+function execFileText(file: string, args: string[], pinned = false): Promise<string | undefined> {
 	return new Promise((resolve) => {
-		execFile(file, args, { timeout: PS_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 }, (_err, stdout) => {
-			resolve(typeof stdout === "string" ? stdout : "");
-		});
+		execFile(
+			file,
+			args,
+			{ timeout: PS_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, ...(pinned ? { env: { ...process.env, ...PS_ENV } } : {}) },
+			(error, stdout) => {
+				resolve(error || typeof stdout !== "string" ? undefined : stdout);
+			},
+		);
 	});
 }
 
@@ -221,7 +238,7 @@ async function openOutputFiles(pid: number): Promise<string[]> {
 	} catch {
 		// Not Linux (or no /proc): ask lsof for the same descriptors.
 	}
-	const stdout = await execFileText("lsof", ["-p", String(pid), "-a", "-d", "0-9", "-F", "ftn"]);
+	const stdout = (await execFileText("lsof", ["-p", String(pid), "-a", "-d", "0-9", "-F", "ftn"])) ?? "";
 	let type = "";
 	for (const line of stdout.split("\n")) {
 		if (line.startsWith("t")) type = line.slice(1);
@@ -315,7 +332,10 @@ export class ProcessTracker {
 		// state; there is nothing to look up in ps for it.
 		if (![...records.values()].some(isAgentSpawned) && this.tracked.size === 0) return this.lastSnapshot;
 
-		const rows = parsePsListing(await execFileText("ps", ["-axww", "-o", "pid=,pgid=,lstart=,args="]));
+		const listing = await execFileText("ps", ["-axww", "-o", "pid=,pgid=,lstart=,args="], true);
+		// A ps that would not run is "we learned nothing", never "everything finished".
+		if (listing === undefined) return this.lastSnapshot;
+		const rows = parsePsListing(listing);
 		const now = Date.now();
 		const seen = new Set<number>();
 
@@ -381,7 +401,7 @@ export class ProcessTracker {
 		if (!entry) return { ref, lines: [], note: "That process is no longer being tracked." };
 		if (entry.endedMs === undefined) {
 			// Still running: it may have opened its log after we first looked.
-			const rows = parsePsListing(await execFileText("ps", ["-axww", "-o", "pid=,pgid=,lstart=,args="]));
+			const rows = parsePsListing((await execFileText("ps", ["-axww", "-o", "pid=,pgid=,lstart=,args="], true)) ?? "");
 			await this.resolveOutputs(entry, rows, true);
 		}
 		// A file the command wrote is the claim being made, so it has to have been

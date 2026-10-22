@@ -83,18 +83,28 @@ write("ws-archived", [
 	{ type: "session_state", id: "s", parentId: "m0", timestamp: new Date(clock).toISOString(), state: { status: "archived" } },
 ]);
 write("ws-live", [header(WS), message(0, "still working here")]);
+// A title set early and CLEARED later. The clear is the latest word: the older
+// title sitting in the file's head must not come back.
+write("ws-cleared", [
+	header(WS),
+	{ type: "session_info", id: "t0", parentId: "h", timestamp: new Date(clock).toISOString(), name: "Old title" },
+	message(0, "first prompt of the cleared session"),
+	{ type: "session_info", id: "t1", parentId: "m0", timestamp: new Date(clock).toISOString(), name: "" },
+]);
 
 const rows = await listRecentSessions(WS, { sessionsDir, workspaceLimit: 60, otherLimit: 25 });
 const ws = rows.filter((r) => r.inWorkspace);
 const others = rows.filter((r) => !r.inWorkspace);
 
-check("workspace bucket is not starved by newer other-folder sessions", ws.length === 3, `ws=${ws.map((r) => r.id).join(",")}`);
+check("workspace bucket is not starved by newer other-folder sessions", ws.length === 4, `ws=${ws.map((r) => r.id).join(",")}`);
 check("other folders still listed, under their own quota", others.length === 25, `n=${others.length}`);
 check("workspace rows come first", rows.slice(0, ws.length).every((r) => r.inWorkspace));
 
 const renamed = rows.find((r) => r.id === "ws-renamed");
 check("late rename wins over the first-prompt title", renamed?.name === "Prime Agent VS Code Extension", `name=${String(renamed?.name)}`);
 
+const cleared = rows.find((r) => r.id === "ws-cleared");
+check("a cleared title stays cleared", cleared !== undefined && cleared.name === undefined, `name=${String(cleared?.name)}`);
 check("zero-message draft is hidden", !rows.some((r) => r.id === "ws-draft"));
 check("an archived session is listed, not hidden", rows.some((r) => r.id === "ws-archived"),
 	rows.map((r) => r.id).join(","));
