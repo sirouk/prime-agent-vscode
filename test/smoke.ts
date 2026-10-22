@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 // esbuild inlines this import from ../src/rpc-client.ts
 import { RpcClient } from "../src/rpc-client.ts";
+import { isolatedAgent, realTempDir } from "./isolated-agent.mjs";
 
 const results = [];
 function check(name, condition, detail = "") {
@@ -28,7 +29,11 @@ async function waitFor(predicate, timeoutMs, label) {
 	throw new Error(`Timed out waiting for ${label}`);
 }
 
-const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-vs-ext-smoke-"));
+// The agent's state (settings, logs, leases) goes to a throwaway directory, never the
+// operator's real one; canonical paths because the daemon's session lease compares them.
+const agentHome = isolatedAgent("prime-agent-vs-ext-smoke-agent-");
+agentHome.apply();
+const workdir = realTempDir("prime-agent-vs-ext-smoke-");
 const sessionDir = path.join(workdir, "sessions");
 
 /**
@@ -81,8 +86,15 @@ try {
 	console.log(`  models available: ${modelsRes.data?.models?.length ?? 0}`);
 
 	// --- bash RPC command ---
+	// The Rust build's in-process RPC does not serve `bash` ("the daemon-attached RPC
+	// transport serves it"). The extension never sends it: a window's session is
+	// hosted on the background service, which does. Reported, not failed.
 	const bashRes = await client.request({ type: "bash", command: "echo hello-from-smoke" }, 30_000);
-	check("bash command succeeds", bashRes.success && String(bashRes.data?.output ?? "").includes("hello-from-smoke"));
+	if (!bashRes.success && /daemon-attached RPC transport serves it/.test(bashRes.error ?? "")) {
+		console.log("SKIP  bash command — in-process RPC does not serve it on this agent build (the extension does not use it)");
+	} else {
+		check("bash command succeeds", bashRes.success && String(bashRes.data?.output ?? "").includes("hello-from-smoke"));
+	}
 
 	// --- parallel request correlation ---
 	const [s1, s2] = await Promise.all([client.request({ type: "get_state" }, 30_000), client.request({ type: "get_session_stats" }, 30_000)]);
@@ -130,6 +142,7 @@ try {
 	console.error("SMOKE ERROR:", err);
 } finally {
 	client.stop();
+	await agentHome.cleanup();
 	fs.rmSync(workdir, { recursive: true, force: true });
 }
 

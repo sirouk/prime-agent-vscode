@@ -187,7 +187,24 @@
           "default": [],
           "scope": "machine",
           "ignoreSync": true,
-          "description": "Extra CLI arguments appended after `--mode rpc` (e.g. [\"--provider\", \"chutes\"])."
+          "description": "Extra CLI arguments for the agent (e.g. [\"--provider\", \"chutes\"]), appended after `--mode rpc` when that mode is used. A session hosted by the background service applies the flags that describe a session (--provider, --model, --thinking, --system-prompt, --append-system-prompt, --skill, --prompt-template, --session-dir, --cwd, --daemon-socket) and reports the rest as ignored."
+        },
+        "primeAgent.transport": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "daemon",
+            "rpc"
+          ],
+          "enumDescriptions": [
+            "Host the session on the Prime Agent background service when the agent's own `--mode rpc` has none (Prime Agent 0.10 and later); otherwise use `--mode rpc`.",
+            "Always host the session on the background service, starting it if needed.",
+            "Always run `prime-agent --mode rpc` as a subprocess. On Prime Agent 0.10 and later that session runs in-process: it cannot spawn subagents, run schedules or heartbeats, message other agents, or run bash."
+          ],
+          "default": "auto",
+          "scope": "machine",
+          "ignoreSync": true,
+          "description": "How this window's session is carried. `auto` is right unless you are diagnosing a problem."
         },
         "primeAgent.model": {
           "type": "string",
@@ -224,8 +241,8 @@
     "typecheck": "tsc --noEmit",
     "package": "node esbuild.config.mjs --production && npx @vscode/vsce package --no-dependencies",
     "smoke": "node test/smoke.mjs",
-    "test": "node test/agent-locator.test.mjs && node test/activate.test.mjs && node test/chat-view-message.test.mjs && node test/session-controller-boundary.test.mjs && node test/attach-lifecycle.test.mjs && node test/session-actions.test.mjs && node test/webview.test.mjs && node test/transcript-window.test.mjs && node test/thread-diffs.test.mjs && node test/processes.test.mjs && node test/agent-jobs.test.mjs && node test/background-jobs.test.mjs && node test/export-md.test.mjs && node test/recent-sessions-tail.test.mjs && node test/roster-parity.test.mjs && node test/crosswire.test.mjs && node test/image-fit.test.mjs && node test/transport-regression.test.mjs && node test/owner-visibility.test.mjs && node test/file-links.test.mjs && node test/scroll-anchor.test.mjs && node test/scroll-resync.test.mjs && node test/scroll-tool-replay.test.mjs && node test/scroll-identity.test.mjs && node test/scroll-mount.test.mjs && node test/stable-rehydrate-state.test.mjs && node test/stable-rehydrate-final.test.mjs && node test/scroll-stream-stress.test.mjs && node test/live-tail-geometry.test.mjs && node test/live-tail-response-order.test.mjs && node test/provider-stream-lifecycle.test.mjs && node test/activity-layout.test.mjs && node test/activity-floating-controls.test.mjs && node test/working-status.test.mjs && node test/subagent-correlation.test.mjs && node test/subagent-grid.test.mjs && node test/large-paste-host.test.mjs && node test/large-paste.test.mjs && node test/webview-revision.test.mjs",
-    "test:live": "node esbuild.config.mjs && node test/extension-load.mjs && node test/daemon-parity.mjs --require-daemon && node test/owned-roster.mjs --require-daemon && node test/host-e2e.mjs && node test/smoke.mjs",
+    "test": "node test/agent-locator.test.mjs && node test/activate.test.mjs && node test/chat-view-message.test.mjs && node test/session-controller-boundary.test.mjs && node test/attach-lifecycle.test.mjs && node test/session-actions.test.mjs && node test/webview.test.mjs && node test/transcript-window.test.mjs && node test/thread-diffs.test.mjs && node test/processes.test.mjs && node test/agent-jobs.test.mjs && node test/background-jobs.test.mjs && node test/export-md.test.mjs && node test/recent-sessions-tail.test.mjs && node test/roster-parity.test.mjs && node test/crosswire.test.mjs && node test/image-fit.test.mjs && node test/transport-regression.test.mjs && node test/owner-visibility.test.mjs && node test/file-links.test.mjs && node test/scroll-anchor.test.mjs && node test/scroll-resync.test.mjs && node test/scroll-tool-replay.test.mjs && node test/scroll-identity.test.mjs && node test/scroll-mount.test.mjs && node test/stable-rehydrate-state.test.mjs && node test/stable-rehydrate-final.test.mjs && node test/scroll-stream-stress.test.mjs && node test/live-tail-geometry.test.mjs && node test/live-tail-response-order.test.mjs && node test/provider-stream-lifecycle.test.mjs && node test/activity-layout.test.mjs && node test/activity-floating-controls.test.mjs && node test/working-status.test.mjs && node test/subagent-correlation.test.mjs && node test/subagent-grid.test.mjs && node test/large-paste-host.test.mjs && node test/large-paste.test.mjs && node test/webview-revision.test.mjs && node test/session-config.test.mjs && node test/daemon-endpoint.test.mjs && node test/daemon-rpc-client.test.mjs && node test/webview-rust-rows.test.mjs && node test/controller-rust.test.mjs && node test/markdown.test.mjs",
+    "test:live": "node esbuild.config.mjs && node test/extension-load.mjs && node test/daemon-parity.mjs --require-daemon && node test/owned-roster.mjs --require-daemon && node test/daemon-hosted-live.mjs --require-daemon && node test/host-e2e.mjs && node test/smoke.mjs",
     "test:e2e": "node test/vscode-e2e.mjs",
     "test:shots": "node test/preview-shot.mjs",
     "driver": "node test/live-driver.mjs",

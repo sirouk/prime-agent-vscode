@@ -1095,18 +1095,27 @@ export class Composer {
 	}
 
 	private onKeyDown(event: KeyboardEvent): void {
+		// Enter that commits an IME candidate (Chinese, Japanese, Korean, …) arrives as a
+		// keydown flagged `isComposing` (keyCode 229 on older engines). Treating it as
+		// "send" posts a half-composed prompt, and the arrow keys that pick a candidate
+		// would walk the prompt history instead.
+		if (event.isComposing || event.keyCode === 229) return;
 		if (this.acKind) {
-			if (event.key === "ArrowDown") {
+			// Only a panel that has something to offer claims these keys. While a file
+			// search is still in flight the panel is open but empty, and swallowing Enter
+			// there meant a sentence ending in "@foo" could not be sent.
+			const hasItems = this.acItems.length > 0;
+			if (hasItems && event.key === "ArrowDown") {
 				event.preventDefault();
 				this.moveAutocomplete(1);
 				return;
 			}
-			if (event.key === "ArrowUp") {
+			if (hasItems && event.key === "ArrowUp") {
 				event.preventDefault();
 				this.moveAutocomplete(-1);
 				return;
 			}
-			if (event.key === "Enter" || event.key === "Tab") {
+			if (hasItems && (event.key === "Enter" || event.key === "Tab")) {
 				event.preventDefault();
 				this.applyAutocomplete();
 				return;
@@ -1396,11 +1405,12 @@ export class Composer {
 	}
 
 	private onDrop(event: DragEvent): void {
-		event.preventDefault();
 		const files = event.dataTransfer?.files;
-		if (!files) return;
-		const imageFiles = Array.from(files).filter((f) => SUPPORTED_IMAGE_MIME_TYPES.has(f.type));
+		const imageFiles = files ? Array.from(files).filter((f) => SUPPORTED_IMAGE_MIME_TYPES.has(f.type)) : [];
+		// Claim the drop only when it carries an image to attach. Cancelling every drop
+		// made dragging selected text into the composer, or moving text within it, do nothing.
 		if (imageFiles.length === 0) return;
+		event.preventDefault();
 		this.whenVisionConfirmed(() => this.readImageFiles(imageFiles));
 	}
 

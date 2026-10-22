@@ -76,11 +76,14 @@ export function parseFileLink(raw: string): { path: string; startLine?: number; 
 	} else if (URL_SCHEME.test(target) && !WINDOWS_DRIVE.test(target)) {
 		return null;
 	}
-	if (target.startsWith("//") || target.startsWith("#") || target === "") return null;
+	// `//host/x` and `\\host\share\x` are network paths, not workspace files.
+	if (target.startsWith("//") || target.startsWith("\\\\") || target.startsWith("#") || target === "") return null;
 	let startLine: number | undefined;
 	let endLine: number | undefined;
 	const fragment = /#L(\d+)(?:-L?(\d+))?$/.exec(target);
-	const suffix = fragment ? null : /:(\d+)(?:-(\d+))?$/.exec(target);
+	// `src/a.ts:12`, `src/a.ts:10-20`, and `src/a.ts:12:5` (the column is dropped: a
+	// greedy `:5` as the LINE left `src/a.ts:12` as the path, which does not exist).
+	const suffix = fragment ? null : /:(\d+)(?:-(\d+)|:\d+)?$/.exec(target);
 	const lines = fragment ?? suffix;
 	if (lines) {
 		target = target.slice(0, lines.index);
@@ -88,7 +91,8 @@ export function parseFileLink(raw: string): { path: string; startLine?: number; 
 		if (lines[2] !== undefined) endLine = Number(lines[2]);
 		if (endLine !== undefined && endLine < startLine) endLine = undefined;
 	}
-	target = target.split("?")[0];
+	// A heading anchor (`docs/setup.md#install`) names a place inside the file.
+	target = target.split("?")[0].split("#")[0];
 	try {
 		target = decodeURIComponent(target);
 	} catch {
@@ -108,8 +112,15 @@ function renderInline(text: string, parent: HTMLElement, links: LinkHandlers, de
 	// containing bare "[" froze the panel (measured: 1.9 s at 40k occurrences,
 	// 7.4 s at 80k; now 20 ms / 64 ms). The caps are far above any real inline
 	// span; anything longer simply renders as the literal text it already is.
+	//
+	// Delimiter boundaries (without them prose full of identifiers is mangled):
+	//  - `_` / `__` never open inside a word and never close before one, as in
+	//    CommonMark: `tests/test_foo_bar.py` and `MAX_RETRY_COUNT` stay literal.
+	//  - a single `*` must not touch whitespace or another `*` on its inner side nor a
+	//    word character on its outer side, so `src/**/*.ts` and `2*3*4` stay literal.
+	// Lookbehind keeps the capture-group numbering the branches below rely on.
 	const pattern =
-		/(`+)([^`\n]|`(?!`)){0,1000}?\1|\*\*([^*\n]{1,1000})\*\*|__([^_\n]{1,1000})__|\*([^*\n]{1,1000})\*|_([^_\n]{1,1000})_|\[([^\]\n]{1,500})\]\(([^)\s\n]{1,2000})\)/g;
+		/(`+)([^`\n]|`(?!`)){0,1000}?\1|\*\*([^*\n]{1,1000})\*\*|(?<!\w)__(?!\s)([^_\n]{1,1000})__(?!\w)|(?<![\w*])\*(?![\s*])([^*\n]{1,1000})(?<![\s*])\*(?![\w*])|(?<!\w)_(?!\s)([^_\n]{1,1000})(?<!\s)_(?!\w)|\[([^\]\n]{1,500})\]\(([^)\s\n]{1,2000})\)/g;
 	let last = 0;
 	let match: RegExpExecArray | null;
 	while ((match = pattern.exec(text)) !== null) {
@@ -177,6 +188,8 @@ function emphasisContent(node: HTMLElement, text: string, links: LinkHandlers, d
 interface ListLine {
 	indent: number;
 	ordered: boolean;
+	/** The number an ordered item was written with, so a list resumed after a code block keeps counting. */
+	number?: number;
 	text: string;
 }
 
@@ -188,13 +201,16 @@ export function renderMarkdown(markdown: string, container: HTMLElement, links: 
 		const line = lines[i];
 
 		// fenced code block
-		const fence = line.match(/^```([^`]*)$/);
+		const fence = line.match(/^(\s*)```([^`]*)$/);
 		if (fence) {
-			const lang = fence[1].trim();
+			// An agent indents a fence under a list item ("1. Install:" / "   ```bash").
+			// Requiring column 0 turned the fence into literal backticks.
+			const indent = fence[1].length;
+			const lang = fence[2].trim();
 			const body: string[] = [];
 			i++;
-			while (i < lines.length && !/^```\s*$/.test(lines[i])) {
-				body.push(lines[i]);
+			while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
+				body.push(lines[i].replace(new RegExp(`^\\s{0,${indent}}`), ""));
 				i++;
 			}
 			i++; // skip closing fence
@@ -290,10 +306,19 @@ export function renderMarkdown(markdown: string, container: HTMLElement, links: 
 		const listMatch = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
 		if (listMatch) {
 			const items: ListLine[] = [];
+			const itemRe = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
 			while (i < lines.length) {
-				const m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
-				if (!m) break;
-				items.push({ indent: m[1].length, ordered: /^\d/.test(m[2]), text: m[3] });
+				const m = lines[i].match(itemRe);
+				if (!m) {
+					// A single blank line between items is spacing, not the end of the list;
+					// ending it there restarted every item as "1.".
+					if (lines[i].trim() === "" && i + 1 < lines.length && itemRe.test(lines[i + 1])) {
+						i++;
+						continue;
+					}
+					break;
+				}
+				items.push({ indent: m[1].length, ordered: /^\d/.test(m[2]), ...(/^\d/.test(m[2]) ? { number: parseInt(m[2], 10) } : {}), text: m[3] });
 				i++;
 			}
 			container.appendChild(buildList(items, links));
@@ -323,7 +348,7 @@ export function renderMarkdown(markdown: string, container: HTMLElement, links: 
 function isBlockStart(lines: string[], i: number): boolean {
 	const line = lines[i];
 	return (
-		/^```/.test(line) ||
+		/^\s*```/.test(line) ||
 		/^#{1,4}\s/.test(line) ||
 		/^\s*>/.test(line) ||
 		/^(\s*)([-*+]|\d+[.)])\s+/.test(line) ||
@@ -340,6 +365,7 @@ function splitTableRow(line: string): string[] {
 function buildList(items: ListLine[], links: LinkHandlers): HTMLElement {
 	const rootIsOrdered = items[0]?.ordered ?? false;
 	const root = el(rootIsOrdered ? "ol" : "ul");
+	if (rootIsOrdered && items[0]?.number !== undefined && items[0].number !== 1) (root as HTMLOListElement).start = items[0].number;
 	let currentList = root;
 	const stack: HTMLElement[] = [root];
 	for (const item of items) {

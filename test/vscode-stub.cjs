@@ -10,6 +10,11 @@ const quickPickBehavior = { pick: undefined };
 const vscodeStub = {
 	window: {
 		createOutputChannel: () => ({ append: () => {}, appendLine: () => {}, dispose: () => {} }),
+		createTerminal: (options) => {
+			vscodeStub.window.terminalsCreated.push(options);
+			return { show: () => {}, sendText: () => {}, dispose: () => {} };
+		},
+		terminalsCreated: [],
 		showInformationMessage: async () => undefined,
 		showWarningMessage: async () => undefined,
 		showErrorMessage: async () => undefined,

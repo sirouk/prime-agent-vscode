@@ -162,7 +162,9 @@ try {
  await run("same-session snapshot retains manually loaded earlier window and reading anchor",async page=>{
   await seed(page,history(360));
   assert.equal(await page.locator(".messages > .row").count(),150,"initial population remains windowed");
-  await page.locator(".earlier-load").click();
+  // A script click, not a pointer click: Playwright scrolls the button into view first, and the
+  // scroll event that produces can land after the click and auto-load a second batch.
+  await page.$eval(".earlier-load",button=>button.click());
   await frames(page);
   const before=await park(page,800);
   assert.equal(before.rows,250,"loaded 100 more messages");

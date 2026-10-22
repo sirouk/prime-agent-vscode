@@ -109,7 +109,17 @@ export type AgentEvent =
 	| { type: "agent_start" }
 	| { type: "agent_end"; messages: AgentMessage[] }
 	| { type: "turn_start" }
-	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+	| {
+			type: "turn_end";
+			message: AgentMessage;
+			toolResults: ToolResultMessage[];
+			/**
+			 * Why a turn ended before the model produced anything (Rust daemon): no
+			 * credentials for the chosen provider, an unknown model. There is no
+			 * assistant message to carry it, so this is the only place the reason exists.
+			 */
+			error?: string;
+	  }
 	| { type: "message_start"; message: AgentMessage }
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
@@ -122,6 +132,7 @@ export type AgentEvent =
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage?: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "session_action_update"; actions: SessionActionSnapshot }
+	| { type: "goal_update"; goal: GoalSnapshot }
 	| { type: "thinking_level_changed"; level: string }
 	| { type: "session_info_changed"; name?: string };
 
@@ -142,9 +153,36 @@ export interface RpcModel {
 	thinkingLevelMap?: Record<string, string | null> | null;
 }
 
+/**
+ * A persistent goal (`/goal`), as the agent reports it in session state and in
+ * `goal_update` events. While one is active the agent keeps taking turns on its
+ * own, which an operator watching the panel needs to be told.
+ */
+export interface GoalSnapshot {
+	active?: boolean;
+	/** "idle" | "active" | "paused" | "budget_limited" | "complete" | "error" */
+	status?: string;
+	objective?: string;
+	tokensUsed?: number;
+	tokenBudget?: number;
+	continuationsUsed?: number;
+	lastError?: string;
+}
+
 export interface RpcSessionState {
+	/** The session's persistent goal, when the agent reports one. */
+	goal?: GoalSnapshot | null;
 	model?: RpcModel | null;
 	thinkingLevel?: string;
+	/**
+	 * The levels this session's model accepts, as the agent itself computed them.
+	 * Present on daemon-hosted sessions; the Rust build's model objects carry no
+	 * `thinkingLevelMap` to derive them from, so this is the only honest source
+	 * there. Absent on `--mode rpc`, where the map is the fallback.
+	 */
+	availableThinkingLevels?: string[];
+	/** Context-window usage as the agent measures it (daemon-hosted sessions). */
+	contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null };
 	isStreaming?: boolean;
 	isCompacting?: boolean;
 	steeringMode?: string;
@@ -374,6 +412,8 @@ export type WebviewToHost =
 	| { type: "openExternal"; url: string };
 
 export interface StatusSnapshot {
+	/** The session's persistent goal, when it has one worth saying out loud. */
+	goal?: GoalSnapshot | null;
 	connected: boolean;
 	streaming: boolean;
 	compacting: boolean;
@@ -481,7 +521,15 @@ export type HostToWebview =
 	| { type: "textAttachmentChunkAccepted"; requestId: number; index: number }
 	| { type: "insertSelection"; selection: SelectionAttachment }
 	| { type: "insertMention"; path: string }
-	| { type: "changedFiles"; files: string[] }
+	| {
+			type: "changedFiles";
+			files: string[];
+			/**
+			 * False when the agent publishes no diffs for its own edits, so the list
+			 * cannot be "other" files: it includes the agent's own work. Default true.
+			 */
+			attributed?: boolean;
+	  }
 	| { type: "observedSession"; sessionId: string; messages: AgentMessage[] }
 	| { type: "observedEvent"; sessionId: string; event: AgentEvent }
 	| { type: "observedClosed"; sessionId: string }

@@ -10,6 +10,7 @@ import { once } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isolatedAgent, realTempDir, removeDir } from "./isolated-agent.mjs";
 
 const require = createRequire(process.cwd() + "/");
 require("./test/vscode-stub.cjs");
@@ -17,17 +18,22 @@ require("./test/vscode-stub.cjs");
 const { SessionController } = require("./dist/controller.cjs");
 const { vscodeStub } = require("./test/vscode-stub.cjs");
 
-const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-host-e2e-"));
+const workdir = realTempDir("prime-agent-host-e2e-");
+// Everything the agent writes (settings, worker descriptors, logs, leases) lands
+// in a throwaway directory, never in the operator's real ~/.prime/agent.
+const agentHome = isolatedAgent("prime-agent-host-e2e-agent-");
+agentHome.apply();
 // The operator may have a live daemon from another CLI version. Exercise the
 // extension against a private socket so this test neither prompts to stop nor
 // touches that unrelated service. HOST_E2E_DAEMON_SOCKET remains an escape
 // hatch for diagnosing an externally managed daemon.
 const daemonSocket = process.env.HOST_E2E_DAEMON_SOCKET ?? path.join(workdir, "daemon.sock");
-// The private daemon is started BY the agent we launch, never by this harness.
-// RPC mode owns the daemon at the socket it is given: handed one that some other
-// process already put there, it refuses to start at all ("a background service
-// from a different Prime Agent version is running"), which is exactly what a
-// pre-spawned `--mode daemon` here looks like to it.
+// The private daemon is started BY the code under test, never by this harness:
+// the extension itself for a Rust agent (whose `--mode rpc` is in-process), the
+// agent subprocess for the TypeScript build. Handed a socket that some other
+// process already put there, the TypeScript agent refuses to start at all ("a
+// background service from a different Prime Agent version is running"), which
+// is exactly what a pre-spawned `--mode daemon` here looks like to it.
 let daemonProcess = null;
 process.env.PRIME_AGENT_DAEMON_SOCKET = daemonSocket;
 // This gate verifies host wiring, not the operator's default-model provider.
@@ -76,6 +82,16 @@ try {
 	// half of this test has nothing to attach to until it exists.
 	await waitFor(() => fs.existsSync(daemonSocket), 30_000, `private daemon socket at ${daemonSocket}`);
 	check("snapshot connected", snapshot.status?.connected === true, snapshot.status?.modelLabel ?? "");
+	// The first thread, remembered so it can be resumed from History after a new chat.
+	const firstThread = { file: controller.state?.sessionFile, id: controller.state?.sessionId };
+	// Which transport carried this session is the single most important fact about
+	// a run: a Rust agent must be service-hosted (its in-process RPC cannot spawn
+	// subagents), and a TypeScript agent keeps its own daemon-backed RPC.
+	const transport = controller.client?.kind === "daemon" ? "daemon" : "rpc";
+	console.log(`  transport: ${transport}`);
+	if (process.env.HOST_E2E_EXPECT_TRANSPORT) {
+		check(`session runs on the ${process.env.HOST_E2E_EXPECT_TRANSPORT} transport`, transport === process.env.HOST_E2E_EXPECT_TRANSPORT, transport);
+	}
 	// Against the real agent: the level list must come from the model's own
 	// thinkingLevelMap, not a fixed six. Kimi K3 TEE, for one, supports only
 	// "max" — offering "xhigh" there is a level clampThinkingLevel would swap.
@@ -108,6 +124,28 @@ try {
 		.map((p) => p.text)
 		.join("\n");
 	check("transcript contains PONG reply", /pong/i.test(lastText), lastText.slice(0, 60));
+
+	// -----------------------------------------------------------------
+	// A subagent spawned from THIS window's session reaches the strip. This is
+	// the capability an in-process agent cannot offer at all; it is only asserted
+	// where the session can have children (daemon-backed).
+	// -----------------------------------------------------------------
+	if (transport === "daemon") {
+		const before = received.length;
+		await controller.prompt({
+			text: "Run this in python_repl exactly, then reply DONE: h = await rlm.spawn('Reply with the single word hi', name='e2e-child'); r = await h",
+			images: [],
+			selections: [],
+			streamingBehavior: "steer",
+		});
+		const strip = await waitFor(
+			() => received.slice(before).find((m) => m.type === "sessionChildren" && (m.children ?? []).some((c) => c.name === "e2e-child")),
+			120_000,
+			"the spawned subagent in the strip",
+		).catch(() => null);
+		check("a subagent spawned by this window's session appears in the strip", strip != null, strip ? "e2e-child" : "never listed");
+		await waitFor(() => !controller.effectiveStreaming(), 120_000, "the spawning turn to finish").catch(() => {});
+	}
 
 	// -----------------------------------------------------------------
 	// Daemon-attached live session: a third-party client writes; the
@@ -234,6 +272,27 @@ try {
 	}, 30_000, "post-new-session snapshot");
 	check("new session snapshot has empty transcript", (snap3?.messages ?? []).length === 0);
 
+	// -----------------------------------------------------------------
+	// The thread we just left is a saved session now. It must be listed, and
+	// resuming it must put its transcript back — by giving it a worker, not by
+	// attaching to the UUID the daemon files a saved session under.
+	// -----------------------------------------------------------------
+	if (firstThread.file && firstThread.id) {
+		let listedRow;
+		for (let i = 0; i < 40 && !listedRow; i += 1) {
+			listedRow = (await controller.collectHistory()).find((row) => row.id === firstThread.id);
+			if (!listedRow) await sleep(750);
+		}
+		check("the thread left behind is listed in History", !!listedRow, listedRow ? listedRow.status : "never listed");
+		if (listedRow) {
+			received.length = 0;
+			await controller.switchSession(firstThread.file, firstThread.id);
+			await waitFor(() => controller.attached?.sessionId === firstThread.id || controller.attached?.sessionPath === firstThread.file, 30_000, "the resumed thread to attach").catch(() => {});
+			const resumedText = JSON.stringify(controller.cachedMessages ?? []);
+			check("resuming it attaches and restores the transcript", !!controller.attached && /pong/i.test(resumedText), controller.attached ? `attached ${controller.attached.activeSessionId}` : (received.filter((m) => m.type === "notice").map((m) => m.text).join(" | ") || "not attached"));
+		}
+	}
+
 	check("no protocol error notices", !received.some((m) => m.type === "notice" && m.level === "error"), 
 		received.filter((m) => m.type === "notice").map((m) => m.text).slice(0, 2).join(" | "));
 } finally {
@@ -286,7 +345,10 @@ try {
 			// pgrep exits non-zero when nothing matches: nothing to clean up.
 		}
 	}
-	fs.rmSync(workdir, { recursive: true, force: true });
+	// Workers first: they outlive the daemon and write a kernel snapshot into both
+	// directories on their way out.
+	await agentHome.cleanup();
+	await removeDir(workdir);
 }
 
 console.log(failed === 0 ? "\nPASS host e2e" : `\n${failed} host e2e checks FAILED`);

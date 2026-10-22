@@ -1,16 +1,18 @@
 /**
  * Minimal client for the prime-agent daemon protocol (prime-agent.daemon v7).
  *
- * The RPC-mode subprocess owns its session (client-owned worker) — it cannot
- * attach to an already-live terminal session ("Session is already active").
  * The terminal client is only ever a VIEW of a daemon-brokered session: any
  * number of terminals attach to and steer the same resident session. To get
- * the same parity from VS Code we speak the daemon protocol directly for the
- * resident-session cases: attach, view, prompt, abort, compact, detach.
+ * the same parity from VS Code we speak the daemon protocol directly: attach,
+ * view, prompt, abort, compact, detach.
  *
- * Socket: unix socket <tmp>/prime-agent-<uid>/daemon.sock (Windows: named
- * pipe), LF-delimited JSON lines. The daemon is guaranteed to exist while our
- * own RPC session runs (RPC mode itself is a daemon client and autostarts it).
+ * Socket: unix socket (Windows: named pipe), LF-delimited JSON lines. Where it
+ * is depends on the install — the launcher pins `PRIME_AGENT_DAEMON_SOCKET` for
+ * the agent it starts — so callers resolve it through daemon-endpoint.ts and
+ * hand it in as `socketOverride`; the computed default below is only the last
+ * resort. A TypeScript-build agent in RPC mode is itself a daemon client and
+ * autostarts the daemon; the Rust build's `--mode rpc` is in-process, so there
+ * the extension starts (and owns its session on) the daemon itself.
  */
 
 import { randomUUID } from "node:crypto";
@@ -20,7 +22,7 @@ import * as path from "node:path";
 
 import { MAX_JSONL_FRAME_BYTES, MAX_JSONL_FRAME_LABEL } from "./wire-limits.js";
 
-export { agentDirForSessionFile, defaultAgentDir, resolveOwnerClientId } from "./daemon-owner.js";
+export { agentDirForSessionFile, defaultAgentDir, resolveOwnerClientId, resolveWorkerDescriptor } from "./daemon-owner.js";
 export { MAX_JSONL_FRAME_BYTES, MAX_JSONL_FRAME_LABEL } from "./wire-limits.js";
 export type { OwnerLookup, WorkerDescriptorRef } from "./daemon-owner.js";
 
@@ -138,6 +140,8 @@ export interface AttachSnapshot {
 }
 
 export interface AttachResult {
+	/** The handle the daemon answered with: the current one, when the one asked for was superseded. */
+	activeSessionId?: string;
 	snapshot?: AttachSnapshot;
 	replay?: unknown;
 }
@@ -156,6 +160,16 @@ export type DaemonServerMessage = Record<string, unknown> & {
 };
 
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
+
+/**
+ * The daemon answered a command with `success: false`. Distinct from a dead or
+ * silent transport (socket closed, timeout, not connected), which is a plain
+ * Error: a refused command is an answer, a dead socket is not.
+ */
+export class DaemonCommandError extends Error {
+	code?: string;
+	activeSessionId?: string;
+}
 
 export class DaemonSidecar {
 	private socket: net.Socket | null = null;
@@ -224,7 +238,14 @@ export class DaemonSidecar {
 		return nameOk && versionOk;
 	}
 
+	/**
+	 * The socket this connection must use, when the host has already resolved it
+	 * (see daemon-endpoint.ts). Takes precedence over everything below.
+	 */
+	socketOverride: string | null = null;
+
 	socketPath(): string {
+		if (this.socketOverride) return this.socketOverride;
 		// A private daemon socket lets integration tests (and isolated operator
 		// setups) avoid taking ownership of an unrelated default background daemon.
 		const configured = process.env.PRIME_AGENT_DAEMON_SOCKET?.trim();
@@ -439,7 +460,7 @@ export class DaemonSidecar {
 						typeof (message as { error?: unknown }).error === "string"
 							? ((message as unknown as { error: string }).error)
 							: (errorInfo?.message ?? "daemon error");
-					const error = new Error(detail) as Error & { code?: string; activeSessionId?: string };
+					const error = new DaemonCommandError(detail);
 					error.code = errorInfo?.code;
 					error.activeSessionId = errorInfo?.activeSessionId;
 					pending.reject(error);
@@ -514,11 +535,18 @@ export class DaemonSidecar {
 		}
 	}
 
-	async list(all = false, options: { includeClientOwned?: boolean } = {}): Promise<SessionSummaryRef[]> {
+	async list(all = false, options: { includeClientOwned?: boolean; sessionDir?: string } = {}): Promise<SessionSummaryRef[]> {
 		// `data` is optional in the envelope: a success with no payload must read as
 		// "no rows", not as a TypeError thrown from inside a caller's try block.
+		// `sessionDir`: the daemon's saved-session scan covers only its default
+		// directory unless told where this operator keeps sessions (`--session-dir`).
 		const data = await this.request<{ sessions?: SessionSummaryRef[] } | undefined>(
-			{ type: "list", all, ...(options.includeClientOwned ? { includeClientOwned: true } : {}) },
+			{
+				type: "list",
+				all,
+				...(options.includeClientOwned ? { includeClientOwned: true } : {}),
+				...(options.sessionDir ? { sessionDir: options.sessionDir } : {}),
+			},
 			20_000,
 		);
 		return data?.sessions ?? [];
@@ -531,16 +559,19 @@ export class DaemonSidecar {
 	 * streams progress rows while it works — those arrive on onEvent and are
 	 * ignored; the response carries the whole list.
 	 */
-	async listSavedSessions(cwd: string, scope: "current" | "all" = "all"): Promise<SavedSessionInfo[]> {
-		const data = await this.request<{ sessions?: SavedSessionInfo[] } | undefined>({ type: "list_saved_sessions", cwd, scope }, 60_000);
+	async listSavedSessions(cwd: string, scope: "current" | "all" = "all", sessionDir?: string): Promise<SavedSessionInfo[]> {
+		const data = await this.request<{ sessions?: SavedSessionInfo[] } | undefined>(
+			{ type: "list_saved_sessions", cwd, scope, ...(sessionDir ? { sessionDir } : {}) },
+			60_000,
+		);
 		return data?.sessions ?? [];
 	}
 
-	async attach(activeSessionId: string): Promise<AttachResult> {
+	async attach(activeSessionId: string, timeoutMs = 30_000): Promise<AttachResult> {
 		return (
 			(await this.request<AttachResult | undefined>(
 				{ type: "attach", activeSessionId, capabilities: ["attach_snapshot", "event_sequence", "slim_attach"] },
-				30_000,
+				timeoutMs,
 			)) ?? {}
 		);
 	}
@@ -592,8 +623,24 @@ export class DaemonSidecar {
 		return data?.messages ?? [];
 	}
 
+	/**
+	 * The session's state as the host consumes it. The daemon's `get_state` answers
+	 * with the roster summary (model, thinking level, streaming flags, file); the
+	 * fuller picture — the thinking levels the model accepts, queue modes,
+	 * auto-compaction, goal, context usage — is `get_connection_state`. Both, merged,
+	 * with the fuller one winning where they overlap. A daemon that predates the
+	 * second command answers with the summary alone.
+	 */
 	async getState(activeSessionId: string): Promise<Record<string, unknown>> {
-		return (await this.request<Record<string, unknown> | undefined>({ type: "get_state", activeSessionId }, 20_000)) ?? {};
+		const [summary, connection] = await Promise.all([
+			this.request<Record<string, unknown> | undefined>({ type: "get_state", activeSessionId }, 20_000),
+			this.request<Record<string, unknown> | undefined>({ type: "get_connection_state", activeSessionId }, 20_000).catch((error: unknown) => {
+				// A refused command is an answer (older daemon); a dead socket is not.
+				if (error instanceof DaemonCommandError) return undefined;
+				throw error;
+			}),
+		]);
+		return { ...(summary ?? {}), ...(connection ?? {}) };
 	}
 
 	async getSessionStats(activeSessionId: string): Promise<Record<string, unknown>> {
@@ -657,8 +704,12 @@ export class DaemonSidecar {
  * process. It stays resident until someone stops it, exactly like a session
  * the daemon brokered for a terminal.
  */
-export async function promoteClientOwnedSession(ownerClientId: string, activeSessionId: string): Promise<void> {
+export async function promoteClientOwnedSession(ownerClientId: string, activeSessionId: string, socketPath?: string): Promise<void> {
 	const owner = new DaemonSidecar();
+	// Without the resolved socket this fell back to the computed default, which on a
+	// launcher install is not where the daemon is: the promotion failed, was only logged,
+	// and the owner closing its window then killed the session under the viewer.
+	if (socketPath) owner.socketOverride = socketPath;
 	owner.impersonateClientId = ownerClientId;
 	// The owner's own connections already spent `side-<n>` ids under this
 	// identity; reusing one would make the daemon replay an old answer and skip

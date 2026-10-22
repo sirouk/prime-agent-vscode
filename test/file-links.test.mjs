@@ -75,6 +75,18 @@ try {
 	const noWorkspace = { ...deps(["/abs/x.md"]), workspaceRoot: undefined };
 	r = await resolveLinkedFile("rel/x.md", noWorkspace);
 	check("a relative path with no workspace is missing, not resolved against the process cwd", r.kind === "missing", JSON.stringify(r));
+
+	// A network share is never probed on Windows, even though a file of that name exists in the workspace.
+	const platform = Object.getOwnPropertyDescriptor(process, "platform");
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try {
+		const probed = [];
+		const watching = { ...deps([`${WS}/share.md`]), realpath: async (file) => (probed.push(file), file), findByBasename: async () => [`${WS}/share.md`] };
+		r = await resolveLinkedFile("\\\\evil-host\\share\\share.md", watching);
+		check("a UNC share is reported missing without being resolved or searched for", r.kind === "missing" && probed.length === 0, JSON.stringify({ r, probed }));
+	} finally {
+		Object.defineProperty(process, "platform", platform);
+	}
 } finally {
 	rmSync(dir, { recursive: true, force: true });
 }

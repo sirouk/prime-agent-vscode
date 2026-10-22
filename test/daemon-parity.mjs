@@ -38,6 +38,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { realTempDir } from "./isolated-agent.mjs";
+import { startPrivateDaemon } from "./private-daemon.mjs";
 
 const PROMPT_TEXT = "Reply with exactly: PARITY-OK";
 const EXPECTED_TEXT = "PARITY-OK";
@@ -62,7 +64,7 @@ function skip(reason) {
 	// test:live) PA_REQUIRE_DAEMON=1 turns "no daemon" into a red run instead.
 	if (process.env.PA_REQUIRE_DAEMON === "1" || process.argv.includes("--require-daemon")) {
 		console.log(`FAIL  daemon-parity SKIPPED — C9 (dual client / attach) UNVERIFIED: ${reason}`);
-		console.log("      Start the daemon (`prime-agent --mode daemon`) or unset PA_REQUIRE_DAEMON to allow the skip.");
+		console.log("      Install the Prime Agent CLI (this gate starts its own private daemon) or unset PA_REQUIRE_DAEMON to allow the skip.");
 		process.exit(1);
 	}
 	console.log(`SKIP  daemon-parity — ${reason} (C9 UNVERIFIED; set PA_REQUIRE_DAEMON=1 to make this fatal)`);
@@ -96,10 +98,12 @@ function assistantText(messages) {
 	return messages.filter((m) => m && m.role === "assistant").map(messageText).join("\n");
 }
 
-// mkdtemp must not crash a broken TMPDIR before we can print a clean SKIP.
-const tmpBase = fs.existsSync(os.tmpdir()) ? os.tmpdir() : "/tmp";
-const workRoot = fs.mkdtempSync(path.join(tmpBase, "daemon-parity-"));
+// Canonical (`/private/var`, not `/var`) so the daemon's session lease agrees with
+// the path it is handed. A broken TMPDIR fails here with a clear message.
+const workRoot = realTempDir("daemon-parity-");
 let sidecar = null;
+/** The daemon this gate runs against: its own, never whatever the operator has running. */
+let privateDaemon = null;
 /** ids of sessions THIS test created — the only ones we may touch. */
 const ownIds = new Set();
 let cleaned = false;
@@ -116,6 +120,7 @@ async function cleanup() {
 	cleaned = true;
 	await killOwnSessions();
 	try { sidecar?.dispose(); } catch { /* ignore */ }
+	await privateDaemon?.stop();
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		try { fs.rmSync(workRoot, { recursive: true, force: true }); break; }
 		catch { await sleep(400); }
@@ -239,6 +244,11 @@ try {
 	const { DaemonSidecar } = require(outFile);
 	check("sidecar bundles from src/daemon-sidecar.ts", typeof DaemonSidecar === "function");
 
+	try {
+		privateDaemon = await startPrivateDaemon();
+	} catch (error) {
+		skip(`could not start a private daemon: ${error instanceof Error ? error.message : String(error)}`);
+	}
 	sidecar = new DaemonSidecar();
 	sidecar.onEvent = journalEvent;
 

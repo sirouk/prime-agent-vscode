@@ -34,12 +34,36 @@ interface PendingRequest {
 	timer: NodeJS.Timeout;
 }
 
-interface LaunchSpec {
+export interface LaunchSpec {
 	command: string;
 	args: string[];
+	/**
+	 * Set when the line was composed for `cmd.exe /s /c "..."`: Node must pass it
+	 * through untouched, or it re-quotes the already-quoted line and cmd.exe cannot
+	 * parse it.
+	 */
+	windowsVerbatimArguments?: boolean;
 }
 
 
+
+/**
+ * Node cannot directly spawn Windows .cmd/.bat shims. Route those through
+ * cmd.exe with a single quoted command line, while rejecting the shell
+ * metacharacters that would make a machine setting execute a second command.
+ * Every place the extension runs the agent CLI goes through here.
+ */
+export function launchSpec(command: string, args: string[]): LaunchSpec {
+	if (process.platform !== "win32" || !/\.(?:cmd|bat)$/i.test(command)) return { command, args };
+	const unsafe = /[\r\n%!?^&|<>()"]/;
+	if ([command, ...args].some((value) => unsafe.test(value))) {
+		throw new Error("Windows .cmd/.bat launch arguments cannot contain cmd.exe metacharacters; configure an executable command instead");
+	}
+	const quote = (value: string): string => `"${value}"`;
+	const commandLine = [quote(command), ...args.map(quote)].join(" ");
+	const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
+	return { command: comspec, args: ["/d", "/s", "/c", `"${commandLine}"`], windowsVerbatimArguments: true };
+}
 
 export interface RpcReply {
 	command?: string;
@@ -80,13 +104,14 @@ export class RpcClient extends EventEmitter {
 		if (this.process) return;
 		const command = this.resolveCommand(this.options.command ?? "prime-agent");
 		const args = ["--mode", "rpc", ...(this.options.args ?? [])];
-		const launch = this.launchSpec(command, args);
+		const launch = launchSpec(command, args);
 		this._stderr = "";
 		// A stopped child can emit its final close/error event after a replacement
 		// has already started. Keep every handler bound to the child that created it
 		// so an old process cannot take the new transport offline.
 		this.buffer = "";
 		const proc = spawn(launch.command, launch.args, {
+			windowsVerbatimArguments: launch.windowsVerbatimArguments,
 			cwd: this.options.cwd,
 			// This flag makes Electron applications (including a configured
 			// prime-agent wrapper) run as Node, not as their normal binary. It can
@@ -151,23 +176,6 @@ export class RpcClient extends EventEmitter {
 			return command;
 		}
 		return searchDirs(command, splitPath(process.env.PATH)) ?? command;
-	}
-
-	/**
-	 * Node cannot directly spawn Windows .cmd/.bat shims. Route those through
-	 * cmd.exe with a single quoted command line, while rejecting the shell
-	 * metacharacters that would make a machine setting execute a second command.
-	 */
-	private launchSpec(command: string, args: string[]): LaunchSpec {
-		if (process.platform !== "win32" || !/\.(?:cmd|bat)$/i.test(command)) return { command, args };
-		const unsafe = /[\r\n%!?^&|<>()"]/;
-		if ([command, ...args].some((value) => unsafe.test(value))) {
-			throw new Error("Windows .cmd/.bat launch arguments cannot contain cmd.exe metacharacters; configure an executable command instead");
-		}
-		const quote = (value: string): string => `"${value}"`;
-		const commandLine = [quote(command), ...args.map(quote)].join(" ");
-		const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
-		return { command: comspec, args: ["/d", "/s", "/c", `"${commandLine}"`] };
 	}
 
 	private onStdout(chunk: string): void {

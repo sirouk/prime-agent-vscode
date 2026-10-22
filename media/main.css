@@ -2807,6 +2807,32 @@ body.vscode-light pre.term {
 	white-space: pre-wrap;
 	word-break: break-word;
 }
+
+/* A long model-facing note folds behind its kind and first line. */
+details.custom-note-fold > summary {
+	cursor: pointer;
+	list-style: none;
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+	min-width: 0;
+}
+details.custom-note-fold > summary::-webkit-details-marker { display: none; }
+details.custom-note-fold > summary::before {
+	content: "▸";
+	color: var(--pa-faint);
+	flex: none;
+}
+details.custom-note-fold[open] > summary::before { content: "▾"; }
+details.custom-note-fold > summary .custom-note-kind { margin-bottom: 0; flex: none; }
+.custom-note-first {
+	color: var(--pa-dim);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+}
+details.custom-note-fold[open] > .custom-note-body { margin-top: 4px; }
 /* ------- harness refinement card ("Harness refined", parity with the CLI) ------- */
 /* Mirrors the CLI's dedicated render of customType "refinement_outcome": accent
    headline, dim summary, per-edit ledger. Tone classes mirror the CLI's failure

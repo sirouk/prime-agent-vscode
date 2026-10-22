@@ -93,7 +93,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 }
 
-export function deactivate(): void {
-	controller?.dispose();
+export function deactivate(): Promise<void> | void {
+	const closing = controller;
 	controller = null;
+	closing?.dispose();
+	// VS Code waits briefly for a returned promise: long enough for the kill of a
+	// service-hosted session to reach the daemon instead of dying with the process.
+	return closing?.whenShutDown();
 }

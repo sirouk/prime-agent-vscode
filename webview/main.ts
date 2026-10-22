@@ -996,6 +996,19 @@ function workingSubagentCount(): number {
  * is still a fresh prompt — but reading "live" beside three working subagents
  * says the run died when it did not.
  */
+/** The header's word for a goal that is in play, or null when there is nothing to say. */
+function goalLane(goal: StatusSnapshot["goal"]): { text: string; objective?: string } | null {
+	if (!goal) return null;
+	const words: Record<string, string> = {
+		active: "goal active",
+		paused: "goal paused",
+		budget_limited: "goal budget reached",
+		error: "goal error",
+	};
+	const text = goal.status ? words[goal.status] : undefined;
+	return text ? { text, ...(goal.objective ? { objective: goal.objective } : {}) } : null;
+}
+
 function renderLiveLabel(status: StatusSnapshot): void {
 	const working = workingSubagentCount();
 	const base = status.compacting
@@ -1017,8 +1030,12 @@ function renderLiveLabel(status: StatusSnapshot): void {
 	if (status.connected && runningProcessCount > 0) {
 		lanes.push(`${runningProcessCount} process${runningProcessCount === 1 ? "" : "es"} running`);
 	}
+	// A goal keeps the agent taking turns without being asked; without a word for
+	// it, an idle-looking panel that starts working by itself reads as a fault.
+	const goal = status.connected ? goalLane(status.goal) : null;
+	if (goal) lanes.push(goal.text);
 	liveLabel.textContent = lanes.length > 0 ? `${text} · ${lanes.join(" · ")}` : text;
-	liveLabel.title = liveLabel.textContent;
+	liveLabel.title = goal?.objective ? `${liveLabel.textContent}\nGoal: ${goal.objective}` : liveLabel.textContent;
 	liveLabel.className = `live-label${status.connected ? " on" : ""}`;
 	connDot.className = `conn-dot${status.connected ? (busy ? " busy" : " live") : ""}`;
 }
@@ -1304,7 +1321,7 @@ function dispatchHostMessage(message: HostToWebview): void {
 			}
 			break;
 		case "changedFiles":
-			transcript.renderChangedFiles(message.files);
+			transcript.renderChangedFiles(message.files, message.attributed !== false);
 			break;
 		case "editorText":
 			composer.setText(message.text);

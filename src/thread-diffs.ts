@@ -57,6 +57,16 @@ export class ThreadDiffTracker {
 		return new Set(this.runEditedPaths);
 	}
 
+	/**
+	 * Whether this thread has any published diff at all. An agent that publishes
+	 * none (the Rust build's `python_repl` result carries no `details.diffs`) cannot
+	 * have its own edits told apart from anyone else's, and the changed-files strip
+	 * must not claim otherwise.
+	 */
+	hasPublishedDiffs(): boolean {
+		return this.threadDiffFiles.size > 0 || this.subagentDiffFiles.size > 0;
+	}
+
 	/** Attribution for the run that is starting; the strip resets with it. */
 	startRun(): void {
 		this.runEditedPaths.clear();

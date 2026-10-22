@@ -1,7 +1,8 @@
 /**
- * SessionController owns the Prime Agent RPC subprocess for this VS Code window,
- * routes events to all attached chat webviews, and answers extension UI requests
- * using native VS Code dialogs.
+ * SessionController owns this VS Code window's Prime Agent session — hosted on the
+ * background service (Prime Agent 0.10+, see DaemonRpcClient) or carried by a
+ * `--mode rpc` subprocess (earlier builds) — routes its events to all attached chat
+ * webviews, and answers extension UI requests using native VS Code dialogs.
  */
 
 import { execFile } from "node:child_process";
@@ -42,7 +43,11 @@ import { ProcessTracker, tailFile } from "./process-tracker.js";
 import { ThreadDiffTracker } from "./thread-diffs.js";
 import { archiveSessionFile, deleteSession, isSessionActive, renameSessionOffline } from "./session-actions.js";
 import { RpcClient } from "./rpc-client.js";
-import { appendTextFileReferences, MAX_TEXT_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENTS, hasUnpairedSurrogate, TEXT_ATTACHMENT_CHUNK_CHARS, utf8ByteLength } from "./prompt-input.js";
+import type { AgentClient } from "./agent-client.js";
+import { DaemonRpcClient } from "./daemon-rpc-client.js";
+import { collectLaunchEnv, ensureDaemon, hasInProcessRpc, probeDaemon, queryAgentVersion, socketCandidates, telemetryDisabledByEnv, type AgentLaunch } from "./daemon-endpoint.js";
+import { createConfigFromArgs } from "./session-config.js";
+import { appendTextFileReferences, MAX_PROMPT_TEXT_CHARS, MAX_TEXT_ATTACHMENT_BYTES, MAX_TEXT_ATTACHMENTS, hasUnpairedSurrogate, TEXT_ATTACHMENT_CHUNK_CHARS, utf8ByteLength } from "./prompt-input.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -86,6 +91,20 @@ function supportedThinkingLevels(model: RpcModel | null | undefined): string[] |
 	});
 }
 
+/**
+ * The levels to offer for a session: the agent's own list when it sent one (the
+ * Rust build does, and its model objects carry no map to derive from), else
+ * derived from the model's map.
+ */
+function thinkingLevelsFor(state: RpcSessionState | null | undefined): string[] | null {
+	const advertised = state?.availableThinkingLevels;
+	if (Array.isArray(advertised)) {
+		const levels = advertised.filter((level): level is string => typeof level === "string");
+		if (levels.length > 0) return levels;
+	}
+	return supportedThinkingLevels(state?.model);
+}
+
 /** A window of `text` around a match, trimmed to word-ish edges, for search evidence. */
 function excerpt(text: string, at: number, length: number): string {
 	const start = Math.max(0, at - 45);
@@ -118,7 +137,20 @@ interface ResolvedHistorySession extends RecentSession {
 export { GitHeadContentProvider } from "./git-head-provider.js";
 
 export class SessionController implements vscode.Disposable {
-	private client: RpcClient | null = null;
+	private client: AgentClient | null = null;
+	/** How the CLI was last launched; the daemon endpoint is resolved through the same command and environment. */
+	private agentLaunch: AgentLaunch | null = null;
+	/** The resolved daemon socket, once known. Every sidecar connects here, never to a guessed default. */
+	private daemonSocket: string | null = null;
+	/** Set once the agent identified itself as the Rust build, which loads no TypeScript agent extensions. */
+	private agentIsRust = false;
+	/**
+	 * Where this operator keeps sessions when `--session-dir` is configured. The
+	 * daemon's roster and saved-session catalog scan only their default directory
+	 * unless told, so without this every saved session in a custom directory is
+	 * missing from History while a resident one still shows.
+	 */
+	private sessionDirOverride: string | undefined;
 	private disposed = false;
 	/**
 	 * "The agent actually answers", not "a process object exists". Only a
@@ -309,8 +341,11 @@ export class SessionController implements vscode.Disposable {
 			return;
 		}
 		this.debugLog.append("ensureStarted");
-		if (this.client?.running) return;
+		// A start in flight comes first: a hosted client reports `running` from the moment
+		// it begins opening, so the shortcut below let a prompt through to a session that
+		// could still fail to open — and a prompt on a client that is then replaced is lost.
 		if (this.startingPromise) return this.startingPromise;
+		if (this.client?.running) return;
 		this.armInstallWatchdog();
 		this.startingPromise = this.start()
 			.catch((err) => {
@@ -385,7 +420,9 @@ export class SessionController implements vscode.Disposable {
 		const envArgs = process.env.PRIME_AGENT_ARGS?.trim();
 		if (envArgs) args.push(...envArgs.split(/\s+/));
 
-		this.output.appendLine(`[prime-agent] starting: ${command} --mode rpc (${args.length} configured argument${args.length === 1 ? "" : "s"})`);
+		const configuredSessionDir = createConfigFromArgs(args, this.workspaceRoot).config.sessionDir;
+		this.sessionDirOverride = typeof configuredSessionDir === "string" ? configuredSessionDir : undefined;
+		this.output.appendLine(`[prime-agent] starting: ${command} (${args.length} configured argument${args.length === 1 ? "" : "s"})`);
 		// Fresh every attempt, never cached: the extension host's PATH is frozen at
 		// window start, so an operator who installs the CLI and clicks Retry has to
 		// be able to succeed without restarting the window.
@@ -394,14 +431,8 @@ export class SessionController implements vscode.Disposable {
 		this.output.appendLine(`[prime-agent] ${located.detail}`);
 		this.locatedAgent = located;
 		if (this.disposed || generation !== this.startGeneration) return;
-		const client = new RpcClient({
-			command: located.command,
-			args,
-			cwd: this.workspaceRoot,
-			env: located.envPath ? { PATH: located.envPath } : undefined,
-			onWire: (s) => this.debugLog.append(s),
-		});
-		this.client = client;
+		const launch: AgentLaunch = { command: located.command, env: located.envPath ? { PATH: located.envPath } : undefined, cwd: this.workspaceRoot };
+		this.agentLaunch = launch;
 		// A start that follows a working agent deserves to speak up again. The
 		// suppression below exists only so one unreachable CLI cannot stack an
 		// identical toast for every action the operator takes.
@@ -409,8 +440,63 @@ export class SessionController implements vscode.Disposable {
 		this.reachable = false;
 		this.intentionalStop = false;
 
-	client.on("event", (raw) => {
+		// Prefer a session hosted by the background service when the agent's own
+		// `--mode rpc` has no service behind it (see DaemonRpcClient). Anything that
+		// stops that from working degrades to the in-process transport, loudly.
+		const hosted = await this.prepareDaemonSession(launch, args, generation);
+		if (this.disposed || generation !== this.startGeneration) {
+			hosted?.stop();
+			return;
+		}
+		let client: AgentClient | undefined;
+		if (hosted) {
+			this.client = hosted;
+			this.bindClient(hosted, command);
+			try {
+				await hosted.open();
+				client = hosted;
+			} catch (err) {
+				if (this.client === hosted) this.client = null;
+				hosted.stop();
+				if (this.disposed || generation !== this.startGeneration) return;
+				const detail = err instanceof Error ? err.message : String(err);
+				this.output.appendLine(`[prime-agent] could not host the session on the background service: ${detail}`);
+				this.broadcast({
+					type: "notice",
+					level: "warning",
+					text: `Could not start the session on the Prime Agent background service (${detail}). Running without it: subagents, schedules and background commands are unavailable until you Restart.`,
+				});
+			}
+		}
+		if (!client) {
+			client = new RpcClient({
+				command: located.command,
+				args,
+				cwd: this.workspaceRoot,
+				env: located.envPath ? { PATH: located.envPath } : undefined,
+				onWire: (s) => this.debugLog.append(s),
+			});
+			this.client = client;
+			this.bindClient(client, command);
+			client.start();
+			// Give the process a moment to fail fast on spawn problems before declaring success.
+			await new Promise((resolve) => setTimeout(resolve, 150));
+		}
+		await this.refreshSnapshot();
+	}
+
+	/** Route one transport's events into the controller; every handler ignores a client that is no longer ours. */
+	private bindClient(client: AgentClient, command: string): void {
+		client.on("event", (raw) => {
 			if (this.isForegroundRpcClient(client)) this.onAgentEvent(raw as AgentEvent);
+		});
+		// The service withheld live events (backpressure, a worker swap, a reconnect):
+		// whatever busy state the event stream last implied may be wrong, so the
+		// agent's own answer replaces it.
+		client.on("resync", () => {
+			if (this.client !== client || this.disposed || !this.isForegroundRpcClient(client)) return;
+			this.clearRunFlags();
+			void this.refreshSnapshot({ keepDraft: true });
 		});
 		client.on("extensionUiRequest", (raw) => {
 			if (this.client === client && !this.disposed) void this.onExtensionUiRequest(client, raw as RpcExtensionUIRequest);
@@ -459,9 +545,11 @@ export class SessionController implements vscode.Disposable {
 				text: `The agent connection was reset: ${err.message}. Use Restart to start it again.`,
 			});
 		});
-		client.on("exit", (code: number | null) => {
+		client.on("exit", (code: number | null, signal?: string | null) => {
 			if (this.client !== client || this.disposed) return;
-			this.output.appendLine(`[prime-agent] exited with code ${code ?? "?"}`);
+			const how = code !== null && code !== undefined ? `code ${code}` : signal ? String(signal) : "unknown reason";
+			const what = client instanceof DaemonRpcClient ? "session ended" : "process exited";
+			this.output.appendLine(`[prime-agent] ${what} (${how})`);
 			this.reachable = false;
 			this.state = null;
 			// Our worker died with it; stop answering to its owner id so the daemon
@@ -479,16 +567,69 @@ export class SessionController implements vscode.Disposable {
 			this.clearChangedFiles();
 			this.threadDiffs.clear();
 			if (!this.intentionalStop) {
-				this.broadcast({ type: "notice", level: "warning", text: `Agent process exited (code ${code ?? "?"}). Use Restart to start it again.` });
+				this.broadcast({ type: "notice", level: "warning", text: `Agent ${what} (${how}). Use Restart to start it again.` });
 			}
 			this.pushStatus();
 		});
+	}
 
-		client.start();
-
-		// Give the process a moment to fail fast on spawn problems before declaring success.
-		await new Promise((resolve) => setTimeout(resolve, 150));
-		await this.refreshSnapshot();
+	/**
+	 * A session hosted by the background service, ready to open — or undefined when
+	 * the agent's RPC mode already has a service behind it (the TypeScript build),
+	 * when the operator pinned the transport, or when no service can be reached.
+	 */
+	private async prepareDaemonSession(launch: AgentLaunch, args: string[], generation: number): Promise<DaemonRpcClient | undefined> {
+		const setting = vscode.workspace.getConfiguration("primeAgent").get<string>("transport", "auto");
+		if (setting === "daemon") {
+			this.agentIsRust = true;
+		} else {
+			// Asked even when the transport is pinned to rpc: what the agent IS governs
+			// the strip's wording and the extension install offer, whatever carries the session.
+			const version = await queryAgentVersion(launch);
+			this.output.appendLine(`[prime-agent] agent version: ${version ?? "unknown"}`);
+			this.agentIsRust = hasInProcessRpc(version);
+			if (setting === "rpc" || !this.agentIsRust) return undefined;
+		}
+		if (this.disposed || generation !== this.startGeneration) return undefined;
+		const controller = this;
+		const { config, unsupported, daemonSocket } = createConfigFromArgs(args, this.workspaceRoot);
+		try {
+			const endpoint = await ensureDaemon(launch, {
+				...(daemonSocket ? { socketPath: daemonSocket } : {}),
+				log: (line) => this.output.appendLine(line),
+				signal: {
+					get cancelled() {
+						return controller.disposed || generation !== controller.startGeneration;
+					},
+				},
+			});
+			this.daemonSocket = endpoint.socketPath;
+		} catch (err) {
+			if (this.disposed || generation !== this.startGeneration) return undefined;
+			const detail = err instanceof Error ? err.message : String(err);
+			this.output.appendLine(`[prime-agent] background service unavailable: ${detail}`);
+			this.broadcast({
+				type: "notice",
+				level: "warning",
+				text: `The Prime Agent background service is unavailable (${detail}). Running without it: subagents, schedules and background commands are unavailable until you Restart.`,
+			});
+			return undefined;
+		}
+		if (unsupported.length > 0) {
+			this.output.appendLine(`[prime-agent] arguments with no effect on a service-hosted session: ${unsupported.join(" ")}`);
+			this.broadcast({
+				type: "notice",
+				level: "warning",
+				text: `These primeAgent.args cannot apply to a session hosted by the background service and were ignored: ${unsupported.join(" ")}. Set primeAgent.transport to "rpc" to use them.`,
+			});
+		}
+		return new DaemonRpcClient({
+			socketPath: this.daemonSocket as string,
+			config,
+			launchEnv: collectLaunchEnv(launch.env),
+			...(telemetryDisabledByEnv() ? { telemetryDisabled: true } : {}),
+			onWire: (s) => this.debugLog.append(s),
+		});
 	}
 
 	async restart(): Promise<void> {
@@ -504,9 +645,10 @@ export class SessionController implements vscode.Disposable {
 
 	/**
 	 * `/reload`: pick up changed extensions, skills and prompts without losing the
-	 * thread. A daemon-resident session reloads in place. This window's own RPC
-	 * process has no reload verb and the daemon will not address it, so it is
-	 * restarted and the thread is resumed onto the fresh process.
+	 * thread. A daemon-resident session — including one this window hosts on the
+	 * service — reloads in place. A `--mode rpc` subprocess has no reload verb and the
+	 * daemon will not address it, so it is restarted and the thread is resumed onto
+	 * the fresh process.
 	 */
 	async reload(): Promise<void> {
 		if (this.guardObservedReadOnly("reloading")) return;
@@ -526,6 +668,19 @@ export class SessionController implements vscode.Disposable {
 				return;
 			}
 			if (!this.isCurrentAttachment(attached)) return;
+		} else if (this.client instanceof DaemonRpcClient) {
+			// The service reloads a resident session in place; nothing to restart.
+			const client = this.client;
+			try {
+				const response = await client.request({ type: "reload" }, 60_000);
+				if (!response.success) {
+					this.broadcast({ type: "notice", level: "error", text: `Reload failed: ${response.error ?? "unknown error"}` });
+					return;
+				}
+			} catch (err) {
+				this.broadcast({ type: "notice", level: "error", text: `Reload failed: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
 		} else {
 			const sessionFile = this.state?.sessionFile;
 			const sessionId = this.state?.sessionId ?? (sessionFile ? path.basename(sessionFile, ".jsonl") : undefined);
@@ -541,13 +696,29 @@ export class SessionController implements vscode.Disposable {
 		});
 	}
 
+	/** Sessions being ended on the service, so a closing window can wait for the daemon to hear it. */
+	private shutdowns: Array<Promise<void>> = [];
+
+	/** Resolves once every session this controller stopped has been reported to the service. */
+	async whenShutDown(): Promise<void> {
+		await Promise.allSettled(this.shutdowns);
+	}
+
 	stop(): void {
 		this.intentionalStop = true;
 		this.startGeneration += 1;
 		// An explicit stop/restart is a deliberate act; the next failure is news
 		// again even if it is the same failure.
 		this.spawnErrorNotified = false;
-		this.client?.stop();
+		const stopping = this.client?.stop();
+		if (stopping) {
+			const pending: Promise<void> = Promise.resolve(stopping)
+				.catch(() => {})
+				.finally(() => {
+					this.shutdowns = this.shutdowns.filter((entry) => entry !== pending);
+				});
+			this.shutdowns.push(pending);
+		}
 		this.client = null;
 		this.state = null;
 		this.reachable = false;
@@ -588,6 +759,8 @@ export class SessionController implements vscode.Disposable {
 		this.childrenTimer = null;
 		if (this.historyRefreshTimer) clearTimeout(this.historyRefreshTimer);
 		this.historyRefreshTimer = null;
+		if (this.attachedStateTimer) clearTimeout(this.attachedStateTimer);
+		this.attachedStateTimer = null;
 		if (this.statsTimer) clearTimeout(this.statsTimer);
 		this.statsTimer = null;
 		if (this.installWatchdog) clearTimeout(this.installWatchdog);
@@ -640,6 +813,22 @@ export class SessionController implements vscode.Disposable {
 				// turn ends, so promote it now rather than up to a poll later.
 				this.scheduleProcessRefresh(0);
 				break;
+			case "goal_update": {
+				// The goal drives turns on its own; keep the header's word for it current.
+				const target = this.attached ? this.rentedState : this.state;
+				if (target) target.goal = event.goal;
+				this.pushStatus();
+				break;
+			}
+			case "turn_end": {
+				// A turn that failed before the model was called: say why in the
+				// transcript (the webview does) and, when the fix is signing in, give a
+				// way to do it. The agent's own message says "use /login", which a chat
+				// panel cannot run — it is a terminal command.
+				const failure = event.error;
+				if (typeof failure === "string" && /No API key found|\/login/i.test(failure)) this.offerLogin();
+				break;
+			}
 			case "compaction_start":
 				this.compacting = true;
 				break;
@@ -691,7 +880,31 @@ export class SessionController implements vscode.Disposable {
 		}
 	}
 
-	private onOtherMessage(client: RpcClient, raw: Record<string, unknown>): void {
+	/** The prompt-failed-for-credentials notice, with the one action that fixes it. */
+	private offerLogin(): void {
+		this.broadcast({
+			type: "notice",
+			level: "warning",
+			text: "This chat panel cannot run /login. Sign in from a terminal, then send your message again.",
+			action: this.offerNoticeAction("Open a terminal to log in", async () => this.openLoginTerminal()),
+		});
+	}
+
+	/**
+	 * A terminal running the agent itself. A first run with no credentials opens the
+	 * agent's own sign-in; otherwise the operator types `/login` at its prompt.
+	 */
+	private openLoginTerminal(): void {
+		const terminal = vscode.window.createTerminal({
+			name: "Prime Agent: log in",
+			shellPath: this.agentLaunch?.command ?? "prime-agent",
+			...(this.workspaceRoot ? { cwd: this.workspaceRoot } : {}),
+			...(this.agentLaunch?.env?.PATH ? { env: { PATH: this.agentLaunch.env.PATH } } : {}),
+		});
+		terminal.show();
+	}
+
+	private onOtherMessage(client: AgentClient, raw: Record<string, unknown>): void {
 		// Non-response, non-event messages (e.g. extension_bus events). Surface notable ones.
 		const type = raw.type as string;
 		if (type === "extension_error") {
@@ -755,6 +968,10 @@ export class SessionController implements vscode.Disposable {
 		this.broadcast({
 			type: "changedFiles",
 			files: [...this.changedFiles].filter((file) => !edited.has(canonicalRelPath(file))).sort(),
+			// An agent that never publishes diffs (the Rust build) leaves nothing to
+			// subtract, so what remains is everything that changed, the agent's own
+			// edits included. It stops being "other files" the moment a diff appears.
+			attributed: !this.agentIsRust || this.threadDiffs.hasPublishedDiffs(),
 		});
 	}
 
@@ -768,7 +985,7 @@ export class SessionController implements vscode.Disposable {
 	// Extension UI requests -> native VS Code dialogs
 	// ------------------------------------------------------------------
 
-	private async onExtensionUiRequest(client: RpcClient, request: RpcExtensionUIRequest): Promise<void> {
+	private async onExtensionUiRequest(client: AgentClient, request: RpcExtensionUIRequest): Promise<void> {
 		// Native dialogs may resolve after a restart. Their response belongs only to
 		// the client and view that opened the dialog; never send an approval into a
 		// replacement or now-hidden session. We still answer cancellation so the
@@ -911,7 +1128,7 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** Whether the subprocess is the session currently represented by this window. */
-	private isForegroundRpcClient(client: RpcClient): boolean {
+	private isForegroundRpcClient(client: AgentClient): boolean {
 		return (
 			this.client === client &&
 			!this.disposed &&
@@ -923,7 +1140,7 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/** A background-RPC reply may only update the same un-attached view that asked. */
-	private isCurrentRpcView(client: RpcClient, epoch: number, allowRestoring = false): boolean {
+	private isCurrentRpcView(client: AgentClient, epoch: number, allowRestoring = false): boolean {
 		return (
 			this.client === client &&
 			!this.disposed &&
@@ -1286,8 +1503,13 @@ export class SessionController implements vscode.Disposable {
 				this.rejectPrompt(payload, response.error ?? "prompt rejected", reply);
 			}
 		} catch (err) {
-			if (!this.isCurrentRpcView(client, epoch)) return;
 			const error = err instanceof Error ? err.message : String(err);
+			if (!this.isCurrentRpcView(client, epoch)) {
+				// Silence here left the operator's text vanished from the transcript with
+				// neither an acceptance nor a rejection to settle its local echo.
+				this.rejectPrompt(payload, `The session changed while your message was being sent (${error}). It may not have been delivered; check the transcript before sending it again.`, reply);
+				return;
+			}
 			this.debugLog.append("prompt request failed");
 			this.output.appendLine("[prime-agent] prompt request failed");
 			this.rejectPrompt(payload, error, reply);
@@ -1856,7 +2078,12 @@ export class SessionController implements vscode.Disposable {
 		// The webview sends debounced changes. Refuse a late message from the
 		// outgoing thread rather than writing it under the new thread's key.
 		if (sessionId !== this.sessionKey()) return;
-		const bounded = text.slice(0, 16_000);
+		// The webview accepts a draft up to MAX_PROMPT_TEXT_CHARS and the sidebar is torn
+		// down whenever it is hidden, so a smaller cap here silently cut the tail off a long
+		// draft on the way back. Cut on a code-point boundary, never through a surrogate pair.
+		let end = Math.min(text.length, MAX_PROMPT_TEXT_CHARS);
+		if (end < text.length && end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1])) end -= 1;
+		const bounded = text.slice(0, end);
 		void this.context.globalState.update(this.draftKey(), bounded && bounded.trim() ? bounded : undefined);
 	}
 
@@ -2333,13 +2560,19 @@ export class SessionController implements vscode.Disposable {
 	private async collectHistory(): Promise<RecentSession[]> {
 		try {
 			const sidecar = await this.ensureSidecar();
-			return this.rowsFromCatalog(await this.listSessions(sidecar));
+			const roster = await this.listSessions(sidecar);
+			this.debugLog.append(
+				`history: roster ${roster.length} rows${this.sessionDirOverride ? ` (sessionDir ${this.sessionDirOverride})` : ""}: ` +
+					roster.map((row) => `${(row.activeSessionId ?? row.id ?? "?").slice(0, 8)}/${row.lifecycle ?? "?"}/${row.messageCount ?? "?"}msg/depth${row.rlmDepth ?? 0}`).join(" "),
+			);
+			return this.rowsFromCatalog(roster);
 		} catch {
 			// Daemon unreachable: the scan is less exact about names but it is the
 			// difference between a stale title and no history at all.
 			return listRecentSessions(this.workspaceRoot, {
 				workspaceLimit: HISTORY_WORKSPACE_LIMIT,
 				otherLimit: HISTORY_OTHER_LIMIT,
+				...(this.sessionDirOverride ? { sessionsDir: this.sessionDirOverride } : {}),
 			});
 		}
 	}
@@ -2468,7 +2701,7 @@ export class SessionController implements vscode.Disposable {
 		const now = Date.now();
 		if (this.savedCatalog && now - this.savedCatalog.at < SAVED_CATALOG_TTL_MS) return this.savedCatalog.rows;
 		const sidecar = await this.ensureSidecar();
-		const rows = await sidecar.listSavedSessions(this.workspaceRoot, "all");
+		const rows = await sidecar.listSavedSessions(this.workspaceRoot, "all", this.sessionDirOverride);
 		this.savedCatalog = { at: now, rows };
 		return rows;
 	}
@@ -2617,7 +2850,7 @@ export class SessionController implements vscode.Disposable {
 				const state = (await sidecar.getState(attached.activeSessionId)) as RpcSessionState;
 				if (!this.isCurrentAttachment(attached)) return;
 				this.rentedState = state;
-				const levels = supportedThinkingLevels(state.model) ?? THINKING_LEVELS.slice(0, 5);
+				const levels = thinkingLevelsFor(state) ?? THINKING_LEVELS.slice(0, 5);
 				const current = state.thinkingLevel ?? "off";
 				const picked = await vscode.window.showQuickPick(
 					levels.map((level) => ({ label: level, description: level === current ? "(current)" : undefined })),
@@ -2638,7 +2871,7 @@ export class SessionController implements vscode.Disposable {
 		if (!client || !this.isCurrentRpcView(client, epoch) || this.observationRestoring) return;
 		// Same source as the brain popout: offering a level the model rejects only
 		// buys the operator a silent clamp to something they did not pick.
-		const levels = supportedThinkingLevels(this.state?.model) ?? THINKING_LEVELS.slice(0, 5);
+		const levels = thinkingLevelsFor(this.state) ?? THINKING_LEVELS.slice(0, 5);
 		const current = this.state?.thinkingLevel ?? "off";
 		const picked = await vscode.window.showQuickPick(
 			levels.map((level) => ({ label: level, description: level === current ? "(current)" : undefined })),
@@ -2849,7 +3082,8 @@ export class SessionController implements vscode.Disposable {
 					ref.sessionFile !== undefined &&
 					normalizeFsPath(ref.sessionFile) === wanted &&
 					(ref.lifecycle ?? "live") === "live" &&
-					(ref.rlmDepth ?? 0) === 0,
+					(ref.rlmDepth ?? 0) === 0 &&
+					SessionController.isResidentRow(ref),
 			)?.activeSessionId;
 			if (this.disposed || epoch !== this.viewEpoch) return "aborted";
 			if (!activeId) {
@@ -2962,6 +3196,20 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	/**
+	 * Whether a roster row is a session with a worker behind it, i.e. something that
+	 * can be attached to. A saved session the daemon merely knows about is a row too,
+	 * and the Rust daemon fills its `activeSessionId` with the session's UUID — which
+	 * names no worker, so attaching to it answers "Unknown active session". A live
+	 * session's attach handle is always a separate identifier from its UUID, on both
+	 * agent generations; where the row carries no UUID the handle alone is trusted.
+	 */
+	private static isResidentRow(row: SessionSummaryRef): boolean {
+		const handle = row.activeSessionId;
+		if (!handle) return false;
+		return row.sessionId === undefined || row.sessionId !== handle;
+	}
+
+	/**
 	 * Make another client's client-owned worker for `sessionPath` shareable.
 	 *
 	 * Only a refusal that names a live worker qualifies, and only when that
@@ -2976,11 +3224,42 @@ export class SessionController implements vscode.Disposable {
 		const owner = resolveOwnerClientId({ sessionFile: sessionPath, activeSessionId: refusal.activeSessionId });
 		if (!owner) return false;
 		try {
-			await promoteClientOwnedSession(owner, refusal.activeSessionId);
+			await promoteClientOwnedSession(owner, refusal.activeSessionId, await this.resolveDaemonSocket());
 			return true;
 		} catch (promoteErr) {
 			this.debugLog.append(`promote of ${refusal.activeSessionId} failed: ${promoteErr instanceof Error ? promoteErr.message : String(promoteErr)}`);
 			return false;
+		}
+	}
+
+	/**
+	 * Following another window's session must not tie it to that window.
+	 *
+	 * A session a window creates is owned by that window and ends with it. The
+	 * TypeScript daemon hid such sessions from everyone else, so reaching one at
+	 * all went through the "already active" refusal and `promoteForeignOwnedSession`.
+	 * The Rust daemon shows them to every client, so nothing refuses — and the
+	 * owner closing its window would kill the session under the viewer. Promote it
+	 * first, exactly as the refusal path does; a session this window owns, or one
+	 * with no owner we can read, is left alone.
+	 */
+	private async promoteIfForeignOwned(activeSessionId: string, sessionPath: string): Promise<void> {
+		// Our own session is the one thing that must never be promoted by looking at it
+		// (returning to it from a subagent attaches to it): a promoted session
+		// outlives this window.
+		if (this.client instanceof DaemonRpcClient && this.client.activeSessionId === activeSessionId) return;
+		if (sessionPath && this.state?.sessionFile && normalizeFsPath(sessionPath) === normalizeFsPath(this.state.sessionFile)) return;
+		let owner: string | undefined;
+		try {
+			owner = resolveOwnerClientId({ activeSessionId, ...(sessionPath ? { sessionFile: sessionPath } : {}) });
+		} catch {
+			return;
+		}
+		if (!owner || owner === this.ownedRosterClientId()) return;
+		try {
+			await promoteClientOwnedSession(owner, activeSessionId, await this.resolveDaemonSocket());
+		} catch (err) {
+			this.debugLog.append(`promote of ${activeSessionId} before attach failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
@@ -3033,6 +3312,29 @@ export class SessionController implements vscode.Disposable {
 	// Daemon sidecar: attached live sessions (terminal parity)
 	// ----------------------------------------------------------------
 
+	/**
+	 * Where the daemon is. Known outright once this window started (or found) one;
+	 * otherwise asked of the agent and verified with a handshake, so a window whose
+	 * agent runs in-process still finds a daemon a terminal started. Undefined means
+	 * "nothing answered", and the sidecar then falls back to its computed default.
+	 */
+	private async resolveDaemonSocket(): Promise<string | undefined> {
+		if (this.daemonSocket) return this.daemonSocket;
+		if (!this.agentLaunch) return undefined;
+		// Remember a miss: with no daemon running, every history open and strip refresh
+		// would otherwise spawn `prime-agent status` and probe every candidate again.
+		if (Date.now() - this.socketLookupMissedAt < 30_000) return undefined;
+		for (const candidate of await socketCandidates(this.agentLaunch)) {
+			if (await probeDaemon(candidate)) {
+				this.daemonSocket = candidate;
+				return candidate;
+			}
+		}
+		this.socketLookupMissedAt = Date.now();
+		return undefined;
+	}
+	private socketLookupMissedAt = 0;
+
 	private async ensureSidecar(options: { reattach?: boolean } = {}): Promise<DaemonSidecar> {
 		// The daemon binds a connection's identity on its first command envelope, so
 		// a claim can only be applied to a FRESH socket. Learning our owner id late
@@ -3047,6 +3349,7 @@ export class SessionController implements vscode.Disposable {
 		if (this.sidecar && owner && this.sidecar.impersonateClientId !== owner) {
 			this.sidecar.dispose();
 			this.sidecar = null;
+			this.onSidecarClosed();
 		}
 		if (!this.sidecar) {
 			this.sidecar = new DaemonSidecar();
@@ -3055,8 +3358,18 @@ export class SessionController implements vscode.Disposable {
 			this.sidecar.onAnyLine = (byteLength) => this.debugLog.append(`sidecar-line bytes=${byteLength}`);
 			this.sidecar.onClose = () => this.onSidecarClosed();
 		}
-		if (!this.sidecar.connected) {
-			await this.sidecar.connect();
+		const mine = this.sidecar;
+		if (!mine.connected) {
+			const socket = await this.resolveDaemonSocket();
+			// The lookup can take seconds; the connection it was for may have been released
+			// (the session exited, the window closed) in the meantime.
+			if (this.disposed || this.sidecar !== mine) throw new Error("daemon sidecar was replaced while its socket was being located");
+			if (socket) mine.socketOverride = socket;
+			await mine.connect();
+			if (this.disposed || this.sidecar !== mine) {
+				mine.dispose();
+				throw new Error("daemon sidecar was replaced while it was connecting");
+			}
 		}
 		// Roster push is per-connection: offer it again after every (re)connect.
 		// Capability-detected, so a pre-v0.9 daemon declines and the pull model
@@ -3213,6 +3526,8 @@ export class SessionController implements vscode.Disposable {
 				}
 				return;
 			}
+			// A worker replaced while the socket was down answers with its current handle.
+			if (result.activeSessionId) attempt.activeSessionId = result.activeSessionId;
 			this.attached = attempt;
 			this.attachedEpoch = attemptEpoch;
 			this.clearReattachTimer();
@@ -3381,6 +3696,8 @@ export class SessionController implements vscode.Disposable {
 			await this.waitForDaemonDetach(canonicalId);
 			if (this.disposed || epoch !== this.viewEpoch) return false;
 			this.lastDaemonAttachCanonicalId = canonicalId;
+			await this.promoteIfForeignOwned(canonicalId, sessionPath);
+			if (this.disposed || epoch !== this.viewEpoch) return false;
 			const result = await sidecar.attach(canonicalId);
 			if (this.disposed || epoch !== this.viewEpoch) {
 				try {
@@ -3546,6 +3863,11 @@ export class SessionController implements vscode.Disposable {
 	 * worker's identity instead of quietly reusing it.
 	 */
 	private ownedRosterClientId(): string | undefined {
+		// A session we created on the service knows its owner outright: no
+		// descriptor to find, none to go stale across `new_session`.
+		// Only while it lives: a claim kept after the session ended would stop the daemon
+		// from ever reaping the worker it names.
+		if (this.client instanceof DaemonRpcClient) return this.client.running ? (this.client.ownerClientId ?? undefined) : undefined;
 		const sessionFile = this.state?.sessionFile;
 		if (!sessionFile) return undefined;
 		const cached = this.ownerIdCache;
@@ -3575,7 +3897,7 @@ export class SessionController implements vscode.Disposable {
 	 * (see `ensureSidecar`). Without a claim this degrades to the plain roster.
 	 */
 	private async listSessions(sidecar: DaemonSidecar): Promise<SessionSummaryRef[]> {
-		return sidecar.list(true, { includeClientOwned: true });
+		return sidecar.list(true, { includeClientOwned: true, ...(this.sessionDirOverride ? { sessionDir: this.sessionDirOverride } : {}) });
 	}
 
 	/**
@@ -3596,6 +3918,9 @@ export class SessionController implements vscode.Disposable {
 		if (!this.sidecar?.impersonateClientId) return;
 		this.sidecar.dispose();
 		this.sidecar = null;
+		// dispose() reports nothing, so a view attached through this connection would keep
+		// looking attached with no events ever returning. Run the close path ourselves.
+		this.onSidecarClosed();
 	}
 
 	/**
@@ -3700,7 +4025,11 @@ export class SessionController implements vscode.Disposable {
 	/** The worker whose journal describes the session currently on screen. */
 	private processLookup(): OwnerLookup | null {
 		const sessionFile = this.attached?.sessionPath ?? this.state?.sessionFile;
-		const activeSessionId = this.attached?.activeSessionId;
+		// A session this window created on the service has no `sessionPath` in its
+		// create command (it was new), so its worker is found by the daemon handle,
+		// which also survives `new_session`.
+		const activeSessionId =
+			this.attached?.activeSessionId ?? (this.client instanceof DaemonRpcClient ? (this.client.activeSessionId ?? undefined) : undefined);
 		if (!sessionFile && !activeSessionId) return null;
 		return {
 			...(sessionFile ? { sessionFile } : {}),
@@ -3793,6 +4122,16 @@ export class SessionController implements vscode.Disposable {
 	 * Agent auto-discovers `~/.prime/agent/extensions/<name>/index.ts`.
 	 */
 	async installBackgroundJobsExtension(): Promise<void> {
+		if (this.agentIsRust) {
+			// The Rust agent has no extension loader (its CLI has no -e/--extension), so
+			// copying the TypeScript extension in would report an install that does nothing.
+			this.broadcast({
+				type: "notice",
+				level: "info",
+				text: "This Prime Agent build does not load TypeScript agent extensions, so there is nothing to install. Commands the agent leaves running are listed in the Processes panel from the agent's own process records.",
+			});
+			return;
+		}
 		const source = vscode.Uri.joinPath(this.context.extensionUri, "agent-extension", "background-jobs").fsPath;
 		const target = path.join(defaultAgentDir(), "extensions", "background-jobs");
 		try {
@@ -4240,6 +4579,20 @@ export class SessionController implements vscode.Disposable {
 			this.onRosterUpdate(message);
 			return;
 		}
+		// The daemon swapped a session's worker and re-issued its handle. The frame is
+		// top-level and carries the NEW id, so it has to be read before the id filters
+		// below; events from here on arrive under the new one. Follow it in place:
+		// in-flight work holds this very object as its proof of "still the view on screen".
+		if (message.type === "session_binding") {
+			const binding = message as { previousActiveSessionId?: unknown; activeSessionId?: unknown };
+			const current = this.attached;
+			if (current && binding.previousActiveSessionId === current.activeSessionId && typeof binding.activeSessionId === "string") {
+				current.activeSessionId = binding.activeSessionId;
+				if (this.attachAttempt?.activeSessionId === binding.previousActiveSessionId) this.attachAttempt.activeSessionId = binding.activeSessionId;
+				void this.refreshSnapshot({ keepDraft: true });
+			}
+			return;
+		}
 		const attached = this.attached;
 		if (!attached || !this.isCurrentAttachment(attached)) return;
 		const msgSessionId = message.activeSessionId;
@@ -4321,6 +4674,22 @@ export class SessionController implements vscode.Disposable {
 	private onRosterUpdate(_message: DaemonServerMessage): void {
 		this.scheduleHistoryRefresh();
 		this.scheduleChildrenRefresh();
+		// A model or thinking-level change made by another client of a shared session
+		// reaches this one only as a roster delta (the daemon pushes no status frame
+		// and no thinking_level_changed for it), so the attached header would keep
+		// naming the old model until something unrelated refreshed it.
+		if (this.attached) this.scheduleAttachedStateRefresh();
+	}
+
+	private attachedStateTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/** Coalesce: a roster push can arrive on every tool call of a busy session. */
+	private scheduleAttachedStateRefresh(): void {
+		if (this.disposed || this.attachedStateTimer) return;
+		this.attachedStateTimer = setTimeout(() => {
+			this.attachedStateTimer = null;
+			void this.refreshAttachedState();
+		}, 600);
 	}
 
 	/**
@@ -4655,7 +5024,8 @@ export class SessionController implements vscode.Disposable {
 				restoring: true,
 				modelLabel: model ? `${model.provider}/${model.id}` : "attached session",
 				thinkingLevel: state?.thinkingLevel ?? "off",
-				availableThinkingLevels: supportedThinkingLevels(model),
+				availableThinkingLevels: thinkingLevelsFor(state),
+				goal: state?.goal ?? null,
 				sessionName: state?.sessionName,
 				sessionFile: attempt.sessionPath,
 				sessionId: attempt.sessionId ?? path.basename(attempt.sessionPath, ".jsonl"),
@@ -4686,7 +5056,8 @@ export class SessionController implements vscode.Disposable {
 				restoring: switching,
 				modelLabel: label,
 				thinkingLevel: st?.thinkingLevel ?? "off",
-				availableThinkingLevels: supportedThinkingLevels(model),
+				availableThinkingLevels: thinkingLevelsFor(st),
+				goal: st?.goal ?? null,
 				sessionName: st?.sessionName,
 				sessionFile: this.attached.sessionPath,
 				// History rows key on the jsonl stem. Falling back to the 12-char
@@ -4725,7 +5096,8 @@ export class SessionController implements vscode.Disposable {
 			restoring: this.startingPromise !== null || this.observationRestoring,
 			modelLabel,
 			thinkingLevel: this.state?.thinkingLevel ?? "off",
-			availableThinkingLevels: supportedThinkingLevels(model),
+			availableThinkingLevels: thinkingLevelsFor(this.state),
+			goal: this.state?.goal ?? null,
 			sessionName: this.state?.sessionName,
 			sessionFile: this.state?.sessionFile,
 			// Same derivation as sessionKey(): the identity the webview sends back
@@ -4923,8 +5295,23 @@ export class SessionController implements vscode.Disposable {
 	}
 
 	async openFile(relPath: string, startLine?: number, endLine?: number): Promise<void> {
-		const uri = await this.resolveWorkspaceUri(relPath.replace(/\/$/, ""));
-		if (!uri) return;
+		let target = relPath.replace(/\/$/, "");
+		// A tool call names the file however the model wrote it, and models write absolute
+		// paths. One inside the workspace is the same file as its relative form; the
+		// resolver refuses absolute paths outright, so the click used to do nothing at all.
+		if (path.isAbsolute(target)) {
+			const inside = path.relative(this.workspaceRoot, target);
+			if (!this.workspaceRoot || !inside || inside.startsWith("..") || path.isAbsolute(inside)) {
+				this.broadcast({ type: "notice", level: "warning", text: `${relPath} is outside this workspace, so it was not opened.` });
+				return;
+			}
+			target = inside;
+		}
+		const uri = await this.resolveWorkspaceUri(target);
+		if (!uri) {
+			this.broadcast({ type: "notice", level: "warning", text: `Could not open ${relPath}: no such file in this workspace.` });
+			return;
+		}
 		if (!(await this.showUri(uri, startLine, endLine))) {
 			this.broadcast({ type: "notice", level: "error", text: `Could not open ${relPath}` });
 		}

@@ -39,6 +39,10 @@ const exists = async (deps: LinkedFileDeps, file: string): Promise<string | null
 export async function resolveLinkedFile(raw: string, deps: LinkedFileDeps): Promise<LinkedFileResult> {
 	let target = raw.trim();
 	if (target === "~" || target.startsWith("~/")) target = path.join(deps.homedir, target.slice(1));
+	// On Windows a leading double slash names a network share, and resolving it would
+	// reach out to a remote host on the strength of text a model wrote. (On POSIX
+	// `//tmp/a` is just `/tmp/a`.)
+	if (process.platform === "win32" && /^[\\/]{2}/.test(target)) return { kind: "missing", tried: target };
 	const absolute = path.isAbsolute(target);
 	const direct = absolute
 		? target

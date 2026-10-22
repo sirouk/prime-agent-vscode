@@ -15,8 +15,16 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { isolatedAgent } from "./isolated-agent.mjs";
+
 const require = createRequire(import.meta.url);
 const { DaemonSidecar } = require("../dist/daemon-sidecar.cjs");
+
+// The agent writes settings, worker descriptors, logs and leases to its state directory
+// while this journey runs — the live terminal fixture included. Everything it spawns
+// inherits a throwaway one, so the operator's real ~/.prime/agent is never touched.
+const agentHome = isolatedAgent("pa-vscode-e2e-agent-");
+agentHome.apply();
 
 // Same discovery as live-driver.mjs: a hardcoded path meant this whole gate
 // died on `ENOENT` for anyone whose VS Code is a Code/Insiders build.
@@ -186,6 +194,9 @@ const app = await electron.launch({
 		`--user-data-dir=${profile}`,
 		`--extensions-dir=${path.join(os.homedir(), ".vscode/extensions")}`,
 		`--extensionDevelopmentPath=${process.cwd()}`,
+		// Only this extension: another one's welcome tab or chat panel can take the
+		// window (and the command palette's keystrokes) before ours has even activated.
+		"--disable-extensions",
 		"--disable-workspace-trust",
 		"--skip-welcome",
 		"--no-sandbox",
@@ -562,6 +573,10 @@ try {
 } finally {
 	try {
 		console.log("host debug log:", fs.readFileSync(hostLog, "utf8").slice(-1200));
+		console.log(
+			"host history lines:",
+			fs.readFileSync(hostLog, "utf8").split("\n").filter((line) => line.startsWith("history:")).slice(-6).join("\n  "),
+		);
 	} catch {}
 	console.log("prime-agent log lines:", JSON.stringify(primeLogs.slice(0, 12), null, 1));
 	console.log("console errors (first 5):", consoleErrors.slice(0, 5));
@@ -572,6 +587,7 @@ try {
 	await stopChild(daemonProcess, 2_000);
 	fs.rmSync(profile, { recursive: true, force: true });
 	fs.rmSync(daemonRoot, { recursive: true, force: true });
+	await agentHome.cleanup();
 	const passed = checks.filter(([, ok]) => ok).length;
 	console.log(`\n${passed}/${checks.length} real-shell checks passed`);
 	// Say it twice, at the end: an unverified journey must never read as a pass.

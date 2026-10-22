@@ -117,11 +117,23 @@ export class ProcessesPanel {
 	private syncTicker(): void {
 		const running = this.processes.some((entry) => entry.state === "running");
 		if (running && !this.ticker) {
-			this.ticker = setInterval(() => this.render(), 1000);
+			// Only the clocks move. Rebuilding the whole panel every second dropped
+			// keyboard focus, collapsed a text selection in an output preview, and let a
+			// click land on a node replaced between mousedown and mouseup.
+			this.ticker = setInterval(() => this.tickClocks(), 1000);
 		} else if (!running && this.ticker) {
 			clearInterval(this.ticker);
 			this.ticker = null;
 		}
+	}
+
+	/** Advance the elapsed time of running rows in place. */
+	private tickClocks(): void {
+		const now = Date.now();
+		this.root.querySelectorAll<HTMLElement>(".pr-row.running .pr-time[data-started]").forEach((clock) => {
+			const started = Number(clock.dataset.started);
+			if (Number.isFinite(started)) clock.textContent = duration(now - started);
+		});
 	}
 
 	/** Keep a reader-centered scroll story in panes that crash to scrollTop=0 on rebuild. */
@@ -246,6 +258,7 @@ export class ProcessesPanel {
 			row.append(el("span", `pr-status${failed ? " bad" : ""}`, outcome(entry)));
 		}
 		const time = el("span", "pr-time", elapsed);
+		if (entry.state === "running") time.dataset.started = String(entry.startedMs);
 		time.title =
 			entry.state === "running"
 				? `started ${new Date(entry.startedMs).toLocaleTimeString()}`

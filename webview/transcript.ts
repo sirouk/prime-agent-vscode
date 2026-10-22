@@ -47,7 +47,20 @@ function lastTextNode(root: HTMLElement): Text | null {
 }
 
 /**
- * The collapsed tool row reads the word "ipython" on every python-fluent card,
+ * The agent's code tool. The Rust build (0.10+) registers it as `python_repl`;
+ * the TypeScript build, and every session it recorded, call it `ipython`. Keying
+ * on one spelling made every card of the other render as an opaque tool: no
+ * python or terminal glyph, no section label, a JSON copy fence, and the summary
+ * scorer bypassed.
+ */
+const PYTHON_TOOL_NAMES: ReadonlySet<string> = new Set(["python_repl", "ipython", "python"]);
+
+function isPythonTool(name: string): boolean {
+	return PYTHON_TOOL_NAMES.has(name);
+}
+
+/**
+ * The collapsed tool row reads the tool's name on every python-fluent card,
  * and in a kernel-heavy thread that single word eats the row's breathing room
  * for zero information — the dot already carries running/done, the summary
  * carries what the cell did. So the ipython name in the COLLAPSED header is a
@@ -56,7 +69,7 @@ function lastTextNode(root: HTMLElement): Text | null {
  * tool keeps its text name.
  */
 function toolHeaderName(name: string, kind: string): HTMLSpanElement {
-	if (name !== "ipython") return el("span", "tool-name", name);
+	if (!isPythonTool(name)) return el("span", "tool-name", name);
 	const span = el("span", "tool-glyph");
 	span.title = name;
 	span.setAttribute("aria-label", name);
@@ -66,7 +79,7 @@ function toolHeaderName(name: string, kind: string): HTMLSpanElement {
 
 function toolView(name: string, args: Record<string, unknown>): ToolView {
 	const code = args?.code;
-	if (name === "ipython" && typeof code === "string") {
+	if (isPythonTool(name) && typeof code === "string") {
 		const cell = parseIpythonBashCell(code);
 		if (cell) return { kind: "shell", label: "shell", lang: "bash", input: cell.body.replace(/\n+$/, "") };
 		return { kind: "python", label: "python", lang: "python", input: code };
@@ -140,10 +153,45 @@ interface CompactionSummaryMessage {
 interface CustomDisplayMessage {
 	role: "custom";
 	customType?: string;
-	content?: string;
+	/** A string, or content blocks (a `/goal` with attached images produces the latter). */
+	content?: string | Array<{ type?: string; text?: string }>;
 	display?: boolean;
-	details?: RefinementOutcomeDetails;
+	details?: RefinementOutcomeDetails & { message?: unknown };
 	timestamp?: number;
+}
+
+/** prime-agent's `role: "bashExecution"`: a `!command` the operator ran. */
+interface BashExecutionMessage {
+	command?: string;
+	output?: string;
+	exitCode?: number;
+	cancelled?: boolean;
+	truncated?: boolean;
+	excludeFromContext?: boolean;
+}
+
+/** Notes longer than this fold behind their first line; the agent writes some for itself, not for a reader. */
+const CUSTOM_NOTE_FOLD_CHARS = 280;
+const CUSTOM_NOTE_FOLD_LINES = 4;
+
+/**
+ * What a custom message says, whatever shape its content took. An agent message
+ * carries its protocol header in `content` and the readable body in
+ * `details.message`; the body is what the reader wants.
+ */
+function customNoteText(message: CustomDisplayMessage): string {
+	if (message.customType === "agent_message" && typeof message.details?.message === "string" && message.details.message.trim()) {
+		return message.details.message;
+	}
+	const { content } = message;
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		return content
+			.filter((part) => part?.type === "text" && typeof part.text === "string")
+			.map((part) => part.text as string)
+			.join("\n");
+	}
+	return "";
 }
 
 /** prime-agent 0.9.5's `customType: "refinement_outcome"` — the CLI's "◆ Harness refined" card data. */
@@ -665,7 +713,12 @@ export class Transcript {
 	// ---------------------------------------------------------------
 
 	showWelcome(): void {
-		if (this.hasContent || this.welcome) return;
+		if (this.hasContent) return;
+		// A snapshot rebuilds the scroller and drops the old welcome element without
+		// clearing this reference, so a bare `this.welcome` check meant the second
+		// empty snapshot of a chat left the panel permanently blank.
+		if (this.welcome?.isConnected) return;
+		this.welcome = null;
 		const root = el("div", "welcome");
 		const mark = el("div", "welcome-mark");
 		mark.appendChild(butterfly(52));
@@ -1330,6 +1383,15 @@ export class Transcript {
 				}
 				break;
 			case "turn_end":
+				// A turn that failed before the model was ever called has no assistant
+				// message to carry the reason, and the same event is where it lives:
+				// "No API key found for openai. Use /login…". Without this the run just
+				// stops, and the operator is left to guess why.
+				if (typeof event.error === "string" && event.error.trim()) {
+					this.stopWorking();
+					this.systemNote(event.error.trim(), true);
+					break;
+				}
 				if (this.streaming) this.startWorking();
 				break;
 			default:
@@ -1364,7 +1426,32 @@ export class Transcript {
 		this.retryRow = null;
 	}
 
+	/**
+	 * The agent parks a session when the provider's usage allowance runs out, and
+	 * reports it through the same event that reports giving up. A parked session is
+	 * not dead: it resumes by itself at the stated time, so presenting it as a
+	 * fatal failure sends the operator to restart something that is waiting.
+	 */
+	private parkedUntil(finalError?: string): string | null {
+		const match = /^Session is parked until (\S+)/.exec(finalError ?? "");
+		if (!match) return null;
+		const at = new Date(match[1]);
+		return Number.isNaN(at.getTime()) ? match[1] : at.toLocaleString();
+	}
+
 	private failRetryRow(finalError?: string): void {
+		const parked = this.parkedUntil(finalError);
+		if (parked) {
+			const text = `Paused until ${parked} — the provider's usage limit was reached. This session resumes by itself.`;
+			const label = this.retryRow?.querySelector(".retry-text");
+			if (label) {
+				label.textContent = text;
+				this.retryRow = null;
+			} else {
+				this.systemNote(text);
+			}
+			return;
+		}
 		if (!this.retryRow) {
 			this.systemNote(`Provider request failed${finalError ? `: ${finalError.slice(0, 120)}` : ""}`, true);
 			return;
@@ -1534,11 +1621,19 @@ export class Transcript {
 				this.place(existing);
 			} else if (existing?.classList.contains("custom-note") && message.role === "custom") {
 				const body = existing.querySelector(".custom-note-body");
-				if (body) body.textContent = (message as unknown as CustomDisplayMessage).content ?? "";
+				if (body) body.textContent = customNoteText(message as unknown as CustomDisplayMessage);
 				this.place(existing);
 			} else {
 				this.renderMessageContent(message, isPartial, authoritative);
 			}
+		} catch (error) {
+			// Session files outlive the agent that wrote them, so a record can arrive in a
+			// shape this renderer has never seen. Say so in its place instead of letting
+			// the throw abandon every message after it.
+			console.error("[prime-agent] could not render a message", message?.role, error);
+			const note = el("div", "custom-note");
+			note.append(el("div", "custom-note-kind", "unreadable message"), el("div", "custom-note-body", `A ${message?.role ?? "unknown"} message could not be displayed.`));
+			this.place(note);
 		} finally {
 			this.renderingKey = previousKey;
 			this.renderedMessage = previousMessage;
@@ -1567,8 +1662,11 @@ export class Transcript {
 		} else if (role === "toolResult") {
 			this.renderToolResult(message as ToolResultMessage);
 		} else if (role === ("bashExecution" as string)) {
-			const m = message as unknown as { command?: string };
-			this.systemNote(`! ${m.command ?? "bash command"}`);
+			this.place(this.buildBashExecution(message as unknown as BashExecutionMessage));
+			this.hasContent = true;
+		} else if (role === ("branchSummary" as string)) {
+			this.place(this.buildBranchSummary(message as unknown as { summary?: string }));
+			this.hasContent = true;
 		} else if (role === ("compactionSummary" as string)) {
 			this.place(this.buildCompactionSummary(message as unknown as CompactionSummaryMessage));
 			this.hasContent = true;
@@ -1581,7 +1679,7 @@ export class Transcript {
 				this.hasContent = true;
 				return;
 			}
-			if (!m.content?.trim()) return;
+			if (!customNoteText(m).trim()) return;
 			this.place(this.buildCustomNote(m));
 			this.hasContent = true;
 		}
@@ -1614,12 +1712,51 @@ export class Transcript {
 
 	/** An agent-authored note the agent asked to be shown — subagent replies land here. */
 	private buildCustomNote(message: CustomDisplayMessage): HTMLElement {
-		const note = el("div", "custom-note");
-		const label = el("div", "custom-note-kind", (message.customType ?? "note").replace(/_/g, " "));
+		const kind = (message.customType ?? "note").replace(/_/g, " ");
+		const text = customNoteText(message);
 		const body = el("div", "custom-note-body");
-		body.textContent = message.content ?? "";
-		note.append(label, body);
+		body.textContent = text;
+		if (text.length <= CUSTOM_NOTE_FOLD_CHARS && text.split("\n").length <= CUSTOM_NOTE_FOLD_LINES) {
+			const note = el("div", "custom-note");
+			note.append(el("div", "custom-note-kind", kind), body);
+			return note;
+		}
+		// Heartbeat prompts, goal context, subagent protocol headers: written for the
+		// model, long, and repeated every turn. The kind and the first line say what
+		// it is; the rest is one click away.
+		const note = el("details", "custom-note custom-note-fold") as HTMLDetailsElement;
+		const firstLine = text.split("\n").find((line) => line.trim())?.trim() ?? "";
+		const summary = el("summary");
+		summary.append(el("span", "custom-note-kind", kind), el("span", "custom-note-first", firstLine.length > 110 ? `${firstLine.slice(0, 110)}…` : firstLine));
+		note.append(summary, body);
 		return note;
+	}
+
+	/** What the conversation carried back when it left a branch. */
+	private buildBranchSummary(message: { summary?: string }): HTMLElement {
+		const details = el("details", "compaction-summary") as HTMLDetailsElement;
+		const summary = el("summary", "", "Branch summary");
+		summary.title = "The conversation left another branch and carried this summary back.";
+		const body = el("div", "compaction-summary-body");
+		renderMarkdown(message.summary ?? "", body, this.links);
+		details.append(summary, body);
+		return details;
+	}
+
+	/** A `!command` the operator ran: the command, how it ended, and what it printed. */
+	private buildBashExecution(message: BashExecutionMessage): HTMLElement {
+		const details = el("details", "compaction-summary") as HTMLDetailsElement;
+		const state = message.cancelled ? "cancelled" : typeof message.exitCode === "number" ? (message.exitCode === 0 ? "ok" : `exit ${message.exitCode}`) : "running";
+		const head = `! ${(message.command ?? "command").split("\n")[0]}`;
+		const summary = el("summary", "", `${head.length > 100 ? `${head.slice(0, 100)}…` : head} · ${state}`);
+		if (message.excludeFromContext) summary.title = "Not sent to the model (!! command).";
+		const body = el("div", "compaction-summary-body");
+		const pre = el("pre", "term");
+		pre.textContent = (message.output ?? "").trimEnd() || "(no output)";
+		body.appendChild(pre);
+		if (message.truncated) body.appendChild(el("div", "custom-note-kind", "output truncated"));
+		details.append(summary, body);
+		return details;
 	}
 
 	// ------------------------------------------------------------------
@@ -2135,7 +2272,7 @@ export class Transcript {
 		// that actually ran. A first-non-magic-line pick reads the setup instead:
 		// a `%%bash` + `cd …` + `npm run build` cell summarised as the `cd`.
 		const preview =
-			name === "ipython" && typeof args?.code === "string"
+			isPythonTool(name) && typeof args?.code === "string"
 				? previewIpythonCode(args.code).text
 				: name === "bash" && typeof args?.command === "string"
 					? previewBashCommand(args.command).text
@@ -2182,9 +2319,9 @@ export class Transcript {
 		// The collapsed header advertises ipython as a glyph; the expanded body is
 		// where the word itself belongs. First span stays view.label for the
 		// semantic checks.
-		if (name === "ipython" && view.label !== "ipython") {
+		if (isPythonTool(name) && view.label !== name) {
 			const realName = el("span", "tool-realname", name);
-			realName.title = "The tool call is ipython";
+			realName.title = `The tool call is ${name}`;
 			inputHead.appendChild(realName);
 		}
 		block.inputSig = this.toolInputSig(name, args, view);
@@ -2285,7 +2422,7 @@ export class Transcript {
 	 * waits (and an empty cell must not fall through to a JSON dump of its args).
 	 */
 	private streamingSummary(name: string, args: Record<string, unknown>): string | null {
-		if (name === "ipython" && typeof args.code === "string" && !args.code.includes("\n")) return null;
+		if (isPythonTool(name) && typeof args.code === "string" && !args.code.includes("\n")) return null;
 		return this.toolSummary(name, this.completeLinesOnly(args));
 	}
 
@@ -2625,7 +2762,7 @@ export class Transcript {
 	 * files used to push a thirty-chip wall between the transcript and the
 	 * composer with no way to fold it away.
 	 */
-	renderChangedFiles(files: string[]): void {
+	renderChangedFiles(files: string[], attributed = true): void {
 		const bar = this.changedFilesBar;
 		bar.textContent = "";
 		bar.classList.toggle("visible", files.length > 0);
@@ -2634,15 +2771,19 @@ export class Transcript {
 		const header = el("button", "cf-header") as HTMLButtonElement;
 		header.append(
 			el("span", "cf-caret", this.changedFilesExpanded ? "▾" : "▸"),
-			el("span", "cf-label", `${files.length} other file${files.length === 1 ? "" : "s"} changed`),
+			// "Other" is a claim: that the session's own edits were subtracted. It can only
+			// be made when the agent publishes the diffs to subtract by.
+			el("span", "cf-label", `${files.length} ${attributed ? "other " : ""}file${files.length === 1 ? "" : "s"} changed`),
 		);
-		header.title =
-			"Changed on disk without this session's edit tool behind them — your edits, another thread, a build step, " +
-			"or a file the agent rewrote from a shell or Python cell. Click to expand.";
+		header.title = attributed
+			? "Changed on disk without this session's edit tool behind them — your edits, another thread, a build step, " +
+				"or a file the agent rewrote from a shell or Python cell. Click to expand."
+			: "Changed on disk during this run. This agent build does not report which files its own edits touched, " +
+				"so this includes the agent's own work as well as your saves, another thread or a build step. Click to expand.";
 		header.setAttribute("aria-expanded", String(this.changedFilesExpanded));
 		header.addEventListener("click", () => {
 			this.changedFilesExpanded = !this.changedFilesExpanded;
-			this.renderChangedFiles(files);
+			this.renderChangedFiles(files, attributed);
 		});
 		bar.appendChild(header);
 		if (!this.changedFilesExpanded) return;

@@ -32,9 +32,19 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const require = createRequire(import.meta.url);
-const { DaemonSidecar, resolveOwnerClientId, promoteClientOwnedSession } = require("../dist/daemon-sidecar.cjs");
+const { DaemonSidecar, resolveOwnerClientId, resolveWorkerDescriptor, promoteClientOwnedSession } = require("../dist/daemon-sidecar.cjs");
+
+import { startPrivateDaemon } from "./private-daemon.mjs";
+import { realTempDir } from "./isolated-agent.mjs";
 
 const REQUIRE_DAEMON = process.env.PA_REQUIRE_DAEMON === "1" || process.argv.includes("--require-daemon");
+let privateDaemon = null;
+try {
+	privateDaemon = await startPrivateDaemon();
+} catch (error) {
+	console.log(`${REQUIRE_DAEMON ? "FAIL" : "SKIP"}  owned-roster — could not start a private daemon: ${error.message}`);
+	process.exit(REQUIRE_DAEMON ? 1 : 0);
+}
 const WATCHDOG_MS = 90_000;
 
 let failed = 0;
@@ -49,7 +59,7 @@ const watchdog = setTimeout(() => {
 }, WATCHDOG_MS);
 watchdog.unref();
 
-const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-owned-roster-"));
+const workRoot = realTempDir("prime-agent-owned-roster-");
 const sessionDir = path.join(workRoot, "sessions");
 fs.mkdirSync(sessionDir, { recursive: true });
 
@@ -107,52 +117,66 @@ async function main() {
 	const stranger = await connectAs(null);
 	const owned = await connectAs(ownerClientId);
 	try {
-		check("a plain `list all` cannot see the client-owned session", !has(await stranger.list(true), createdId));
-		check(
-			"`includeClientOwned` alone is still not enough",
-			!has(await stranger.list(true, { includeClientOwned: true }), createdId),
-		);
+		// The two daemon generations disagree on who may see a client-owned session.
+		// TypeScript hides it (and its whole subagent tree) from everyone but the
+		// owner; the Rust daemon lists every resident and ignores `includeClientOwned`.
+		// Both are supported; each is asserted for what it promises, and the
+		// invariants that matter on either — the owner always sees it, promotion
+		// clears the owner, a promoted session is visible to all — are asserted on both.
+		const strangerSees = has(await stranger.list(true), createdId);
+		console.log(`  daemon visibility model: ${strangerSees ? "shared (Rust)" : "owner-only (TypeScript)"}`);
 
 		const ownedRows = await owned.list(true, { includeClientOwned: true });
 		check("the owner identity sees the client-owned session", has(ownedRows, createdId));
 		check("the owned roster stays a superset of the plain one", ownedRows.length >= (await stranger.list(true)).length);
 
-		// --- attaching: this is what "view ›" on a subagent does ---------------
 		let strangerAttachError = "";
 		try {
 			await stranger.attach(createdId);
-			strangerAttachError = "";
 		} catch (error) {
 			strangerAttachError = error?.message ?? String(error);
 		}
-		check(
-			"attach without the owner identity is refused",
-			strangerAttachError.includes("Unknown active session"),
-			strangerAttachError || "attach unexpectedly succeeded",
-		);
+		if (strangerSees) {
+			check("[shared] a stranger can attach without the owner identity", strangerAttachError === "", strangerAttachError);
+			await stranger.request({ type: "detach", activeSessionId: createdId }, 10_000).catch(() => {});
+		} else {
+			check("[owner-only] `includeClientOwned` alone is still not enough", !has(await stranger.list(true, { includeClientOwned: true }), createdId));
+			check("[owner-only] attach without the owner identity is refused", strangerAttachError.includes("Unknown active session"), strangerAttachError || "attach unexpectedly succeeded");
+		}
 
 		const attached = await owned.attach(createdId);
 		check("attach with the owner identity returns a snapshot", !!attached?.snapshot);
 		await owned.request({ type: "detach", activeSessionId: createdId }, 10_000).catch(() => {});
 
+		// --- the owner is recorded where the extension reads it --------------------
+		check("the worker descriptor names this client as owner", resolveWorkerDescriptor({ activeSessionId: createdId })?.ownerClientId === ownerClientId);
+
 		// --- sharing: another window clicking this session in its history -------
-		// `create` for the file is how the extension resumes a saved session, and a
-		// client-owned worker answers it with "already active". Promotion is the
-		// way out; it has to land even though the owner's own connections already
-		// spent `side-<n>` command ids under this identity (the journal replays an
-		// old answer for a repeated id and would report success without promoting).
+		// `create` for the file is how the extension resumes a saved session. The
+		// owner-only daemon answers an owned file with "already active" (and the
+		// extension promotes it, even though the owner's own connections already
+		// spent `side-<n>` ids under this identity — the journal replays an old answer
+		// for a repeated id and would report success without promoting). The shared
+		// daemon simply reuses the worker, so the extension promotes before following.
 		let refusal;
+		let reusedBeforePromotion;
 		try {
-			await stranger.create({ sessionPath: sessionFile, cwd: workRoot });
+			reusedBeforePromotion = await stranger.create({ sessionPath: sessionFile, cwd: workRoot });
 		} catch (error) {
 			refusal = error;
 		}
-		check(
-			"create for an owned session's file is refused with the structured code",
-			refusal?.code === "session_already_active" && refusal?.activeSessionId === createdId,
-			refusal ? `${refusal.code} ${refusal.activeSessionId}` : "create unexpectedly succeeded",
-		);
+		if (strangerSees) {
+			check("[shared] create for an owned session's file reuses its worker", reusedBeforePromotion && rowId(reusedBeforePromotion) === createdId, refusal?.message ?? rowId(reusedBeforePromotion ?? {}));
+		} else {
+			check(
+				"[owner-only] create for an owned session's file is refused with the structured code",
+				refusal?.code === "session_already_active" && refusal?.activeSessionId === createdId,
+				refusal ? `${refusal.code} ${refusal.activeSessionId}` : "create unexpectedly succeeded",
+			);
+		}
 		await promoteClientOwnedSession(ownerClientId, createdId);
+		check("promotion clears the owner in the descriptor, so the session outlives its window", resolveWorkerDescriptor({ activeSessionId: createdId })?.ownerClientId === undefined);
+		check("after promotion no owner id can be resolved to impersonate", resolveOwnerClientId({ sessionFile, activeSessionId: createdId }) === undefined);
 		check("after promotion a stranger's list sees the session", has(await stranger.list(true), createdId));
 		check("after promotion a stranger can attach", !!(await stranger.attach(createdId))?.snapshot);
 		const reused = await stranger.create({ sessionPath: sessionFile, cwd: workRoot });
@@ -174,6 +198,7 @@ async function cleanup() {
 		}
 	}
 	producer.dispose();
+	await privateDaemon?.stop();
 	try {
 		fs.rmSync(workRoot, { recursive: true, force: true });
 	} catch {

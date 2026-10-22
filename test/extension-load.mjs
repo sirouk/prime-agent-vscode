@@ -47,6 +47,21 @@ if (!agent) {
 	process.exit(0);
 }
 
+// The Rust agent (0.10+) has no extension loader at all — its CLI has no `-e/--extension`
+// — so there is nothing for this gate to load into. That is a fact about the agent build,
+// and the extension acts on it (it does not offer to install the agent extension there).
+const helpText = (() => {
+	try {
+		return execFileSync(agent, ["--help"], { encoding: "utf8", timeout: 20_000 });
+	} catch (error) {
+		return String(error.stdout ?? "");
+	}
+})();
+if (!/(^|\s)(-e|--extension)\b/m.test(helpText)) {
+	console.log("SKIP  this agent build has no -e/--extension loader (the Rust build does not load TypeScript agent extensions) — extension load gate not run");
+	process.exit(0);
+}
+
 const extensionDir = fileURLToPath(new URL("../agent-extension/background-jobs", import.meta.url));
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "prime-agent-extload-"));
 
