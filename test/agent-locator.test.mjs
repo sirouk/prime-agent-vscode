@@ -45,7 +45,13 @@ function makeExecutable(dir, name, body = "#!/bin/sh\nexit 0\n") {
 	return file;
 }
 
-const savedEnv = { PATH: process.env.PATH, SHELL: process.env.SHELL, XDG_DATA_HOME: process.env.XDG_DATA_HOME, NVM_DIR: process.env.NVM_DIR };
+// ~/.local/bin is the Rust installer's launcher and is searched first, so a machine
+// that really has prime-agent installed would answer for every tier below. HOME points
+// at an empty directory for the duration; os.homedir() reads it on POSIX.
+const fakeHome = path.join(workdir, "home");
+fs.mkdirSync(fakeHome, { recursive: true });
+const savedEnv = { PATH: process.env.PATH, SHELL: process.env.SHELL, XDG_DATA_HOME: process.env.XDG_DATA_HOME, NVM_DIR: process.env.NVM_DIR, HOME: process.env.HOME };
+process.env.HOME = fakeHome;
 function restoreEnv() {
 	for (const [key, value] of Object.entries(savedEnv)) {
 		if (value === undefined) delete process.env[key];
@@ -117,6 +123,21 @@ const startedAt = Date.now();
 const timedOut = await locator.loginShellPath(300);
 check("a hanging login shell times out", timedOut === undefined && Date.now() - startedAt < 5_000, `${Date.now() - startedAt}ms`);
 
+// A profile that prints the PATH and then leaves a background process holding stdout
+// must not cost the PATH it already printed: `close` never comes until the timeout.
+const lingeringShell = makeExecutable(
+	shellDir,
+	"lingeringshell",
+	`#!/bin/sh\nprintf '__PRIME_AGENT_PATH__%s__PRIME_AGENT_PATH__' "${loginBin}"\n/bin/sleep 5 &\n/bin/sleep 5\n`,
+);
+process.env.SHELL = lingeringShell;
+const lingerStart = Date.now();
+const lingered = await locator.loginShellPath(400);
+const lingerMs = Date.now() - lingerStart;
+// Both halves matter: the run really lingered up to the timeout (else this proves nothing),
+// and the PATH printed before it was still returned (the old code answered undefined here).
+check("a PATH printed before the shell lingers is kept", lingered === loginBin && lingerMs >= 350 && lingerMs < 4_000, `${String(lingered)} in ${lingerMs}ms`);
+
 // ---- tier 3: well-known install locations --------------------------------
 
 const dataHome = path.join(workdir, "data");
@@ -136,6 +157,12 @@ check(
 	(located.envPath ?? "").split(path.delimiter)[0] === standaloneBin,
 	located.envPath,
 );
+
+// The Rust launcher lives in ~/.local/bin and wins over everything else searched.
+const launcherAgent = makeExecutable(path.join(fakeHome, ".local", "bin"), "prime-agent");
+located = await locator.locateAgent("prime-agent");
+check("the Rust launcher in ~/.local/bin is searched first", located.source === "well-known" && located.command === launcherAgent, located.command);
+fs.rmSync(path.join(fakeHome, ".local"), { recursive: true, force: true });
 
 const nvmDir = path.join(workdir, "nvm");
 const nvmNewer = makeExecutable(path.join(nvmDir, "versions", "node", "v22.11.0", "bin"), "prime-agent");

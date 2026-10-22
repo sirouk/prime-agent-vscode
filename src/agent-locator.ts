@@ -103,21 +103,34 @@ function nvmBinDirs(home: string): string[] {
  */
 export function wellKnownDirs(home = os.homedir()): string[] {
 	if (process.platform === "win32") {
+		// The Rust installer's layout: the payload (`prime-agent.exe`) under
+		// `~\.local\share\prime-agent` and a `prime-agent.cmd` launcher in
+		// `~\.local\bin`. The payload goes first: it needs no cmd.exe hop, and a
+		// profile directory containing `( ) & % ! ^` would be refused on that hop.
+		// A registry PATH update is invisible to an editor that was already running.
 		const appData = process.env.APPDATA;
-		return appData ? [join(appData, "npm")] : [];
+		return [
+			join(home, ".local", "share", "prime-agent"),
+			join(home, ".local", "bin"),
+			...(appData ? [join(appData, "npm")] : []),
+		];
 	}
 	const dataHome = process.env.XDG_DATA_HOME || join(home, ".local", "share");
 	const dirs = [
-		// The installer's own bootstrapped node, whose PATH export it appends to
-		// ~/.zshrc — a file only interactive shells read.
+		// The Rust installer's launcher. It replaces whatever occupied this path, and
+		// the installer never edits a shell profile, so this is where a working
+		// install is even when nothing else on the machine knows about it — and it
+		// must win over a leftover npm shim found further down.
+		join(home, ".local", "bin"),
+		// The legacy installer's own bootstrapped node, whose PATH export it appends
+		// to ~/.zshrc — a file only interactive shells read.
 		join(dataHome, "prime-agent-node", "current", "bin"),
 		...nvmBinDirs(home),
 		"/opt/homebrew/bin",
 		"/usr/local/bin",
-		join(home, ".local", "bin"),
 	];
 	const prefix = npmrcPrefix(home);
-	if (prefix) dirs.splice(1, 0, join(prefix, "bin"));
+	if (prefix) dirs.splice(2, 0, join(prefix, "bin"));
 	return dirs;
 }
 
@@ -161,7 +174,14 @@ export function loginShellPath(timeoutMs = LOGIN_SHELL_TIMEOUT_MS): Promise<stri
 			child.kill("SIGKILL");
 			resolve(value);
 		};
-		const timer = setTimeout(() => finish(undefined), timeoutMs);
+		const parse = (): string | undefined => {
+			const match = new RegExp(`${PROBE_MARKER}([^\\n]*?)${PROBE_MARKER}`).exec(out);
+			return match?.[1] || undefined;
+		};
+		// A profile that leaves a background process holding our stdout open delays
+		// `close` until the timeout, long after the PATH was printed. The PATH is what
+		// we came for: whatever was printed by then is the answer.
+		const timer = setTimeout(() => finish(parse()), timeoutMs);
 		child.stdout?.setEncoding("utf8");
 		child.stdout?.on("data", (chunk: string) => {
 			// An interactive profile can print a banner; the markers are what make
@@ -170,10 +190,7 @@ export function loginShellPath(timeoutMs = LOGIN_SHELL_TIMEOUT_MS): Promise<stri
 			out = (out + chunk).slice(-256_000);
 		});
 		child.on("error", () => finish(undefined));
-		child.on("close", () => {
-			const match = new RegExp(`${PROBE_MARKER}([^\\n]*?)${PROBE_MARKER}`).exec(out);
-			finish(match?.[1] || undefined);
-		});
+		child.on("close", () => finish(parse()));
 	});
 }
 

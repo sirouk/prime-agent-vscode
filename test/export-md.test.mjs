@@ -108,6 +108,26 @@ check("thinking still blockquoted without tools", clean.includes("> **Thinking**
 check("assistant text kept without tools", clean.includes("I will update the tokenizer."));
 
 // ------------------------------------------------------------------
+// Roles beyond user/assistant/toolResult (Prime Agent 0.10 transcripts carry all of them)
+// ------------------------------------------------------------------
+const rich = [
+	{ role: "compactionSummary", summary: "We fixed the parser and agreed to keep tokens lazy.", tokensBefore: 123456, timestamp: 1 },
+	{ role: "branchSummary", summary: "Tried a regex approach; abandoned it.", fromId: "e1", timestamp: 2 },
+	{ role: "bashExecution", command: "git status", output: "On branch main\nnothing to commit", exitCode: 0, cancelled: false, truncated: false, timestamp: 3 },
+	{ role: "custom", customType: "refinement_outcome", content: "Created 2 memories", display: true, timestamp: 4 },
+	{ role: "custom", customType: "bookkeeping", content: "HIDDEN_BOOKKEEPING", display: false, timestamp: 5 },
+];
+const richMd = buildMarkdownExport(rich, true, state);
+check("a compaction summary survives export", richMd.includes("Earlier context (compacted)") && richMd.includes("We fixed the parser and agreed to keep tokens lazy."));
+check("the compaction size is stated", richMd.includes("123,456 tokens before compaction"));
+check("a branch summary survives export", richMd.includes("Branch summary") && richMd.includes("Tried a regex approach; abandoned it."));
+check("a !command is recorded with its status", richMd.includes("You ran a command (exit 0)") && richMd.includes("git status"));
+check("its output follows with tools on", richMd.includes("nothing to commit"));
+check("its output is withheld with tools off", !buildMarkdownExport(rich, false, state).includes("nothing to commit"));
+check("a displayed custom message is exported", richMd.includes("refinement_outcome") && richMd.includes("Created 2 memories"));
+check("a hidden custom message is not", !richMd.includes("HIDDEN_BOOKKEEPING"));
+
+// ------------------------------------------------------------------
 // Null state + empty transcript robustness
 // ------------------------------------------------------------------
 const minimal = buildMarkdownExport([], true, null);

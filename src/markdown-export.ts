@@ -97,6 +97,54 @@ export function buildMarkdownExport(
 					}
 				}
 			}
+		} else if (role === "compactionSummary") {
+			// After a compaction this summary is the only surviving record of everything
+			// before it; an export without it silently starts mid-conversation.
+			const summary = typeof message.summary === "string" ? message.summary.trim() : "";
+			const tokens = typeof message.tokensBefore === "number" ? ` · ${message.tokensBefore.toLocaleString()} tokens before compaction` : "";
+			lines.push(`## Earlier context (compacted)`);
+			lines.push("");
+			lines.push(`_Summary of the conversation before this point${tokens}_`);
+			lines.push("");
+			if (summary) lines.push(summary, "");
+		} else if (role === "branchSummary") {
+			const summary = typeof message.summary === "string" ? message.summary.trim() : "";
+			lines.push(`## Branch summary`);
+			lines.push("");
+			if (summary) lines.push(summary, "");
+		} else if (role === "bashExecution") {
+			// A `!command` the operator ran: their action, so it is always recorded;
+			// what it printed belongs with the other tool output.
+			const command = typeof message.command === "string" ? message.command : "";
+			const status = message.cancelled === true ? "cancelled" : typeof message.exitCode === "number" ? `exit ${message.exitCode}` : "";
+			lines.push(`## You ran a command${status ? ` (${status})` : ""}`);
+			lines.push("");
+			lines.push("```sh", command, "```", "");
+			const output = typeof message.output === "string" ? message.output.trimEnd() : "";
+			if (includeTools && output) {
+				const shown = output.split("\n");
+				lines.push("```", ...shown.slice(0, 60), "```");
+				if (shown.length > 60) lines.push(`_${shown.length - 60} more line(s) omitted_`);
+				lines.push("");
+			}
+		} else if (role === "custom") {
+			// Bookkeeping the agent marked for display (a harness refinement, a goal
+			// notice, a child's report). Hidden ones are the model's, not the reader's.
+			if (message.display !== true) continue;
+			const text =
+				typeof content === "string"
+					? content
+					: Array.isArray(content)
+						? content
+								.filter((p) => (p as { type?: string }).type === "text")
+								.map((p) => (p as { text: string }).text)
+								.join("\n")
+						: "";
+			if (!text.trim()) continue;
+			lines.push(`> **${typeof message.customType === "string" ? message.customType : "note"}**`);
+			lines.push(">");
+			for (const line of text.trim().split("\n")) lines.push(`> ${line}`);
+			lines.push("");
 		} else if (role === "toolResult") {
 			if (!includeTools) continue;
 			const toolCallId = message.toolCallId as string;

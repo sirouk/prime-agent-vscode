@@ -20,9 +20,12 @@ export class GitHeadContentProvider implements vscode.TextDocumentContentProvide
 		const exec = { maxBuffer: 16 * 1024 * 1024, timeout: 15_000 } as const;
 		let relPath: string;
 		try {
-			const { stdout: rel } = await execFileAsync("git", ["-C", cwd, "ls-files", "--full-name", "--", fsPath], exec);
-			// One path per line; take the first rather than concatenating them.
-			relPath = rel.split("\n")[0]?.trim() ?? "";
+			// NUL-terminated (-z): by default git C-quotes any path with a non-ASCII
+			// byte ("caf\303\251.txt" in literal quotes), which `git show` then cannot
+			// resolve, and a name's trailing space would not survive a trim.
+			const { stdout: rel } = await execFileAsync("git", ["-C", cwd, "ls-files", "-z", "--full-name", "--", fsPath], exec);
+			// One path per record; take the first rather than concatenating them.
+			relPath = rel.split("\0")[0] ?? "";
 		} catch {
 			// No git, or not a repository: there genuinely is no HEAD side, and an
 			// empty left pane ("everything is new") is the honest rendering.

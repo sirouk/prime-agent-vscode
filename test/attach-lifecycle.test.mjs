@@ -162,7 +162,13 @@ check("attach() tolerates a payload-less success", JSON.stringify(await bare.att
 // --- a lease held by another user is ACTIVE, not stale -----------------------
 const probe = path.join(os.tmpdir(), `pa-lease-probe-${process.pid}.jsonl`);
 const key = createHash("sha256").update(`${fs.realpathSync(path.dirname(probe))}/${path.basename(probe)}`).digest("hex");
-const lockDir = path.join(os.homedir(), ".prime", "agent", "session-leases", `${key}.lock`);
+// The agent's state directory is whatever PRIME_AGENT_CODING_AGENT_DIR names. Pointing
+// it at a temp directory keeps this test out of the operator's real lease store, and
+// makes every check below prove the override is honoured: a lease read from anywhere
+// else would find nothing and fail them.
+const leaseHome = fs.mkdtempSync(path.join(os.tmpdir(), "pa-lease-home-"));
+process.env.PRIME_AGENT_CODING_AGENT_DIR = leaseHome;
+const lockDir = path.join(leaseHome, "session-leases", `${key}.lock`);
 fs.mkdirSync(lockDir, { recursive: true });
 try {
 	let foreign = false;
@@ -175,7 +181,8 @@ try {
 	fs.writeFileSync(path.join(lockDir, "owner.json"), JSON.stringify({ pid: process.pid }));
 	check("our own live pid reads as active", (await isSessionActive(probe)) === true);
 } finally {
-	fs.rmSync(lockDir, { recursive: true, force: true });
+	fs.rmSync(leaseHome, { recursive: true, force: true });
+	delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
 }
 
 // --- git HEAD content: empty means "new file", not "we failed" ---------------
@@ -183,6 +190,24 @@ const untracked = path.join(workdir, "untracked.txt");
 fs.writeFileSync(untracked, "x");
 const head = await new GitHeadContentProvider().provideTextDocumentContent({ with: () => ({ fsPath: untracked }) });
 check("a path outside any repository yields an empty HEAD side", head === "", JSON.stringify(head).slice(0, 48));
+
+// git C-quotes a path with a non-ASCII byte unless asked for NUL-terminated output;
+// the quoted form cannot be handed back to `git show`, so such a file's HEAD side
+// came back as an error message instead of its content.
+{
+	const { execFileSync } = await import("node:child_process");
+	const repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pa-head-")));
+	const git = (...args) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { cwd: repo, stdio: "pipe" });
+	git("init", "-q");
+	const accented = path.join(repo, "caf\u00e9 notes.txt");
+	fs.writeFileSync(accented, "committed text");
+	git("add", ".");
+	git("commit", "-qm", "init");
+	fs.writeFileSync(accented, "edited by the agent");
+	const accentedHead = await new GitHeadContentProvider().provideTextDocumentContent({ with: () => ({ fsPath: accented }) });
+	check("a tracked non-ASCII path resolves to its HEAD content", accentedHead === "committed text", JSON.stringify(accentedHead).slice(0, 80));
+	fs.rmSync(repo, { recursive: true, force: true });
+}
 
 // --- the slash catalog answers for the session on screen, whatever it is ------
 // It describes the agent build, not the session, and the webview asks for it
