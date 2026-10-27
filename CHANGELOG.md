@@ -13,6 +13,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 
 ## [Unreleased]
 
+## [1.0.56]
+
 - **A background job no longer ends when its shell does.** A command like `npm run build &` keeps its real work running in the job's process group after the shell returns, but the job was reported finished the moment the shell exited: its status flipped to done with the shell's exit code, and it vanished from the killable set while the build still ran. The job now stays live, listed and killable until the whole group drains, and reports the shell's exit code when it settles. Killing on Windows walks the command's tree with `taskkill` instead of terminating only `cmd.exe`, and asking for job output with a bad `lines` value (0 or negative) returns the last line rather than the entire log window.
 - **The Stop button only appears for jobs this window can actually stop.** A job row replayed from the transcript — after a window reload, an extension update or a re-attach — offered Stop for a job started by a process that may be gone, and the kill dead-ended. Only jobs whose start this process saw as a live event offer Stop now.
 - **Compaction retries act on the session you are looking at.** While following a session owned by another window, a failed compaction's retry could restore the hidden background session's model onto the shared session. The retry and the restore now read the model of the session on screen; an attached session with an unknown model still gets a compaction offer, and nothing is cross-wired onto it when the retry ends.
@@ -445,7 +447,8 @@ After a cut, add the new version's compare link at the bottom and re-point [Unre
 - Test layers: webview DOM harness, export harness, activation harness, smoke, host e2e, headless
   screenshot matrix, and a persistent live-shell driver for real VS Code verification.
 
-[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.55...HEAD
+[Unreleased]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.56...HEAD
+[1.0.56]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.55...v1.0.56
 [1.0.55]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.54...v1.0.55
 [1.0.54]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.53...v1.0.54
 [1.0.53]: https://github.com/sirouk/prime-agent-vscode/compare/v1.0.52...v1.0.53
