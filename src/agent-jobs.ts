@@ -101,6 +101,13 @@ function label(command: string, max = 96): string {
 
 export class AgentJobIndex {
 	private readonly jobs = new Map<string, AgentJobRecord>();
+	/**
+	 * Jobs whose start this view saw as a live event from the process that owns
+	 * them. A start replayed from the transcript may belong to a process that is
+	 * gone: the kill this panel offers is answered by whatever process is live
+	 * now, and a fresh one cannot act on a job it never started.
+	 */
+	private readonly liveIds = new Set<string>();
 	/** Opaque host-issued capability per job, stable for as long as the job is known. */
 	private readonly refByJobId = new Map<string, string>();
 	private readonly jobIdByRef = new Map<string, string>();
@@ -110,7 +117,7 @@ export class AgentJobIndex {
 		if (event.type === "tool_execution_end" && event.toolName === BACKGROUND_TOOL) {
 			const result = event.result;
 			const job = isRecord(result) ? jobFromDetails(result.details) : undefined;
-			if (job && this.apply(job)) return true;
+			if (job && this.apply(job, true)) return true;
 		}
 		// A completion notice is a message the extension injected, and which event
 		// delivers it is not ours to assume — `message_end`, `turn_end` and
@@ -144,6 +151,7 @@ export class AgentJobIndex {
 
 	clear(): void {
 		this.jobs.clear();
+		this.liveIds.clear();
 		this.refByJobId.clear();
 		this.jobIdByRef.clear();
 	}
@@ -154,6 +162,7 @@ export class AgentJobIndex {
 		for (const [id, job] of [...this.jobs]) {
 			if (job.state !== "exited") continue;
 			this.jobs.delete(id);
+			this.liveIds.delete(id);
 			const ref = this.refByJobId.get(id);
 			if (ref) {
 				this.refByJobId.delete(id);
@@ -210,21 +219,23 @@ export class AgentJobIndex {
 				...(job.exitCode === undefined ? {} : { exitCode: job.exitCode }),
 				...(job.signal === undefined ? {} : { signal: job.signal }),
 				// The extension owns the process, so both of these are real offers
-				// rather than best-effort attempts: a published log and a job id it
-				// will act on.
+				// rather than best-effort attempts: a published log, and a job id
+				// it will act on — but only for a job this view saw start live;
+				// a replayed row may belong to a process that is gone.
 				hasOutput: true as const,
-				...(job.state === "running" ? { killable: true as const } : {}),
+				...(job.state === "running" && this.liveIds.has(job.id) ? { killable: true as const } : {}),
 				source: "agent" as const,
 			}));
 	}
 
-	private apply(job: AgentJobRecord): boolean {
+	private apply(job: AgentJobRecord, live = false): boolean {
 		const existing = this.jobs.get(job.id);
 		// A start can arrive after its own completion when a snapshot replays the
 		// thread out of order. Never let it resurrect a job that already ended.
 		if (existing?.state === "exited" && job.state === "running") return false;
 		if (existing && JSON.stringify(existing) === JSON.stringify(job)) return false;
 		this.jobs.set(job.id, job);
+		if (live) this.liveIds.add(job.id);
 		this.refFor(job.id);
 		return true;
 	}

@@ -104,6 +104,29 @@ const transcript = [
 check("a resumed thread rebuilds the panel from messages alone", resumed.rebuildFromMessages(transcript) === true);
 check("and lands on the finished state", resumed.snapshot()[0]?.exitCode === 0, JSON.stringify(resumed.snapshot()));
 
+// --- a replayed start is not proof the process still runs --------------------
+// rebuildFromMessages reads the thread, not the OS: a running row it produces
+// may describe a process that died with the previous extension run. Only jobs
+// this process witnessed through track() (live events) arm the stop button;
+// a replayed row never offers a stop that would dead-end.
+{
+	const runningTranscript = [
+		{ role: "user", content: "build it" },
+		{ role: "toolResult", toolName: "background", toolCallId: "t1", content: [], details: { job: started } },
+	];
+	const replayed = new AgentJobIndex();
+	check("a replayed running job still shows its row", replayed.rebuildFromMessages(runningTranscript) === true);
+	const replayedRow = replayed.snapshot()[0];
+	check("but offers no stop: the process that owned it may be gone", replayedRow?.killable === undefined, JSON.stringify(replayedRow));
+
+	// The opposite direction: a job the host DID see live keeps its stop across
+	// a replay, because provenance is remembered per id, not reset by the rebuild.
+	const witnessed = new AgentJobIndex();
+	witnessed.track(toolResultEvent(started));
+	witnessed.rebuildFromMessages(runningTranscript);
+	check("a job witnessed live keeps its stop across a replay", witnessed.snapshot()[0]?.killable === true, JSON.stringify(witnessed.snapshot()[0]));
+}
+
 // --- per-turn and per-session resets ---------------------------------------
 
 resumed.clearFinished();
