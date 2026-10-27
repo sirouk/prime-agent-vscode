@@ -70,13 +70,17 @@ jobs:
           # agent-extension/background-jobs ships on purpose: "Prime Agent: Install
           # Background Jobs Agent Extension" copies it out of the packaged extension
           # into ~/.prime/agent/extensions/. Keep this list in step with release.sh.
+          npm run package
+          # Run the file-set assertion AFTER the build: `vsce ls` reads the tree,
+          # and dist/ and media/main.js exist only once the build half of
+          # `npm run package` has run — before it, a fresh CI checkout would make
+          # the check pass without ever seeing the files that actually ship.
           unexpected="$(npx vsce ls --no-dependencies | grep -vE '^(package\.json|README\.md|LICENSE|CHANGELOG\.md|dist/extension\.js|agent-extension/background-jobs/(index|jobs)\.ts|media/(main\.js|main\.css|panels\.css|icon\.png|icon\.svg))$' || true)"
           if [ -n "$unexpected" ]; then
-            echo "refusing to package: unexpected files would ship inside the vsix:" >&2
+            echo "refusing to publish: unexpected files shipped inside the vsix:" >&2
             echo "$unexpected" >&2
             exit 1
           fi
-          npm run package
 
       - name: Publish to the VS Code Marketplace
         env:
