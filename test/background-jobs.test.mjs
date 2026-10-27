@@ -89,6 +89,48 @@ check("a killed job is reported as killed, not as a clean exit", killed?.signal 
 check("killing an unknown job is refused rather than faked", jobs.kill("nope") === false);
 check("reading an unknown job returns nothing to show", jobs.output("nope") === undefined);
 
+// --- a backgrounded command outlives its own shell --------------------------
+// `cmd & exit 0` hands the process group to its children and leaves. The
+// shell's exit event used to settle the job at once — killing the whole point
+// of backgrounding. The job must stay running, listed and killable, until the
+// group it created is actually gone. (POSIX only: on Windows the detached
+// child is not a process-group leader, so the old rule holds there.)
+if (process.platform !== "win32") {
+	const bgMarker = path.join(workdir, "bg-survivor.txt");
+	const bg = jobs.start({ command: `sleep 45 && echo survived > '${bgMarker}' & exit 0`, cwd: workdir });
+	check("the backgrounding job starts running", bg.state === "running");
+	// Wait until the shell itself is gone: at that exact moment the old code
+	// had already settled the job; the new code must not have.
+	const shellGone = await until(() => {
+		try {
+			process.kill(bg.pid, 0);
+			return false;
+		} catch {
+			return true;
+		}
+	}, 4_000);
+	check("the shell of the backgrounding job has exited", shellGone === true, `state: ${jobs.get(bg.id)?.state}`);
+	check("the job stays running while its group drains", jobs.get(bg.id)?.state === "running", JSON.stringify(jobs.get(bg.id)));
+	check("the job is listed as running while its group drains", jobs.list().some((job) => job.id === bg.id && job.state === "running"));
+	check("the draining job is still killable", jobs.kill(bg.id) === true);
+	check("the job settles once the group is gone", await until(() => jobs.get(bg.id)?.state === "exited"));
+	await sleep(300);
+	check("the killed backgrounded job never ran its marker", !fs.existsSync(bgMarker));
+}
+
+// --- a bad `lines` cannot ask for the whole window ---------------------------
+// `slice(-maxLines)` inverts for 0 and negatives: zero meant the full 256 KiB
+// window and a negative skipped from the head instead of the tail.
+{
+	const many = jobs.start({ command: "seq 1 300", cwd: workdir });
+	await until(() => jobs.get(many.id)?.state === "exited");
+	const full = jobs.output(many.id, 300)?.lines ?? [];
+	check("an explicit 300 reads the whole short log", full.length === 300, `${full.length}`);
+	check("lines=0 is clamped to one line, not the whole window", jobs.output(many.id, 0)?.lines.length === 1, JSON.stringify(jobs.output(many.id, 0)?.lines.length));
+	check("a negative lines is clamped to the tail too", jobs.output(many.id, -5)?.lines.length === 1, JSON.stringify(jobs.output(many.id, -5)?.lines.length));
+	check("the clamped line is the tail, not the head", jobs.output(many.id, 0)?.lines[0] === "300", JSON.stringify(jobs.output(many.id, 0)?.lines));
+}
+
 // --- killAll is what session shutdown uses ---------------------------------
 
 const a = jobs.start({ command: "sleep 45", cwd: workdir });

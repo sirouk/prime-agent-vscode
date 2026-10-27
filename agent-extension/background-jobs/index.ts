@@ -94,7 +94,7 @@ export default function backgroundJobs(pi: ExtensionAPI): void {
 			command: Type.Optional(Type.String({ description: "Shell command to run (action 'start')" })),
 			cwd: Type.Optional(Type.String({ description: "Working directory (action 'start'); defaults to the session cwd" })),
 			id: Type.Optional(Type.String({ description: "Job id (actions 'output' and 'kill')" })),
-			lines: Type.Optional(Type.Number({ description: "How many trailing lines to read (action 'output'); default 100" })),
+			lines: Type.Optional(Type.Number({ minimum: 1, description: "How many trailing lines to read (action 'output'); default 100" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const text = (value: string, details: Record<string, unknown> = {}) => ({

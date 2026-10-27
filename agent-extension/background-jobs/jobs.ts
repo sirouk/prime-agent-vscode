@@ -52,12 +52,16 @@ const MAX_TAIL_BYTES = 256 * 1024;
 const DEFAULT_TAIL_LINES = 100;
 /** Grace between the polite signal and the one that cannot be refused. */
 const KILL_GRACE_MS = 5_000;
+/** How often the drain probe re-checks a group that outlived its shell. */
+const GROUP_DRAIN_POLL_MS = 500;
 
 interface Job {
 	record: JobRecord;
 	child: ChildProcess;
 	logFd: number;
 	killTimer?: ReturnType<typeof setTimeout>;
+	/** Drain probe for a job whose shell exited while its group is still alive. */
+	groupTimer?: ReturnType<typeof setInterval>;
 }
 
 function shortId(): string {
@@ -112,7 +116,7 @@ export class JobManager {
 		};
 		const job: Job = { record, child, logFd };
 		this.jobs.set(id, job);
-		child.on("exit", (code, signal) => this.settle(job, code, signal));
+		child.on("exit", (code, signal) => this.onShellExit(job, code, signal));
 		child.on("error", (error) => {
 			this.appendLog(job, `\n[background] failed to start: ${error.message}\n`);
 			this.settle(job, null, null);
@@ -167,13 +171,55 @@ export class JobManager {
 	private signal(job: Job, signal: NodeJS.Signals): void {
 		const pid = job.child.pid;
 		if (pid === undefined) return;
+		// Windows has no process groups: child.kill() terminates only cmd.exe and
+		// leaves the job's real command, and anything it spawned, running.
+		// taskkill /T walks the tree under the pid instead.
+		if (process.platform === "win32") {
+			const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+			// A missing taskkill surfaces as an 'error' event, which would crash
+			// this process if nobody listened for it.
+			killer.on("error", () => {});
+			return;
+		}
 		try {
 			// Negative pid addresses the group we created; a bare pid would leave
 			// the job's own children running.
-			if (process.platform === "win32") job.child.kill(signal);
-			else process.kill(-pid, signal);
+			process.kill(-pid, signal);
 		} catch {
 			// Already gone, or no longer ours. The exit handler settles it either way.
+		}
+	}
+
+	/**
+	 * The shell exiting is not the job finishing: `cmd &` leaves the real work
+	 * running in the job's process group after the shell returns. Settling then
+	 * would both report the shell's exit code as the job's and drop the job from
+	 * the killable set while the work still runs — the exact orphan this manager
+	 * exists to prevent. Keep the job live until the group drains. POSIX only:
+	 * Windows has no process groups to probe.
+	 */
+	private onShellExit(job: Job, code: number | null, signal: NodeJS.Signals | string | null): void {
+		const pgid = job.child.pid;
+		if (process.platform !== "win32" && pgid !== undefined && this.groupAlive(pgid)) {
+			if (job.groupTimer) clearTimeout(job.groupTimer);
+			job.groupTimer = setInterval(() => {
+				if (!this.jobs.has(job.record.id) || !this.groupAlive(pgid)) this.settle(job, code, signal);
+			}, GROUP_DRAIN_POLL_MS);
+			// A job backgrounded on purpose can outlive the agent; the probe must
+			// never hold the process open.
+			job.groupTimer.unref?.();
+			return;
+		}
+		this.settle(job, code, signal);
+	}
+
+	/** Whether any process still lives in the job's process group. */
+	private groupAlive(pgid: number): boolean {
+		try {
+			process.kill(-pgid, 0);
+			return true;
+		} catch {
+			return false;
 		}
 	}
 
@@ -181,6 +227,7 @@ export class JobManager {
 		if (!this.jobs.has(job.record.id)) return;
 		this.jobs.delete(job.record.id);
 		if (job.killTimer) clearTimeout(job.killTimer);
+		if (job.groupTimer) clearInterval(job.groupTimer);
 		try {
 			fs.closeSync(job.logFd);
 		} catch {
@@ -212,6 +259,10 @@ export class JobManager {
 
 /** Last `maxLines` lines of a file, read from the end so size does not matter. */
 export function tailFile(file: string, maxLines: number): { lines: string[]; truncated: boolean } | undefined {
+	// `slice(-maxLines)` inverts for 0 and negatives: 0 returns the whole window
+	// and a negative skips from the head. Clamp so a bad `lines` can only shrink
+	// the answer, never blow the 256 KiB context budget.
+	const boundedLines = Math.max(1, Math.floor(maxLines));
 	let handle: number | undefined;
 	try {
 		const stat = fs.statSync(file);
@@ -227,7 +278,7 @@ export function tailFile(file: string, maxLines: number): { lines: string[]; tru
 		if (start > 0) text = text.slice(text.indexOf("\n") + 1);
 		const all = text.split("\n");
 		if (all.length > 0 && all[all.length - 1] === "") all.pop();
-		const lines = all.slice(-maxLines);
+		const lines = all.slice(-boundedLines);
 		return { lines, truncated: start > 0 || all.length > lines.length };
 	} catch {
 		return undefined;
