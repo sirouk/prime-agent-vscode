@@ -47,11 +47,15 @@ export function activate(context: vscode.ExtensionContext): void {
 	// VS Code does not await command callbacks. Keep their rejection boundary at
 	// the registration point so a transport failure cannot become an unhandled
 	// extension-host rejection with no operator-visible explanation.
-	const runCommand = (label: string, action: () => Promise<void>) => {
-		void action().catch((err) => {
+	const runCommand = (label: string, action: (controller: SessionController) => Promise<void>) => {
+		// Read the module state at call time: deactivate nulls it, and a command
+		// fired after that must be a no-op rather than a TypeError.
+		const active = controller;
+		if (!active) return;
+		void action(active).catch((err) => {
 			const detail = err instanceof Error ? err.message : String(err);
 			output.appendLine(`[prime-agent] ${label} failed: ${detail}`);
-			controller?.showErrorNotice(`${label} failed: ${detail}`);
+			active.showErrorNotice(`${label} failed: ${detail}`);
 		});
 	};
 
@@ -61,33 +65,41 @@ export function activate(context: vscode.ExtensionContext): void {
 			provider.focusComposer();
 		}),
 		vscode.commands.registerCommand("primeAgent.openChat", () => {
-			ChatPanel.createOrShow(context.extensionUri, controller!);
+			const active = controller;
+			if (!active) return;
+			ChatPanel.createOrShow(context.extensionUri, active);
 		}),
-		vscode.commands.registerCommand("primeAgent.newSession", () => runCommand("New session", () => controller!.newSession())),
-		vscode.commands.registerCommand("primeAgent.abort", () => runCommand("Stop", () => controller!.abort())),
-		vscode.commands.registerCommand("primeAgent.compact", () => runCommand("Compact", () => controller!.compact())),
-		vscode.commands.registerCommand("primeAgent.exportChat", () => runCommand("Export chat", () => controller!.exportChat())),
-		vscode.commands.registerCommand("primeAgent.restart", () => runCommand("Restart", () => controller!.restart())),
+		vscode.commands.registerCommand("primeAgent.newSession", () => runCommand("New session", (c) => c.newSession())),
+		vscode.commands.registerCommand("primeAgent.abort", () => runCommand("Stop", (c) => c.abort())),
+		vscode.commands.registerCommand("primeAgent.compact", () => runCommand("Compact", (c) => c.compact())),
+		vscode.commands.registerCommand("primeAgent.exportChat", () => runCommand("Export chat", (c) => c.exportChat())),
+		vscode.commands.registerCommand("primeAgent.restart", () => runCommand("Restart", (c) => c.restart())),
 		vscode.commands.registerCommand("primeAgent.installAgentExtension", () =>
-			runCommand("Install agent extension", () => controller!.installBackgroundJobsExtension()),
+			runCommand("Install agent extension", (c) => c.installBackgroundJobsExtension()),
 		),
 		vscode.commands.registerCommand("primeAgent.history", () => {
+			const active = controller;
+			if (!active) return;
 			reveal();
-			controller!.showHistoryView();
+			active.showHistoryView();
 		}),
 		vscode.commands.registerCommand("primeAgent.addSelectionToChat", () => {
-			const selection = controller!.getActiveSelection();
+			const active = controller;
+			if (!active) return;
+			const selection = active.getActiveSelection();
 			if (!selection) {
 				void vscode.window.showInformationMessage("Select some code first.");
 				return;
 			}
-			controller!.broadcastInsertSelection(selection);
+			active.broadcastInsertSelection(selection);
 			reveal();
 		}),
 		vscode.commands.registerCommand("primeAgent.addActiveFileToChat", () => {
-			const file = controller!.getActiveFilePath();
+			const active = controller;
+			if (!active) return;
+			const file = active.getActiveFilePath();
 			if (!file) return;
-			controller!.broadcastInsertMention(file);
+			active.broadcastInsertMention(file);
 			reveal();
 		}),
 	);
