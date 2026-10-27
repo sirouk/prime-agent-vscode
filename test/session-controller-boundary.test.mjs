@@ -977,7 +977,12 @@ controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 	const originalFetchModels = controller.fetchAvailableModels;
 	const originalSetModel = controller.setModel;
 	const originalCompact = controller.compact;
-	controller.state = { model: { provider: "vendor-a", id: "big", contextWindow: 1_000_000 } };
+	// While attached (this controller still holds its identity-fixture
+	// attachment), the session on screen is rentedState: the model that refused
+	// and the one a retry must put back. this.state describes the hidden
+	// background RPC session and must never be restored onto the shared one.
+	controller.state = { model: { provider: "vendor-a", id: "background", contextWindow: 1_000_000 } };
+	controller.rentedState = { model: { provider: "vendor-a", id: "big", contextWindow: 1_000_000 } };
 	controller.fetchAvailableModels = async () => ([
 		{ provider: "vendor-a", id: "big", contextWindow: 1_000_000 },
 		{ provider: "vendor-b", id: "roomy", contextWindow: 2_000_000, name: "Roomy" },
@@ -1012,10 +1017,28 @@ controller.scheduleChildrenRefresh = originalIdentityChildrenRefresh;
 	check("a button replaces the instruction rather than repeating it",
 		!/switch model/i.test(offer?.text ?? ""), offer?.text);
 
+	// An attached session whose own model is unknown must not have the hidden
+	// background RPC session's model cross-wired onto it: nothing is restored.
+	controller.fetchAvailableModels = async () => ([
+		{ provider: "vendor-a", id: "big", contextWindow: 1_000_000 },
+		{ provider: "vendor-b", id: "roomy", contextWindow: 2_000_000, name: "Roomy" },
+	]);
+	controller.rentedState = {};
+	controller.compactionModelsTried.clear();
+	notices.length = 0;
+	calls.length = 0;
+	await controller.reportCompactFailure("Turn prefix summarization failed: Model refused to respond (refusal)");
+	const unknownModelOffer = notices.at(-1);
+	check("an attached session with an unknown model still gets an offer", !!unknownModelOffer?.action, JSON.stringify(unknownModelOffer));
+	await controller.runNoticeAction(unknownModelOffer.action.id);
+	check("no wrong model is cross-wired onto it when the retry ends",
+		calls.join(" > ") === "set:vendor-b/roomy > compact", calls.join(" > "));
+
 	controller.fetchAvailableModels = originalFetchModels;
 	controller.setModel = originalSetModel;
 	controller.compact = originalCompact;
 	controller.state = null;
+	controller.rentedState = null;
 	controller.compactionModelsTried.clear();
 	controller.broadcast = originalBroadcast;
 	controller.compactionStillRunning = originalStillRunning;

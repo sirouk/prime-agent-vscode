@@ -1753,7 +1753,10 @@ export class SessionController implements vscode.Disposable {
 
 	/** Compact once with `model`, then put the operator's model back. */
 	private async compactWithModel(model: RpcModel): Promise<void> {
-		const original = this.state?.model ?? this.rentedState?.model ?? null;
+		// While attached, this.state describes the hidden background RPC session;
+		// the session on screen is rentedState. Restoring this.state.model here
+		// would switch the SHARED attached session to the background model.
+		const original = this.attached ? this.rentedState?.model ?? null : this.state?.model ?? null;
 		const label = model.name ?? `${model.provider}/${model.id}`;
 		this.compactionModelsTried.add(`${model.provider}/${model.id}`);
 		this.broadcast({ type: "notice", level: "info", text: `Compacting with ${label}…` });
@@ -1782,7 +1785,9 @@ export class SessionController implements vscode.Disposable {
 		}
 		let fallback: RpcModel | null = null;
 		try {
-			const current = this.state?.model ?? this.rentedState?.model ?? null;
+			// Same shadowing as compactWithModel: the model that refused is the
+			// one on screen, not the hidden background session's.
+			const current = this.attached ? this.rentedState?.model ?? null : this.state?.model ?? null;
 			this.compactionModelsTried.add(`${current?.provider ?? ""}/${current?.id ?? ""}`);
 			fallback = SessionController.pickCompactionFallback(await this.fetchAvailableModels(), current, this.compactionModelsTried);
 		} catch {
@@ -2078,9 +2083,10 @@ export class SessionController implements vscode.Disposable {
 		// The webview sends debounced changes. Refuse a late message from the
 		// outgoing thread rather than writing it under the new thread's key.
 		if (sessionId !== this.sessionKey()) return;
-		// The webview accepts a draft up to MAX_PROMPT_TEXT_CHARS and the sidebar is torn
-		// down whenever it is hidden, so a smaller cap here silently cut the tail off a long
-		// draft on the way back. Cut on a code-point boundary, never through a surrogate pair.
+		// The webview accepts a draft up to MAX_PROMPT_TEXT_CHARS and can be re-booted
+		// (window reload, extension update, panel closed and reopened), so a smaller
+		// cap here silently cut the tail off a long draft on the way back. Cut on a
+		// code-point boundary, never through a surrogate pair.
 		let end = Math.min(text.length, MAX_PROMPT_TEXT_CHARS);
 		if (end < text.length && end > 0 && /[\uD800-\uDBFF]/.test(text[end - 1])) end -= 1;
 		const bounded = text.slice(0, end);
@@ -4203,7 +4209,6 @@ export class SessionController implements vscode.Disposable {
 		await this.prompt({ text: `/jobs kill ${job.id}`, images: [], selections: [], streamingBehavior: "steer" });
 	}
 
-	/** Refresh and broadcast the children (subagents) of the CURRENT session. */
 	/** Previous flattened children set (for spawn/retire card derivation). */
 	private previousChildIds: Set<string> | null = null;
 	/** Last strip payload sent, so an unchanged roster doesn't repaint the strip. */
@@ -4590,6 +4595,17 @@ export class SessionController implements vscode.Disposable {
 				current.activeSessionId = binding.activeSessionId;
 				if (this.attachAttempt?.activeSessionId === binding.previousActiveSessionId) this.attachAttempt.activeSessionId = binding.activeSessionId;
 				void this.refreshSnapshot({ keepDraft: true });
+			}
+			// Breadcrumbs are frozen copies taken at descent time. The swapped
+			// session is usually an ancestor, not the one on screen, so the guard
+			// above does not fire for it — re-key those too, or Back after the swap
+			// attaches with a handle the daemon no longer honours.
+			if (typeof binding.previousActiveSessionId === "string" && typeof binding.activeSessionId === "string") {
+				for (const target of this.returnTargets) {
+					if (target.kind === "attached" && target.activeSessionId === binding.previousActiveSessionId) {
+						target.activeSessionId = binding.activeSessionId;
+					}
+				}
 			}
 			return;
 		}
@@ -5268,18 +5284,25 @@ export class SessionController implements vscode.Disposable {
 		const MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024;
 		const images: ImageAttachment[] = [];
 		let totalBytes = 0;
-		let skippedOversized = 0;
+		let skipped = 0;
 		for (const uri of uris.slice(0, MAX_IMAGES)) {
 			try {
 				const bytes = await vscode.workspace.fs.readFile(uri);
 				if (bytes.byteLength > MAX_IMAGE_BYTES || totalBytes + bytes.byteLength > MAX_TOTAL_IMAGE_BYTES) {
-					skippedOversized += 1;
+					skipped += 1;
 					continue;
 				}
 				const ext = path.extname(uri.fsPath).slice(1).toLowerCase();
+				// The dialog filter is advisory: a file that slips through with an
+				// unsupported extension is skipped rather than shipped with a
+				// guessed MIME type the provider may reject.
+				if (!mimeByExt[ext]) {
+					skipped += 1;
+					continue;
+				}
 				images.push({
 					data: Buffer.from(bytes).toString("base64"),
-					mimeType: mimeByExt[ext] ?? "image/png",
+					mimeType: mimeByExt[ext],
 					name: path.basename(uri.fsPath),
 				});
 				totalBytes += bytes.byteLength;
@@ -5288,8 +5311,12 @@ export class SessionController implements vscode.Disposable {
 			}
 		}
 		if (!stillCurrent()) return;
-		if (uris.length > MAX_IMAGES || skippedOversized > 0) {
-			reply({ type: "notice", level: "warning", text: "Some images were skipped (maximum 8 images, 7 MiB each, 16 MiB total)." });
+		if (uris.length > MAX_IMAGES || skipped > 0) {
+			reply({
+				type: "notice",
+				level: "warning",
+				text: "Some images were skipped (only png, jpg, jpeg, gif and webp are supported; maximum 8 images, 7 MiB each, 16 MiB total).",
+			});
 		}
 		reply({ type: "imagePicked", requestId, images });
 	}
