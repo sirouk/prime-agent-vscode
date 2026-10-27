@@ -210,8 +210,7 @@ export class Composer {
 			}
 			this.autoGrow();
 			this.updateAutocomplete();
-			window.clearTimeout(this.draftDebounce);
-			this.draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
+			this.persistDraftSoon();
 		});
 		// The caret moves without an input event too. A mention armed at one offset
 		// and accepted at another splices the path into the middle of the line, and
@@ -711,6 +710,17 @@ export class Composer {
 		this.renderChips();
 	}
 
+	/**
+	 * Persist the box like a typed edit. Programmatic mutations (mentions, agent
+	 * edits, autocompletes) must reach the sticky draft too: the draft is the
+	 * only thing that survives a webview re-boot, and skipping this left the
+	 * pre-mutation text waiting for it.
+	 */
+	private persistDraftSoon(): void {
+		window.clearTimeout(this.draftDebounce);
+		this.draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
+	}
+
 	insertMention(path: string): void {
 		this.accepted.add(path);
 		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
@@ -723,6 +733,7 @@ export class Composer {
 		this.textarea.selectionStart = this.textarea.selectionEnd = pos;
 		this.autoGrow();
 		this.focus();
+		this.persistDraftSoon();
 	}
 
 	textIsEmpty(): boolean {
@@ -749,6 +760,7 @@ export class Composer {
 		this.textarea.value = text;
 		this.autoGrow();
 		this.focus();
+		this.persistDraftSoon();
 	}
 
 	/**
@@ -1090,8 +1102,7 @@ export class Composer {
 		this.autoGrow();
 		this.closeAutocomplete();
 		this.textarea.scrollTop = this.textarea.scrollHeight;
-		window.clearTimeout(this.draftDebounce);
-		this.draftDebounce = window.setTimeout(() => this.deps.onDraftChanged(this.textarea.value), 300);
+		this.persistDraftSoon();
 	}
 
 	private onKeyDown(event: KeyboardEvent): void {
@@ -1570,7 +1581,10 @@ export class Composer {
 		const caret = this.textarea.selectionStart ?? this.textarea.value.length;
 		if (this.acKind === "slash") {
 			this.historyIndex = null;
-			this.textarea.value = item.insert;
+			// Splice only the command token, exactly like the mention branch:
+			// replacing the whole value destroyed everything typed after it.
+			const after = this.textarea.value.slice(caret).replace(/^\s+/, "");
+			this.textarea.value = `${item.insert}${after}`;
 			this.textarea.selectionStart = this.textarea.selectionEnd = item.insert.length;
 		} else {
 			// Re-derive the range instead of trusting the offset the panel opened
@@ -1597,6 +1611,7 @@ export class Composer {
 		this.closeAutocomplete();
 		this.autoGrow();
 		this.textarea.focus();
+		this.persistDraftSoon();
 	}
 
 	private closeAutocomplete(): void {

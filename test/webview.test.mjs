@@ -1489,6 +1489,60 @@ check("an agent-run command such as /goal is still sent as a prompt", JSON.strin
 textarea.value = "";
 textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
 
+// --- accepting a slash command splices at the caret ---------------------------
+// The panel can sit open with a stale query: the host swapped the box text
+// (an agent editor edit) while the operator was browsing commands, and the
+// caret went Home. Enter splices the selected command in — the text after the
+// caret must survive, exactly like the mention branch already promises.
+{
+	textarea.value = "/sec";
+	textarea.selectionStart = textarea.selectionEnd = 4;
+	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+	check("slash menu open with a filtered query", document.querySelector(".autocomplete.visible") !== null, "menu not open");
+	hostMessage({ type: "editorText", text: "ship the release" });
+	textarea.selectionStart = textarea.selectionEnd = 0;
+	textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+	check("accepting a command keeps the text after the caret",
+		textarea.value === "/security-pipeline ship the release", JSON.stringify(textarea.value));
+	textarea.value = "";
+	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
+
+// --- programmatic box edits must reach the sticky draft -----------------------
+// The draft is the only thing that survives a webview re-boot, and only the
+// input listener ever wrote it. Mentions, host editor edits and accepted
+// autocompletes mutated the box and then evaporated on the next reload.
+{
+	posted.length = 0;
+	hostMessage({ type: "insertMention", path: "webview/keep.ts" });
+	await new Promise((resolve) => setTimeout(resolve, 350));
+	check("an inserted mention persists into the sticky draft",
+		posted.some((m) => m.type === "draftChanged" && m.text === textarea.value && textarea.value.includes("@webview/keep.ts")),
+		JSON.stringify({ box: textarea.value, posted: posted.map((m) => m.type) }));
+
+	hostMessage({ type: "editorText", text: "edit the retry path" });
+	await new Promise((resolve) => setTimeout(resolve, 350));
+	check("a host editor edit persists into the sticky draft",
+		posted.some((m) => m.type === "draftChanged" && m.text === "edit the retry path"),
+		JSON.stringify(posted.map((m) => ({ type: m.type, text: m.text }))));
+
+	// The first Enter accepts the open row and the persist happens with the
+	// completed text, not the half-typed query.
+	posted.length = 0;
+	textarea.value = "";
+	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+	textarea.value = "/compact";
+	textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+	textarea.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+	await new Promise((resolve) => setTimeout(resolve, 350));
+	check("an accepted autocomplete persists into the sticky draft",
+		posted.some((m) => m.type === "draftChanged" && m.text === "/compact "),
+		JSON.stringify({ box: textarea.value, posted: posted.map((m) => ({ type: m.type, text: m.text })) }));
+	textarea.value = "";
+	textarea.dispatchEvent(new window.Event("input", { bubbles: true }));
+}
+
 // --- paste image on a text-only model shows a composer hint ---
 // The view's catalog can lag the agent's, so the verdict waits for a fresh one.
 hostMessage({ type: "status", status: { ...baseStatus, modelProvider: "chutes", modelId: "glm", modelLabel: "chutes/glm" } });
